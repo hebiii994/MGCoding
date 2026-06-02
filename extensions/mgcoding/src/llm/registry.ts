@@ -5,14 +5,17 @@
 import * as vscode from 'vscode';
 import { ClaudeProvider } from './claudeProvider';
 import { OllamaProvider } from './ollamaProvider';
+import { OpenAIProvider } from './openaiProvider';
 import { LLMProvider } from './types';
 
 const SECRET_CLAUDE_KEY = 'mgcoding.claude.apiKey';
+const SECRET_OPENAI_KEY = 'mgcoding.openai.apiKey';
 
 export class ProviderRegistry implements vscode.Disposable {
 
 	private readonly claude: ClaudeProvider;
 	private readonly ollama: OllamaProvider;
+	private readonly openai: OpenAIProvider;
 	private readonly statusBar: vscode.StatusBarItem;
 	private readonly disposables: vscode.Disposable[] = [];
 
@@ -34,6 +37,16 @@ export class ProviderRegistry implements vscode.Disposable {
 				model: c.get<string>('ollama.model', 'qwen2.5-coder:14b')
 			};
 		});
+		this.openai = new OpenAIProvider(
+			() => Promise.resolve(this.context.secrets.get(SECRET_OPENAI_KEY)),
+			() => {
+				const c = vscode.workspace.getConfiguration('mgcoding');
+				return {
+					endpoint: c.get<string>('openai.endpoint', 'http://localhost:1234/v1'),
+					model: c.get<string>('openai.model', 'local-model')
+				};
+			}
+		);
 
 		this.statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
 		this.statusBar.command = 'mgcoding.switchProvider';
@@ -48,13 +61,44 @@ export class ProviderRegistry implements vscode.Disposable {
 		}));
 	}
 
+	private byId(id: string): LLMProvider {
+		return id === 'claude' ? this.claude : id === 'openai' ? this.openai : this.ollama;
+	}
+
 	current(): LLMProvider {
-		const id = vscode.workspace.getConfiguration('mgcoding').get<string>('provider', 'ollama');
-		return id === 'claude' ? this.claude : this.ollama;
+		return this.byId(vscode.workspace.getConfiguration('mgcoding').get<string>('provider', 'ollama'));
+	}
+
+	/** Sceglie il provider per una richiesta: se autoRoute è attivo, instrada per complessità. */
+	pickProvider(hint?: string): LLMProvider {
+		const c = vscode.workspace.getConfiguration('mgcoding');
+		if (!c.get<boolean>('autoRoute', false)) {
+			return this.current();
+		}
+		const heavy = /refactor|architett|design|implementa|\bspec\b|multipl|test|debug|ottimizz|migrazion|intero|tutti i file|codebase|refactoring/i;
+		const isHeavy = !!hint && (hint.length > 600 || heavy.test(hint));
+		return this.byId(isHeavy ? c.get<string>('route.heavy', 'claude') : c.get<string>('route.light', 'ollama'));
 	}
 
 	listOllamaModels(): Promise<string[]> {
 		return this.ollama.listModels();
+	}
+
+	listOpenAIModels(): Promise<string[]> {
+		return this.openai.listModels();
+	}
+
+	async setOpenAIKey(): Promise<void> {
+		const key = await vscode.window.showInputBox({
+			prompt: 'API key per l\'endpoint OpenAI-compatibile (lascia vuoto per locale senza chiave)',
+			password: true,
+			ignoreFocusOut: true
+		});
+		if (key !== undefined) {
+			await this.context.secrets.store(SECRET_OPENAI_KEY, key.trim());
+			vscode.window.showInformationMessage('API key OpenAI-compat salvata.');
+			this.updateStatusBar();
+		}
 	}
 
 	private updateStatusBar(): void {
@@ -67,7 +111,8 @@ export class ProviderRegistry implements vscode.Disposable {
 		const picked = await vscode.window.showQuickPick(
 			[
 				{ label: 'Ollama (locale)', id: 'ollama' },
-				{ label: 'Claude (Anthropic)', id: 'claude' }
+				{ label: 'Claude (Anthropic)', id: 'claude' },
+				{ label: 'OpenAI-compatibile (LM Studio, OpenRouter…)', id: 'openai' }
 			],
 			{ placeHolder: 'Seleziona il provider LLM' }
 		);

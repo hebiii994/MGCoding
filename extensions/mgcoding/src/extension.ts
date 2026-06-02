@@ -90,6 +90,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(
 		vscode.commands.registerCommand('mgcoding.switchProvider', () => registry.switchProvider()),
 		vscode.commands.registerCommand('mgcoding.setApiKey', () => registry.setApiKey()),
+		vscode.commands.registerCommand('mgcoding.setOpenAIKey', () => registry.setOpenAIKey()),
 		vscode.commands.registerCommand('mgcoding.openChat', () => vscode.commands.executeCommand('mgcoding.chat.focus')),
 		vscode.commands.registerCommand('mgcoding.runAgentTask', async () => {
 			const task = await vscode.window.showInputBox({ prompt: 'Descrivi il task per l\'agente MGCoding', ignoreFocusOut: true });

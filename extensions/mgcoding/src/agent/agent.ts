@@ -4,7 +4,7 @@
 
 import * as vscode from 'vscode';
 import { ProviderRegistry } from '../llm/registry';
-import { ChatMessage } from '../llm/types';
+import { ChatMessage, LLMProvider } from '../llm/types';
 import { buildSteeringContext } from '../steering/steering';
 
 const BASE_SYSTEM = `Sei MGCoding, un assistente di sviluppo agentico integrato nell'IDE, in stile spec-driven (come Kiro).
@@ -72,9 +72,10 @@ export async function streamChat(
 	messages: ChatMessage[],
 	onDelta: (text: string) => void,
 	signal?: AbortSignal,
-	systemExtra?: string
+	systemExtra?: string,
+	providerOverride?: LLMProvider
 ): Promise<string> {
-	const provider = registry.current();
+	const provider = providerOverride ?? registry.current();
 	const system = await buildSystemPrompt(systemExtra);
 	let full = '';
 	for await (const delta of provider.stream({ system, messages, signal })) {
@@ -89,9 +90,10 @@ export async function complete(
 	registry: ProviderRegistry,
 	messages: ChatMessage[],
 	systemExtra?: string,
-	signal?: AbortSignal
+	signal?: AbortSignal,
+	providerOverride?: LLMProvider
 ): Promise<string> {
-	const provider = registry.current();
+	const provider = providerOverride ?? registry.current();
 	const system = await buildSystemPrompt(systemExtra);
 	let full = '';
 	for await (const delta of provider.stream({ system, messages, signal })) {

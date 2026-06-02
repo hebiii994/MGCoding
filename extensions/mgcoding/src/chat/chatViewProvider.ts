@@ -67,6 +67,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 						if (msg.id.startsWith('ollama:')) {
 							await cfg.update('ollama.model', msg.id.slice('ollama:'.length), vscode.ConfigurationTarget.Global);
 							await cfg.update('provider', 'ollama', vscode.ConfigurationTarget.Global);
+						} else if (msg.id.startsWith('openai:')) {
+							await cfg.update('openai.model', msg.id.slice('openai:'.length), vscode.ConfigurationTarget.Global);
+							await cfg.update('provider', 'openai', vscode.ConfigurationTarget.Global);
 						} else {
 							await cfg.update('provider', 'claude', vscode.ConfigurationTarget.Global);
 						}
@@ -99,6 +102,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		const ollamaModel = c.get<string>('ollama.model', 'qwen2.5-coder:14b');
 		const provider = c.get<string>('provider', 'ollama');
 
+		const openaiModel = c.get<string>('openai.model', 'local-model');
+
 		const options: ProviderOption[] = [{ id: 'claude', label: `Claude (API) · ${claudeModel}` }];
 		const installed = await this.registry.listOllamaModels();
 		const models = installed.length ? installed : [ollamaModel];
@@ -108,11 +113,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		for (const m of models) {
 			options.push({ id: `ollama:${m}`, label: `Ollama · ${m}` });
 		}
+		const oai = await this.registry.listOpenAIModels();
+		const oaiModels = oai.length ? oai : [openaiModel];
+		if (!oaiModels.includes(openaiModel)) {
+			oaiModels.unshift(openaiModel);
+		}
+		for (const m of oaiModels) {
+			options.push({ id: `openai:${m}`, label: `OpenAI-compat · ${m}` });
+		}
 
-		return {
-			current: provider === 'claude' ? 'claude' : `ollama:${ollamaModel}`,
-			options
-		};
+		const current = provider === 'claude' ? 'claude'
+			: provider === 'openai' ? `openai:${openaiModel}`
+				: `ollama:${ollamaModel}`;
+		return { current, options };
 	}
 
 	private async sendState(): Promise<void> {

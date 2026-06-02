@@ -79,14 +79,15 @@ export async function runAgent(
 	cb: AgentCallbacks,
 	signal?: AbortSignal
 ): Promise<void> {
-	const provider = registry.current();
-	// Percorso preferito: tool-use NATIVO se il provider lo supporta (Claude sempre; Ollama se abilitato).
+	const hint = [...messages].reverse().find(m => m.role === 'user')?.content;
+	const provider = registry.pickProvider(hint);
+	// Percorso preferito: tool-use NATIVO se il provider lo supporta (Claude/OpenAI sempre; Ollama se abilitato).
 	const ollamaNative = provider.id !== 'ollama'
 		|| vscode.workspace.getConfiguration('mgcoding').get<boolean>('ollama.nativeTools', true);
 	if (typeof provider.streamAgent === 'function' && ollamaNative) {
 		return runNativeAgent(provider, messages, cb, signal);
 	}
-	return runJsonAgent(registry, messages, cb, signal);
+	return runJsonAgent(registry, provider, messages, cb, signal);
 }
 
 /**
@@ -95,6 +96,7 @@ export async function runAgent(
  */
 async function runJsonAgent(
 	registry: ProviderRegistry,
+	provider: LLMProvider,
 	messages: ChatMessage[],
 	cb: AgentCallbacks,
 	signal?: AbortSignal
@@ -110,9 +112,9 @@ async function runJsonAgent(
 		let reply: string;
 		if (streaming) {
 			cb.onStreamStart?.();
-			reply = await streamChat(registry, messages, d => cb.onStreamDelta!(d), signal, sys);
+			reply = await streamChat(registry, messages, d => cb.onStreamDelta!(d), signal, sys, provider);
 		} else {
-			reply = await complete(registry, messages, sys, signal);
+			reply = await complete(registry, messages, sys, signal, provider);
 		}
 
 		const call = parseToolCall(reply);

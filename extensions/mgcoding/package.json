@@ -93,6 +93,10 @@
 				"title": "MGCoding: Imposta API key Claude"
 			},
 			{
+				"command": "mgcoding.setOpenAIKey",
+				"title": "MGCoding: Imposta API key OpenAI-compat"
+			},
+			{
 				"command": "mgcoding.newSpec",
 				"title": "Nuova Spec",
 				"icon": "$(add)"
@@ -238,14 +242,26 @@
 					"type": "string",
 					"enum": [
 						"claude",
-						"ollama"
+						"ollama",
+						"openai"
 					],
 					"enumDescriptions": [
 						"Anthropic Claude (richiede API key)",
-						"LLM locale via Ollama"
+						"LLM locale via Ollama",
+						"Endpoint OpenAI-compatibile (LM Studio, OpenRouter, llama.cpp)"
 					],
 					"default": "ollama",
 					"description": "Provider LLM attivo."
+				},
+				"mgcoding.openai.endpoint": {
+					"type": "string",
+					"default": "http://localhost:1234/v1",
+					"description": "Endpoint OpenAI-compatibile (es. LM Studio http://localhost:1234/v1, OpenRouter https://openrouter.ai/api/v1)."
+				},
+				"mgcoding.openai.model": {
+					"type": "string",
+					"default": "local-model",
+					"description": "Modello per l'endpoint OpenAI-compatibile."
 				},
 				"mgcoding.claude.model": {
 					"type": "string",
@@ -276,6 +292,31 @@
 					"type": "boolean",
 					"default": false,
 					"description": "Se attivo, l'agente esegue i comandi shell e applica le modifiche ai file senza chiedere conferma (autopilot)."
+				},
+				"mgcoding.autoRoute": {
+					"type": "boolean",
+					"default": false,
+					"description": "Instrada automaticamente i task: leggeri al provider 'light', pesanti al provider 'heavy'."
+				},
+				"mgcoding.route.heavy": {
+					"type": "string",
+					"enum": [
+						"claude",
+						"openai",
+						"ollama"
+					],
+					"default": "claude",
+					"description": "Provider per i task pesanti (quando autoRoute è attivo)."
+				},
+				"mgcoding.route.light": {
+					"type": "string",
+					"enum": [
+						"claude",
+						"openai",
+						"ollama"
+					],
+					"default": "ollama",
+					"description": "Provider per i task leggeri (quando autoRoute è attivo)."
 				},
 				"mgcoding.diffApproval": {
 					"type": "boolean",
