@@ -27,8 +27,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 
 	constructor(
 		private readonly extensionUri: vscode.Uri,
-		private readonly registry: ProviderRegistry
+		private readonly registry: ProviderRegistry,
+		private readonly memento: vscode.Memento
 	) {
+		this.history = this.memento.get<ChatMessage[]>('mgcoding.chatHistory', []);
 		this.disposables.push(vscode.workspace.onDidChangeConfiguration(e => {
 			if (e.affectsConfiguration('mgcoding')) {
 				void this.sendState();
@@ -45,6 +47,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			switch (msg.type) {
 				case 'ready':
 					await this.sendState();
+					if (this.history.length) {
+						this.post({ type: 'restore', messages: this.history });
+					}
+					break;
+				case 'newChat':
+					this.history = [];
+					await this.memento.update('mgcoding.chatHistory', []);
+					this.post({ type: 'cleared' });
 					break;
 				case 'send':
 					if (msg.text) {
@@ -113,8 +123,47 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		this.view?.webview.postMessage(message);
 	}
 
+	/** Risolve i riferimenti @percorso allegando il contenuto dei file citati. */
+	private async augmentWithMentions(text: string): Promise<string> {
+		const mentions = text.match(/@([^\s]+)/g);
+		if (!mentions) {
+			return text;
+		}
+		const folders = vscode.workspace.workspaceFolders;
+		if (!folders?.length) {
+			return text;
+		}
+		const dec = new TextDecoder();
+		const blocks: string[] = [];
+		const seen = new Set<string>();
+		for (const mention of mentions.slice(0, 5)) {
+			const p = mention.slice(1).replace(/[.,;:)]+$/, '');
+			if (seen.has(p)) {
+				continue;
+			}
+			seen.add(p);
+			let uri = vscode.Uri.joinPath(folders[0].uri, p);
+			try {
+				await vscode.workspace.fs.stat(uri);
+			} catch {
+				const found = await vscode.workspace.findFiles(`**/${p}`, '**/{node_modules,.git,out,Library}/**', 1);
+				if (!found.length) {
+					continue;
+				}
+				uri = found[0];
+			}
+			try {
+				const content = dec.decode(await vscode.workspace.fs.readFile(uri)).slice(0, 8000);
+				blocks.push(`Contenuto di ${vscode.workspace.asRelativePath(uri, false)}:\n\`\`\`\n${content}\n\`\`\``);
+			} catch {
+				// ignora
+			}
+		}
+		return blocks.length ? `${text}\n\n${blocks.join('\n\n')}` : text;
+	}
+
 	private async handleSend(text: string): Promise<void> {
-		this.history.push({ role: 'user', content: text });
+		this.history.push({ role: 'user', content: await this.augmentWithMentions(text) });
 		this.post({ type: 'busy', value: true });
 		this.abort = new AbortController();
 		try {
@@ -132,6 +181,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		} finally {
 			this.abort = undefined;
 			this.post({ type: 'busy', value: false });
+			await this.memento.update('mgcoding.chatHistory', this.history.slice(-100));
 		}
 	}
 
@@ -189,6 +239,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		<textarea id="input" rows="2" placeholder="Scrivi un messaggio…  (Invio = invia · Shift+Invio = a capo)"></textarea>
 		<div id="row">
 			<select id="model" title="Modello / provider"></select>
+			<button id="newchat" title="Nuova conversazione">＋</button>
 			<button id="stop" title="Interrompi">⊘ Stop</button>
 			<button id="send">Invia</button>
 		</div>
@@ -200,6 +251,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	var sendBtn = document.getElementById('send');
 	var model = document.getElementById('model');
 	var stopBtn = document.getElementById('stop');
+	var newchatBtn = document.getElementById('newchat');
 	var emptied = false;
 	var current = null;        // bolla assistant in streaming
 	var lastToolResult = null;
@@ -308,6 +360,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	}
 	sendBtn.addEventListener('click', send);
 	stopBtn.addEventListener('click', function () { vscode.postMessage({ type: 'stop' }); });
+	newchatBtn.addEventListener('click', function () { vscode.postMessage({ type: 'newChat' }); });
 	input.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
 	model.addEventListener('change', function () { vscode.postMessage({ type: 'setProvider', id: model.value }); });
 
@@ -332,6 +385,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		else if (m.type === 'toolResult') { if (lastToolResult) { lastToolResult.textContent = m.text; log.scrollTop = log.scrollHeight; } }
 		else if (m.type === 'error') { addStatic('error', '⚠ ' + m.text); }
 		else if (m.type === 'busy') { document.body.classList.toggle('busy', m.value); }
+		else if (m.type === 'restore') {
+			for (var k = 0; k < m.messages.length; k++) {
+				var msg = m.messages[k];
+				addStatic(msg.role === 'assistant' ? 'assistant' : 'user', msg.content);
+			}
+		}
+		else if (m.type === 'cleared') {
+			log.innerHTML = '<div class="empty">💬 Nuova conversazione. Chiedi qualcosa o descrivi un task.</div>';
+			emptied = false;
+		}
 	});
 
 	vscode.postMessage({ type: 'ready' });

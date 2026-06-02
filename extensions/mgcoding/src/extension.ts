@@ -24,7 +24,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	registerDiffApproval(context);
 
 	// Chat (barra laterale secondaria, a destra)
-	const chat = new ChatViewProvider(context.extensionUri, registry);
+	const chat = new ChatViewProvider(context.extensionUri, registry, context.workspaceState);
 	context.subscriptions.push(chat);
 	context.subscriptions.push(
 		vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, chat, {

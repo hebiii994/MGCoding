@@ -53,6 +53,12 @@ export const TOOL_SPECS: ToolSpec[] = [
 		inputSchema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] }
 	},
 	{
+		name: 'apply_patch',
+		description: 'Modifica mirata di un file: sostituisce old_string (che deve esistere ed essere univoco) con new_string. Preferiscilo a write_file per file grandi.',
+		args: '{"path": "src/x.ts", "old_string": "...", "new_string": "..."}',
+		inputSchema: { type: 'object', properties: { path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' }, replaceAll: { type: 'boolean' } }, required: ['path', 'old_string', 'new_string'] }
+	},
+	{
 		name: 'find_files',
 		description: 'Trova file per pattern glob, opzionalmente sotto una cartella "path". Ritorna i percorsi relativi.',
 		args: '{"pattern": "**/*.ts", "path": "src", "maxResults": 50}',
@@ -154,6 +160,37 @@ export async function executeTool(call: ToolCall): Promise<string> {
 				} catch (err: any) {
 					return `[errore comando] ${err?.message ?? String(err)}\n${err?.stdout ?? ''}\n${err?.stderr ?? ''}`.trim();
 				}
+			}
+			case 'apply_patch': {
+				const rel = String(call.args.path);
+				const uri = resolve(rel);
+				const oldStr = String(call.args.old_string ?? '');
+				const newStr = String(call.args.new_string ?? '');
+				if (!oldStr) {
+					return 'Errore: old_string vuoto.';
+				}
+				let content: string;
+				try {
+					content = DEC.decode(await vscode.workspace.fs.readFile(uri));
+				} catch {
+					return `Errore: impossibile leggere ${rel}.`;
+				}
+				const occurrences = content.split(oldStr).length - 1;
+				if (occurrences === 0) {
+					return `Errore: old_string non trovato in ${rel}.`;
+				}
+				const replaceAll = call.args.replaceAll === true;
+				if (occurrences > 1 && !replaceAll) {
+					return `Errore: old_string presente ${occurrences} volte in ${rel}; rendilo univoco o usa replaceAll:true.`;
+				}
+				const updated = replaceAll ? content.split(oldStr).join(newStr) : content.replace(oldStr, newStr);
+				const cfg = vscode.workspace.getConfiguration('mgcoding');
+				const needApproval = cfg.get<boolean>('diffApproval', true) && !cfg.get<boolean>('autoApprove', false);
+				if (needApproval && !(await confirmWrite(rel, content, updated))) {
+					return `Modifica a ${rel} scartata dall'utente.`;
+				}
+				await vscode.workspace.fs.writeFile(uri, ENC.encode(updated));
+				return `OK: applicata patch a ${rel} (${replaceAll ? occurrences : 1} sostituzione/i)`;
 			}
 			case 'find_files': {
 				const pattern = String(call.args.pattern ?? '**/*');
