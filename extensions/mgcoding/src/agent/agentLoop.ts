@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 import { ProviderRegistry } from '../llm/registry';
 import { AnthropicBlock, AnthropicMessage, ChatMessage, LLMProvider } from '../llm/types';
 import { getMcpManager } from '../mcp/mcpClient';
+import { parseToolCall, TOOL_RE } from '../util/parsing';
 import { buildSystemPrompt, complete, streamChat } from './agent';
 import { anthropicBuiltinTools, executeTool, ToolCall, TOOL_SPECS } from './tools';
 
@@ -26,33 +27,6 @@ Tool disponibili:
 ${list}
 
 Usa percorsi relativi alla radice del workspace. Sii prudente con run_command.`;
-}
-
-const TOOL_RE = /```(?:mg-tool|json)?\s*([\s\S]*?)```/;
-
-/** Estrae una tool-call accettando sia {tool,args} (mg-tool) sia {name,arguments} (stile function-call). */
-function parseToolCall(text: string): ToolCall | undefined {
-	let jsonStr: string | undefined;
-	const m = TOOL_RE.exec(text);
-	if (m) {
-		jsonStr = m[1].trim();
-	} else if (text.trim().startsWith('{') && text.trim().endsWith('}')) {
-		jsonStr = text.trim();
-	}
-	if (!jsonStr) {
-		return undefined;
-	}
-	try {
-		const obj = JSON.parse(jsonStr);
-		const name = obj.tool ?? obj.name;
-		const args = obj.args ?? obj.arguments ?? {};
-		if (typeof name === 'string') {
-			return { tool: name, args };
-		}
-	} catch {
-		// JSON malformato: trattato come risposta finale
-	}
-	return undefined;
 }
 
 export interface AgentCallbacks {

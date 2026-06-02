@@ -8,6 +8,7 @@ import * as vscode from 'vscode';
 import { getMcpManager } from '../mcp/mcpClient';
 import { AnthropicToolDef } from '../llm/types';
 import { confirmWrite } from '../edit/diffApproval';
+import { scopedGlob } from '../util/parsing';
 
 const execAsync = promisify(exec);
 const ENC = new TextEncoder();
@@ -73,15 +74,6 @@ export const TOOL_SPECS: ToolSpec[] = [
 ];
 
 const EXCLUDE = '**/{node_modules,.git,out,out-build,out-vscode,.build,dist,.vscode-test,Library,Temp,Logs,obj,bin}/**';
-
-/** Combina una cartella base opzionale con un glob. */
-function scopedGlob(pattern: string, base?: unknown): string {
-	const b = base ? String(base).replace(/\\/g, '/').replace(/^\.?\//, '').replace(/\/$/, '') : '';
-	if (!b) {
-		return pattern;
-	}
-	return pattern.startsWith('**') ? `${b}/${pattern}` : `${b}/**/${pattern}`;
-}
 
 /** Tool built-in in formato Anthropic (tool-use nativo). */
 export function anthropicBuiltinTools(): AnthropicToolDef[] {

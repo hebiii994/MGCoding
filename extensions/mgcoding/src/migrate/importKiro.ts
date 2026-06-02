@@ -5,6 +5,7 @@
 
 import * as vscode from 'vscode';
 import { exists } from '../util/paths';
+import { kiroHookToInternal } from '../util/parsing';
 
 const ENC = new TextEncoder();
 const DEC = new TextDecoder();
@@ -31,29 +32,6 @@ async function copyTree(src: vscode.Uri, dst: vscode.Uri): Promise<number> {
 	return count;
 }
 
-function kiroHookToOurs(raw: any): object | undefined {
-	if (!raw?.name) {
-		return undefined;
-	}
-	const whenType = raw.when?.type ?? '';
-	const event =
-		whenType === 'fileCreated' ? 'onCreate' :
-			whenType === 'fileDeleted' ? 'onDelete' :
-				whenType === 'userTriggered' || whenType === 'manual' ? 'manual' :
-					'onSave';
-	const action = raw.then?.type === 'runCommand' ? 'command' : 'ask';
-	return {
-		name: raw.name,
-		description: raw.description,
-		event,
-		filePattern: (raw.when?.patterns ?? [])[0],
-		action,
-		prompt: raw.then?.prompt,
-		command: raw.then?.command,
-		enabled: raw.enabled !== false
-	};
-}
-
 async function importHooks(kiroHooks: vscode.Uri, mgHooks: vscode.Uri): Promise<number> {
 	let entries: [string, vscode.FileType][];
 	try {
@@ -69,7 +47,7 @@ async function importHooks(kiroHooks: vscode.Uri, mgHooks: vscode.Uri): Promise<
 		}
 		try {
 			const raw = JSON.parse(DEC.decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(kiroHooks, name))));
-			const converted = (raw?.when || raw?.then) ? kiroHookToOurs(raw) : raw;
+			const converted = (raw?.when || raw?.then) ? kiroHookToInternal(raw) : raw;
 			if (!converted) {
 				continue;
 			}

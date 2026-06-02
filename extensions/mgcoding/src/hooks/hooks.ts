@@ -7,6 +7,7 @@ import * as vscode from 'vscode';
 import { complete } from '../agent/agent';
 import { ProviderRegistry } from '../llm/registry';
 import { resolveFeatureDirs } from '../util/paths';
+import { kiroHookToInternal } from '../util/parsing';
 
 type HookEvent = 'onSave' | 'onCreate' | 'onDelete' | 'manual';
 type HookAction = 'ask' | 'command';
@@ -43,29 +44,8 @@ function globToRegExp(glob: string): RegExp {
 
 /** Converte un hook in formato Kiro (.kiro.hook: when/then) nel nostro Hook. */
 function fromKiroHook(raw: any, uri: vscode.Uri): Hook | undefined {
-	if (!raw?.name) {
-		return undefined;
-	}
-	const whenType = raw.when?.type ?? '';
-	const event: HookEvent =
-		whenType === 'fileCreated' ? 'onCreate' :
-			whenType === 'fileDeleted' ? 'onDelete' :
-				whenType === 'userTriggered' || whenType === 'manual' ? 'manual' :
-					'onSave';
-	const patterns: string[] = raw.when?.patterns ?? [];
-	const thenType = raw.then?.type ?? 'askAgent';
-	const action: HookAction = thenType === 'runCommand' ? 'command' : 'ask';
-	return {
-		name: raw.name,
-		description: raw.description,
-		event,
-		filePattern: patterns[0],
-		action,
-		prompt: raw.then?.prompt,
-		command: raw.then?.command,
-		enabled: raw.enabled !== false,
-		uri
-	};
+	const internal = kiroHookToInternal(raw);
+	return internal ? { ...internal, uri } : undefined;
 }
 
 export async function loadHooks(): Promise<Hook[]> {
