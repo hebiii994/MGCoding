@@ -50,8 +50,22 @@ export const TOOL_SPECS: ToolSpec[] = [
 		description: 'Esegue un comando shell nella radice del workspace (può richiedere conferma).',
 		args: '{"command": "..."}',
 		inputSchema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] }
+	},
+	{
+		name: 'find_files',
+		description: 'Trova file per pattern glob (es. "**/*.ts"). Ritorna i percorsi relativi.',
+		args: '{"pattern": "**/*.ts", "maxResults": 50}',
+		inputSchema: { type: 'object', properties: { pattern: { type: 'string' }, maxResults: { type: 'number' } }, required: ['pattern'] }
+	},
+	{
+		name: 'search_text',
+		description: 'Cerca testo o regex nei file del workspace. Ritorna righe "file:linea: testo".',
+		args: '{"query": "pattern", "glob": "**/*.ts"}',
+		inputSchema: { type: 'object', properties: { query: { type: 'string' }, glob: { type: 'string' } }, required: ['query'] }
 	}
 ];
+
+const EXCLUDE = '**/{node_modules,.git,out,out-build,out-vscode,.build,dist,.vscode-test}/**';
 
 /** Tool built-in in formato Anthropic (tool-use nativo). */
 export function anthropicBuiltinTools(): AnthropicToolDef[] {
@@ -115,6 +129,50 @@ export async function executeTool(call: ToolCall): Promise<string> {
 				} catch (err: any) {
 					return `[errore comando] ${err?.message ?? String(err)}\n${err?.stdout ?? ''}\n${err?.stderr ?? ''}`.trim();
 				}
+			}
+			case 'find_files': {
+				const pattern = String(call.args.pattern ?? '**/*');
+				const max = Math.min(Number(call.args.maxResults ?? 100), 300);
+				const uris = await vscode.workspace.findFiles(pattern, EXCLUDE, max);
+				return uris.map(u => vscode.workspace.asRelativePath(u, false)).join('\n') || '(nessun file trovato)';
+			}
+			case 'search_text': {
+				const query = String(call.args.query ?? '');
+				if (!query) {
+					return 'Errore: query vuota.';
+				}
+				const glob = String(call.args.glob ?? '**/*');
+				let re: RegExp | undefined;
+				try {
+					re = new RegExp(query, 'i');
+				} catch {
+					re = undefined;
+				}
+				const uris = await vscode.workspace.findFiles(glob, EXCLUDE, 500);
+				const out: string[] = [];
+				for (const u of uris) {
+					if (out.length >= 60) {
+						break;
+					}
+					let text: string;
+					try {
+						const bytes = await vscode.workspace.fs.readFile(u);
+						if (bytes.length > 512 * 1024) {
+							continue;
+						}
+						text = DEC.decode(bytes);
+					} catch {
+						continue;
+					}
+					const lines = text.split('\n');
+					for (let i = 0; i < lines.length && out.length < 60; i++) {
+						const hit = re ? re.test(lines[i]) : lines[i].toLowerCase().includes(query.toLowerCase());
+						if (hit) {
+							out.push(`${vscode.workspace.asRelativePath(u, false)}:${i + 1}: ${lines[i].trim().slice(0, 200)}`);
+						}
+					}
+				}
+				return out.join('\n') || '(nessuna corrispondenza)';
 			}
 			default: {
 				const mcp = getMcpManager();
