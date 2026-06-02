@@ -1,0 +1,10 @@
+{
+	"name": "mgcoding-branding",
+	"private": true,
+	"type": "module",
+	"description": "Generazione asset icona MGCoding da branding/mgcoding-icon.png",
+	"dependencies": {
+		"jimp": "^1.6.0",
+		"png-to-ico": "^2.1.8"
+	}
+}
