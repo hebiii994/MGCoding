@@ -11,6 +11,7 @@ const BASE_SYSTEM = `Sei MGCoding, un assistente di sviluppo agentico integrato 
 
 Principi operativi:
 - Esplora prima di agire: usa find_files, search_text e read_file per capire il codice esistente; non assumere percorsi o API.
+- Se l'utente si riferisce a "questo file", "questa spec" o un nome (es. una cartella in specs), usa il file aperto e i suoi fratelli (requirements.md/design.md/tasks.md) e LEGGILI con read_file. NON dichiarare che un file o una spec "non esiste" senza prima averlo cercato con find_files/read_file.
 - Fai modifiche minime e mirate, coerenti con i pattern, lo stile e le convenzioni del progetto.
 - Rispetta SEMPRE le regole di steering del progetto: hanno la priorità su tutto.
 - Per funzionalità non banali ragiona in fasi: requisiti → design → task → implementazione.
@@ -61,9 +62,34 @@ async function buildProjectContext(): Promise<string> {
 	return `Struttura del progetto (workspace: ${folders[0].name}):\n${lines.join('\n')}`;
 }
 
+/** Contesto del file attualmente aperto (+ file fratelli), così l'agente "vede" cosa stai guardando. */
+async function buildActiveContext(): Promise<string> {
+	const ed = vscode.window.activeTextEditor;
+	if (!ed || ed.document.uri.scheme !== 'file') {
+		return '';
+	}
+	const rel = vscode.workspace.asRelativePath(ed.document.uri, false);
+	const text = ed.document.getText();
+	const parts = [`File attualmente aperto nell'editor: ${rel}\n\`\`\`\n${text.slice(0, 6000)}${text.length > 6000 ? '\n…(troncato)' : ''}\n\`\`\``];
+
+	// Se il file fa parte di una spec (.../specs/<nome>/...), elenca i file fratelli.
+	try {
+		const dir = vscode.Uri.joinPath(ed.document.uri, '..');
+		const entries = await vscode.workspace.fs.readDirectory(dir);
+		const siblings = entries.filter(([, t]) => t === vscode.FileType.File).map(([n]) => n);
+		if (siblings.length > 1) {
+			const dirRel = vscode.workspace.asRelativePath(dir, false);
+			parts.push(`Altri file nella stessa cartella (${dirRel}): ${siblings.join(', ')} — leggili con read_file se servono.`);
+		}
+	} catch {
+		// ignora
+	}
+	return parts.join('\n\n');
+}
+
 export async function buildSystemPrompt(extra?: string): Promise<string> {
-	const [project, steering] = await Promise.all([buildProjectContext(), buildSteeringContext()]);
-	return [BASE_SYSTEM, project, steering, extra].filter(Boolean).join('\n\n');
+	const [project, steering, active] = await Promise.all([buildProjectContext(), buildSteeringContext(), buildActiveContext()]);
+	return [BASE_SYSTEM, project, steering, active, extra].filter(Boolean).join('\n\n');
 }
 
 /** Streaming: invoca onDelta per ogni frammento di testo. */
