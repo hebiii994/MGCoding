@@ -6,6 +6,7 @@
 import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
 import * as vscode from 'vscode';
 import { ToolSpec } from '../agent/tools';
+import { AnthropicToolDef } from '../llm/types';
 
 const DEC = new TextDecoder();
 
@@ -182,11 +183,30 @@ export class McpManager implements vscode.Disposable {
 				specs.push({
 					name: `${conn.name}__${tool.name}`,
 					description: `[MCP:${conn.name}] ${tool.description ?? ''}`.trim(),
-					args: tool.inputSchema ? JSON.stringify(tool.inputSchema).slice(0, 300) : '{}'
+					args: tool.inputSchema ? JSON.stringify(tool.inputSchema).slice(0, 300) : '{}',
+					inputSchema: (tool.inputSchema && typeof tool.inputSchema === 'object') ? tool.inputSchema as object : { type: 'object', properties: {} }
 				});
 			}
 		}
 		return specs;
+	}
+
+	/** Tool MCP in formato Anthropic (tool-use nativo). */
+	anthropicTools(): AnthropicToolDef[] {
+		const tools: AnthropicToolDef[] = [];
+		for (const conn of this.connections) {
+			for (const tool of conn.tools) {
+				const schema = (tool.inputSchema && typeof tool.inputSchema === 'object')
+					? tool.inputSchema as object
+					: { type: 'object', properties: {} };
+				tools.push({
+					name: `${conn.name}__${tool.name}`,
+					description: `[MCP:${conn.name}] ${tool.description ?? ''}`.trim(),
+					input_schema: schema
+				});
+			}
+		}
+		return tools;
 	}
 
 	hasTool(name: string): boolean {

@@ -3,10 +3,10 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { ProviderRegistry } from '../llm/registry';
-import { ChatMessage } from '../llm/types';
+import { AnthropicBlock, AnthropicMessage, ChatMessage, LLMProvider } from '../llm/types';
 import { getMcpManager } from '../mcp/mcpClient';
-import { complete, streamChat } from './agent';
-import { executeTool, ToolCall, TOOL_SPECS } from './tools';
+import { buildSystemPrompt, complete, streamChat } from './agent';
+import { anthropicBuiltinTools, executeTool, ToolCall, TOOL_SPECS } from './tools';
 
 const MAX_ITERATIONS = 12;
 
@@ -69,6 +69,24 @@ export async function runAgent(
 	cb: AgentCallbacks,
 	signal?: AbortSignal
 ): Promise<void> {
+	const provider = registry.current();
+	// Percorso preferito: tool-use NATIVO se il provider lo supporta (Claude).
+	if (typeof provider.streamAgent === 'function') {
+		return runNativeAgent(provider, messages, cb, signal);
+	}
+	return runJsonAgent(registry, messages, cb, signal);
+}
+
+/**
+ * Loop agentico con protocollo tool testuale (mg-tool), usato dai modelli senza tool-use
+ * nativo (es. Ollama).
+ */
+async function runJsonAgent(
+	registry: ProviderRegistry,
+	messages: ChatMessage[],
+	cb: AgentCallbacks,
+	signal?: AbortSignal
+): Promise<void> {
 	const sys = toolSystemPrompt();
 	const streaming = typeof cb.onStreamDelta === 'function';
 
@@ -112,6 +130,135 @@ export async function runAgent(
 		const result = await executeTool(call);
 		cb.onToolResult(result);
 		messages.push({ role: 'user', content: `Risultato del tool ${call.tool}:\n${result}` });
+	}
+
+	cb.onAssistantText('_(raggiunto il limite massimo di passi dell\'agente)_');
+}
+
+// --- Percorso tool-use NATIVO (Claude) ---
+
+interface AccBlock {
+	type: 'text' | 'tool_use';
+	text?: string;
+	id?: string;
+	name?: string;
+	json?: string;
+}
+
+/**
+ * Loop agentico con tool-use NATIVO (function calling Anthropic): più affidabile,
+ * stile Kiro. I tool sono passati come schema; il modello risponde con blocchi tool_use
+ * e noi rispondiamo con tool_result.
+ */
+async function runNativeAgent(
+	provider: LLMProvider,
+	history: ChatMessage[],
+	cb: AgentCallbacks,
+	signal?: AbortSignal
+): Promise<void> {
+	const system = await buildSystemPrompt();
+	const tools = [...anthropicBuiltinTools(), ...(getMcpManager()?.anthropicTools() ?? [])];
+	const streaming = typeof cb.onStreamDelta === 'function';
+
+	// Costruisce i messaggi Anthropic dallo storico testuale.
+	const messages: AnthropicMessage[] = history.map(m => ({
+		role: m.role === 'assistant' ? 'assistant' : 'user',
+		content: [{ type: 'text', text: m.content }]
+	}));
+
+	for (let i = 0; i < MAX_ITERATIONS; i++) {
+		if (signal?.aborted) {
+			return;
+		}
+
+		if (streaming) {
+			cb.onStreamStart?.();
+		}
+
+		const blocks = new Map<number, AccBlock>();
+		let textAcc = '';
+		let stopReason: string | undefined;
+
+		for await (const evt of provider.streamAgent!({ system, messages, tools, signal })) {
+			if (evt.type === 'content_block_start' && evt.content_block && evt.index !== undefined) {
+				if (evt.content_block.type === 'tool_use') {
+					blocks.set(evt.index, { type: 'tool_use', id: evt.content_block.id, name: evt.content_block.name, json: '' });
+				} else if (evt.content_block.type === 'text') {
+					blocks.set(evt.index, { type: 'text', text: '' });
+				}
+			} else if (evt.type === 'content_block_delta' && evt.delta && evt.index !== undefined) {
+				const b = blocks.get(evt.index);
+				if (evt.delta.type === 'text_delta' && evt.delta.text) {
+					textAcc += evt.delta.text;
+					if (streaming) {
+						cb.onStreamDelta!(evt.delta.text);
+					}
+					if (b && b.type === 'text') {
+						b.text = (b.text ?? '') + evt.delta.text;
+					}
+				} else if (evt.delta.type === 'input_json_delta' && evt.delta.partial_json && b && b.type === 'tool_use') {
+					b.json = (b.json ?? '') + evt.delta.partial_json;
+				}
+			} else if (evt.type === 'message_delta' && evt.delta?.stop_reason) {
+				stopReason = evt.delta.stop_reason;
+			} else if (evt.type === 'error') {
+				throw new Error('Errore nello stream Anthropic.');
+			}
+		}
+
+		// Ricostruisce i blocchi della risposta in ordine di indice.
+		const assistantContent: AnthropicBlock[] = [];
+		for (const [, b] of [...blocks.entries()].sort((a, c) => a[0] - c[0])) {
+			if (b.type === 'text' && b.text) {
+				assistantContent.push({ type: 'text', text: b.text });
+			} else if (b.type === 'tool_use' && b.id && b.name) {
+				let input: Record<string, unknown> = {};
+				try {
+					input = b.json ? JSON.parse(b.json) : {};
+				} catch {
+					input = {};
+				}
+				assistantContent.push({ type: 'tool_use', id: b.id, name: b.name, input });
+			}
+		}
+		if (assistantContent.length === 0) {
+			assistantContent.push({ type: 'text', text: textAcc });
+		}
+		messages.push({ role: 'assistant', content: assistantContent });
+
+		const toolUses = assistantContent.filter((b): b is Extract<AnthropicBlock, { type: 'tool_use' }> => b.type === 'tool_use');
+
+		if (stopReason !== 'tool_use' || toolUses.length === 0) {
+			// Risposta finale.
+			if (streaming) {
+				cb.onStreamEnd?.();
+			} else {
+				cb.onAssistantText(textAcc);
+			}
+			history.push({ role: 'assistant', content: textAcc });
+			return;
+		}
+
+		// Chiude la bolla di testo (vuota -> annulla; con testo -> mantiene).
+		if (streaming) {
+			if (textAcc.trim()) {
+				cb.onStreamEnd?.();
+			} else {
+				cb.onStreamCancel?.();
+			}
+		} else if (textAcc.trim()) {
+			cb.onAssistantText(textAcc);
+		}
+
+		// Esegue i tool e prepara i tool_result.
+		const resultBlocks: AnthropicBlock[] = [];
+		for (const tu of toolUses) {
+			cb.onToolStart({ tool: tu.name, args: tu.input });
+			const result = await executeTool({ tool: tu.name, args: tu.input });
+			cb.onToolResult(result);
+			resultBlocks.push({ type: 'tool_result', tool_use_id: tu.id, content: result });
+		}
+		messages.push({ role: 'user', content: resultBlocks });
 	}
 
 	cb.onAssistantText('_(raggiunto il limite massimo di passi dell\'agente)_');

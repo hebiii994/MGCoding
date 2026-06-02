@@ -6,6 +6,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as vscode from 'vscode';
 import { getMcpManager } from '../mcp/mcpClient';
+import { AnthropicToolDef } from '../llm/types';
 
 const execAsync = promisify(exec);
 const ENC = new TextEncoder();
@@ -19,15 +20,43 @@ export interface ToolCall {
 export interface ToolSpec {
 	name: string;
 	description: string;
+	/** Esempio di args per il prompt testuale (Ollama). */
 	args: string;
+	/** JSON Schema dei parametri (tool-use nativo Claude). */
+	inputSchema: object;
 }
 
 export const TOOL_SPECS: ToolSpec[] = [
-	{ name: 'read_file', description: 'Legge il contenuto di un file.', args: '{"path": "percorso/relativo"}' },
-	{ name: 'write_file', description: 'Crea o sovrascrive un file con il contenuto dato.', args: '{"path": "percorso/relativo", "content": "..."}' },
-	{ name: 'list_dir', description: 'Elenca file e cartelle in una directory.', args: '{"path": "percorso/relativo"}' },
-	{ name: 'run_command', description: 'Esegue un comando shell nella radice del workspace (richiede conferma).', args: '{"command": "..."}' }
+	{
+		name: 'read_file',
+		description: 'Legge il contenuto di un file (percorso relativo alla radice del workspace).',
+		args: '{"path": "percorso/relativo"}',
+		inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'Percorso relativo del file' } }, required: ['path'] }
+	},
+	{
+		name: 'write_file',
+		description: 'Crea o sovrascrive un file con il contenuto dato.',
+		args: '{"path": "percorso/relativo", "content": "..."}',
+		inputSchema: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] }
+	},
+	{
+		name: 'list_dir',
+		description: 'Elenca file e cartelle in una directory.',
+		args: '{"path": "percorso/relativo"}',
+		inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'Percorso relativo (default: radice)' } } }
+	},
+	{
+		name: 'run_command',
+		description: 'Esegue un comando shell nella radice del workspace (può richiedere conferma).',
+		args: '{"command": "..."}',
+		inputSchema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] }
+	}
 ];
+
+/** Tool built-in in formato Anthropic (tool-use nativo). */
+export function anthropicBuiltinTools(): AnthropicToolDef[] {
+	return TOOL_SPECS.map(t => ({ name: t.name, description: t.description, input_schema: t.inputSchema }));
+}
 
 function workspaceRoot(): vscode.Uri {
 	const f = vscode.workspace.workspaceFolders;

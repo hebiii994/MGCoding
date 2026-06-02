@@ -1,8 +1,9 @@
 /*---------------------------------------------------------------------------------------------
  *  MGCoding - provider Claude (Anthropic Messages API, streaming SSE) via fetch
+ *  Supporta sia lo streaming di solo testo sia il tool-use NATIVO (function calling).
  *--------------------------------------------------------------------------------------------*/
 
-import { ChatMessage, LLMError, LLMProvider, LLMRequest } from './types';
+import { AgentStreamParams, AnthropicStreamEvent, ChatMessage, LLMError, LLMProvider, LLMRequest } from './types';
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_VERSION = '2023-06-01';
@@ -29,22 +30,12 @@ export class ClaudeProvider implements LLMProvider {
 		return this.getConfig().model;
 	}
 
-	async *stream(req: LLMRequest): AsyncIterable<string> {
+	/** POST con streaming SSE; restituisce gli eventi JSON già parsati. */
+	private async *postStream(body: object, signal?: AbortSignal): AsyncIterable<AnthropicStreamEvent> {
 		const apiKey = await this.getApiKey();
 		if (!apiKey) {
 			throw new LLMError('API key Claude non impostata. Usa "MGCoding: Imposta API key Claude".');
 		}
-		const cfg = this.getConfig();
-		const body = {
-			model: cfg.model,
-			max_tokens: req.maxTokens ?? cfg.maxTokens,
-			stream: true,
-			system: req.system,
-			messages: req.messages
-				.filter(m => m.role !== 'system')
-				.map((m: ChatMessage) => ({ role: m.role, content: m.content }))
-		};
-
 		let res: Response;
 		try {
 			res = await fetch(ANTHROPIC_URL, {
@@ -54,13 +45,12 @@ export class ClaudeProvider implements LLMProvider {
 					'x-api-key': apiKey,
 					'anthropic-version': ANTHROPIC_VERSION
 				},
-				body: JSON.stringify(body),
-				signal: req.signal
+				body: JSON.stringify({ ...body, stream: true }),
+				signal
 			});
 		} catch (err) {
 			throw new LLMError('Errore di rete verso Anthropic.', err);
 		}
-
 		if (!res.ok || !res.body) {
 			const text = await res.text().catch(() => '');
 			throw new LLMError(`Anthropic ha risposto ${res.status}: ${text}`);
@@ -86,18 +76,45 @@ export class ClaudeProvider implements LLMProvider {
 				if (!data || data === '[DONE]') {
 					continue;
 				}
-				let evt: any;
 				try {
-					evt = JSON.parse(data);
+					yield JSON.parse(data) as AnthropicStreamEvent;
 				} catch {
-					continue;
-				}
-				if (evt.type === 'content_block_delta' && evt.delta?.type === 'text_delta') {
-					yield evt.delta.text as string;
-				} else if (evt.type === 'error') {
-					throw new LLMError(`Anthropic stream error: ${evt.error?.message ?? 'unknown'}`);
+					// frammento non-JSON: ignora
 				}
 			}
 		}
+	}
+
+	/** Streaming di solo testo (chat semplice / fallback). */
+	async *stream(req: LLMRequest): AsyncIterable<string> {
+		const cfg = this.getConfig();
+		const body = {
+			model: cfg.model,
+			max_tokens: req.maxTokens ?? cfg.maxTokens,
+			system: req.system,
+			messages: req.messages
+				.filter(m => m.role !== 'system')
+				.map((m: ChatMessage) => ({ role: m.role, content: m.content }))
+		};
+		for await (const evt of this.postStream(body, req.signal)) {
+			if (evt.type === 'content_block_delta' && evt.delta?.type === 'text_delta' && evt.delta.text) {
+				yield evt.delta.text;
+			} else if (evt.type === 'error') {
+				throw new LLMError('Errore nello stream Anthropic.');
+			}
+		}
+	}
+
+	/** Streaming agentico con tool-use NATIVO: emette gli eventi SSE grezzi. */
+	async *streamAgent(params: AgentStreamParams): AsyncIterable<AnthropicStreamEvent> {
+		const cfg = this.getConfig();
+		const body = {
+			model: cfg.model,
+			max_tokens: params.maxTokens ?? cfg.maxTokens,
+			system: params.system,
+			messages: params.messages,
+			tools: params.tools
+		};
+		yield* this.postStream(body, params.signal);
 	}
 }
