@@ -68,7 +68,18 @@ export async function createSpec(registry: ProviderRegistry, refresh: () => void
 	const requirements = await generatePhase(
 		registry,
 		'requirements',
-		`Genera un documento requirements.md per una funzionalità. Usa user stories e criteri di accettazione in notazione EARS (es. "WHEN <condizione> THE SYSTEM SHALL <comportamento>", "IF <condizione> THEN THE SYSTEM SHALL ..."). Solo Markdown, nessun preambolo.`,
+		`Genera un documento requirements.md spec-driven (stile Kiro). Struttura:
+# Requisiti: <nome>
+## Introduzione (2-3 righe)
+## Requisiti
+Per ogni requisito numerato:
+### Requisito N: <titolo>
+**User story:** Come <ruolo>, voglio <obiettivo>, così che <beneficio>.
+**Criteri di accettazione** in notazione EARS:
+1. WHEN <evento> THE SYSTEM SHALL <comportamento>
+2. IF <condizione> THEN THE SYSTEM SHALL <comportamento>
+3. WHILE <stato> THE SYSTEM SHALL <comportamento>
+Copri casi felici, errori e casi limite. Solo Markdown, nessun preambolo.`,
 		`Funzionalità: ${name}\nDescrizione: ${desc}`
 	);
 	await writeAndOpen(vscode.Uri.joinPath(dir, 'requirements.md'), requirements);
@@ -86,7 +97,15 @@ export async function createSpec(registry: ProviderRegistry, refresh: () => void
 	const design = await generatePhase(
 		registry,
 		'design',
-		`Genera un documento design.md (architettura tecnica). Includi: panoramica, componenti, modello dati, interfacce/API, e dove utile diagrammi mermaid. Solo Markdown.`,
+		`Genera un documento design.md (architettura tecnica) coerente con i requisiti dati. Sezioni:
+# Design: <nome>
+## Panoramica
+## Architettura (componenti e responsabilità; usa un diagramma mermaid se utile)
+## Componenti e interfacce (firme/API principali)
+## Modello dati (tipi/strutture)
+## Gestione degli errori
+## Strategia di test
+Mappa esplicitamente le scelte ai requisiti. Solo Markdown.`,
 		`Funzionalità: ${name}\nRequisiti:\n${requirements}`
 	);
 	await writeAndOpen(vscode.Uri.joinPath(dir, 'design.md'), design);
@@ -103,7 +122,13 @@ export async function createSpec(registry: ProviderRegistry, refresh: () => void
 	const tasks = await generatePhase(
 		registry,
 		'tasks',
-		`Genera un documento tasks.md: elenco di task di implementazione discreti e tracciabili come checklist Markdown ("- [ ] ..."). Ogni task deve essere piccolo e verificabile, in ordine di dipendenza. Solo Markdown.`,
+		`Genera un documento tasks.md: piano di implementazione come checklist Markdown ("- [ ] ...").
+Regole:
+- Ogni task è piccolo, concreto e verificabile (idealmente una singola unità di lavoro).
+- Ordina i task per dipendenza (prima le fondamenta).
+- Ogni task cita i requisiti che soddisfa, es: "(Req 1.2, 3.1)".
+- Includi task di test dove sensato.
+- Solo passi implementabili nel codice (niente deploy/manuali). Solo Markdown.`,
 		`Funzionalità: ${name}\nDesign:\n${design}`
 	);
 	await writeAndOpen(vscode.Uri.joinPath(dir, 'tasks.md'), tasks);
