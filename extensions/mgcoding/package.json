@@ -1,0 +1,242 @@
+{
+	"name": "mgcoding",
+	"publisher": "mgcoding",
+	"displayName": "MGCoding",
+	"description": "Agente di sviluppo spec-driven (Specs, Steering, Hooks, MCP) con LLM locale o Claude.",
+	"version": "0.0.1",
+	"license": "MIT",
+	"engines": {
+		"vscode": "^1.5.0"
+	},
+	"categories": [
+		"Other",
+		"AI",
+		"Chat"
+	],
+	"capabilities": {
+		"virtualWorkspaces": false,
+		"untrustedWorkspaces": {
+			"supported": false
+		}
+	},
+	"activationEvents": [
+		"onStartupFinished"
+	],
+	"main": "./out/extension",
+	"scripts": {
+		"compile": "gulp compile-extension:mgcoding",
+		"watch": "gulp watch-extension:mgcoding"
+	},
+	"contributes": {
+		"viewsContainers": {
+			"activitybar": [
+				{
+					"id": "mgcoding",
+					"title": "MGCoding",
+					"icon": "media/icon.svg"
+				}
+			],
+			"secondarySidebar": [
+				{
+					"id": "mgcodingChat",
+					"title": "MGCoding Chat",
+					"icon": "media/icon.svg"
+				}
+			]
+		},
+		"views": {
+			"mgcoding": [
+				{
+					"id": "mgcoding.specs",
+					"name": "Specs"
+				},
+				{
+					"id": "mgcoding.hooks",
+					"name": "Agent Hooks"
+				},
+				{
+					"id": "mgcoding.steering",
+					"name": "Agent Steering & Skills"
+				},
+				{
+					"id": "mgcoding.mcp",
+					"name": "MCP Servers"
+				}
+			],
+			"mgcodingChat": [
+				{
+					"type": "webview",
+					"id": "mgcoding.chat",
+					"name": "Chat"
+				}
+			]
+		},
+		"commands": [
+			{
+				"command": "mgcoding.switchProvider",
+				"title": "MGCoding: Cambia modello/provider"
+			},
+			{
+				"command": "mgcoding.setApiKey",
+				"title": "MGCoding: Imposta API key Claude"
+			},
+			{
+				"command": "mgcoding.newSpec",
+				"title": "Nuova Spec",
+				"icon": "$(add)"
+			},
+			{
+				"command": "mgcoding.openChat",
+				"title": "MGCoding: Apri Chat"
+			},
+			{
+				"command": "mgcoding.runAgentTask",
+				"title": "MGCoding: Esegui task agente"
+			},
+			{
+				"command": "mgcoding.initSteering",
+				"title": "Inizializza Steering",
+				"icon": "$(add)"
+			},
+			{
+				"command": "mgcoding.refreshSpecs",
+				"title": "Aggiorna",
+				"icon": "$(refresh)"
+			},
+			{
+				"command": "mgcoding.refreshHooks",
+				"title": "Aggiorna",
+				"icon": "$(refresh)"
+			},
+			{
+				"command": "mgcoding.newHook",
+				"title": "Nuovo Hook",
+				"icon": "$(add)"
+			},
+			{
+				"command": "mgcoding.toggleHook",
+				"title": "Abilita/Disabilita Hook",
+				"icon": "$(circle-slash)"
+			},
+			{
+				"command": "mgcoding.runHook",
+				"title": "Esegui Hook",
+				"icon": "$(play)"
+			},
+			{
+				"command": "mgcoding.refreshSteering",
+				"title": "Aggiorna",
+				"icon": "$(refresh)"
+			},
+			{
+				"command": "mgcoding.refreshMcp",
+				"title": "Aggiorna",
+				"icon": "$(refresh)"
+			},
+			{
+				"command": "mgcoding.openMcpConfig",
+				"title": "Configura MCP",
+				"icon": "$(gear)"
+			}
+		],
+		"menus": {
+			"view/title": [
+				{
+					"command": "mgcoding.newSpec",
+					"when": "view == mgcoding.specs",
+					"group": "navigation@1"
+				},
+				{
+					"command": "mgcoding.refreshSpecs",
+					"when": "view == mgcoding.specs",
+					"group": "navigation@2"
+				},
+				{
+					"command": "mgcoding.newHook",
+					"when": "view == mgcoding.hooks",
+					"group": "navigation@1"
+				},
+				{
+					"command": "mgcoding.refreshHooks",
+					"when": "view == mgcoding.hooks",
+					"group": "navigation@2"
+				},
+				{
+					"command": "mgcoding.initSteering",
+					"when": "view == mgcoding.steering",
+					"group": "navigation@1"
+				},
+				{
+					"command": "mgcoding.refreshSteering",
+					"when": "view == mgcoding.steering",
+					"group": "navigation@2"
+				},
+				{
+					"command": "mgcoding.openMcpConfig",
+					"when": "view == mgcoding.mcp",
+					"group": "navigation@1"
+				},
+				{
+					"command": "mgcoding.refreshMcp",
+					"when": "view == mgcoding.mcp",
+					"group": "navigation@2"
+				}
+			],
+			"view/item/context": [
+				{
+					"command": "mgcoding.runHook",
+					"when": "view == mgcoding.hooks && viewItem =~ /mgcoding.hook/",
+					"group": "inline@1"
+				},
+				{
+					"command": "mgcoding.toggleHook",
+					"when": "view == mgcoding.hooks && viewItem =~ /mgcoding.hook/",
+					"group": "inline@2"
+				}
+			]
+		},
+		"configuration": {
+			"title": "MGCoding",
+			"properties": {
+				"mgcoding.provider": {
+					"type": "string",
+					"enum": [
+						"claude",
+						"ollama"
+					],
+					"enumDescriptions": [
+						"Anthropic Claude (richiede API key)",
+						"LLM locale via Ollama"
+					],
+					"default": "ollama",
+					"description": "Provider LLM attivo."
+				},
+				"mgcoding.claude.model": {
+					"type": "string",
+					"default": "claude-opus-4-8",
+					"description": "Modello Claude da usare."
+				},
+				"mgcoding.claude.maxTokens": {
+					"type": "number",
+					"default": 8192,
+					"description": "Numero massimo di token in output per Claude."
+				},
+				"mgcoding.ollama.endpoint": {
+					"type": "string",
+					"default": "http://localhost:11434",
+					"description": "Endpoint del server Ollama."
+				},
+				"mgcoding.ollama.model": {
+					"type": "string",
+					"default": "qwen2.5-coder:14b",
+					"description": "Modello Ollama da usare (es. qwen2.5-coder:14b, llama3.1:8b)."
+				},
+				"mgcoding.autoApprove": {
+					"type": "boolean",
+					"default": false,
+					"description": "Se attivo, l'agente esegue i comandi shell senza chiedere conferma (autopilot)."
+				}
+			}
+		}
+	}
+}
