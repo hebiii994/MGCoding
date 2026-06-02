@@ -134,6 +134,11 @@
 				"icon": "$(cloud-download)"
 			},
 			{
+				"command": "mgcoding.runSpecTask",
+				"title": "Esegui questo task",
+				"icon": "$(play)"
+			},
+			{
 				"command": "mgcoding.refreshHooks",
 				"title": "Aggiorna",
 				"icon": "$(refresh)"
@@ -221,6 +226,11 @@
 				{
 					"command": "mgcoding.runSpecTasks",
 					"when": "view == mgcoding.specs && viewItem == mgcoding.spec",
+					"group": "inline@1"
+				},
+				{
+					"command": "mgcoding.runSpecTask",
+					"when": "view == mgcoding.specs && viewItem == mgcoding.task",
 					"group": "inline@1"
 				},
 				{

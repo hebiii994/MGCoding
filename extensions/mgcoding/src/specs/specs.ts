@@ -242,9 +242,61 @@ Quando hai finito di implementare questo task, fornisci un breve riepilogo di co
 	vscode.window.showInformationMessage(`MGCoding: esecuzione task di "${specName}" terminata.`);
 }
 
+/** Esegue un singolo task (per lineIdx) di una spec con l'agente. */
+export async function runSpecTask(registry: ProviderRegistry, specDir: vscode.Uri, lineIdx: number, refresh: () => void, reporter: RunReporter): Promise<void> {
+	const tasksUri = vscode.Uri.joinPath(specDir, 'tasks.md');
+	let tasksMd = await readIfExists(tasksUri);
+	const task = parseTasks(tasksMd).find(t => t.lineIdx === lineIdx);
+	if (!task) {
+		vscode.window.showWarningMessage('Task non trovato.');
+		return;
+	}
+	if (task.done) {
+		vscode.window.showInformationMessage('Task già completato.');
+		return;
+	}
+	const requirements = await readIfExists(vscode.Uri.joinPath(specDir, 'requirements.md'));
+	const design = await readIfExists(vscode.Uri.joinPath(specDir, 'design.md'));
+	const specName = specDir.path.split('/').pop() ?? 'spec';
+
+	reporter.start(`Task · ${specName}`, [task.text]);
+	reporter.setStatus(0, 'running');
+	const prompt = `Stai implementando la funzionalità "${specName}" in modo spec-driven. Implementa SOLO questo task usando i tool.
+
+# Requisiti
+${requirements || '(non disponibili)'}
+
+# Design
+${design || '(non disponibile)'}
+
+# Task
+${task.text}
+
+Al termine fornisci un breve riepilogo.`;
+	const ac = new AbortController();
+	try {
+		await runAgent(registry, [{ role: 'user', content: prompt }], {
+			onAssistantText: t => reporter.log(`🤖 ${t.slice(0, 300)}`),
+			onToolStart: c => reporter.log(`🔧 ${c.tool} ${JSON.stringify(c.args).slice(0, 160)}`),
+			onToolResult: r => reporter.log(`↳ ${r.slice(0, 200)}`)
+		}, ac.signal);
+		reporter.setStatus(0, 'done');
+	} catch (err) {
+		reporter.setStatus(0, 'error');
+		reporter.log(`[errore] ${String(err)}`);
+	}
+	tasksMd = markTaskDone(await readIfExists(tasksUri) || tasksMd, lineIdx);
+	await vscode.workspace.fs.writeFile(tasksUri, ENC.encode(tasksMd));
+	refresh();
+	reporter.finish('=== Task terminato ===');
+}
+
 // ---- Tree view ----
 
-type SpecNode = { kind: 'spec'; uri: vscode.Uri; label: string } | { kind: 'file'; uri: vscode.Uri; label: string };
+type SpecNode =
+	| { kind: 'spec'; uri: vscode.Uri; label: string }
+	| { kind: 'file'; uri: vscode.Uri; label: string }
+	| { kind: 'task'; specDir: vscode.Uri; lineIdx: number; label: string; done: boolean };
 
 export class SpecsTreeProvider implements vscode.TreeDataProvider<SpecNode> {
 	private readonly _onDidChange = new vscode.EventEmitter<void>();
@@ -259,6 +311,13 @@ export class SpecsTreeProvider implements vscode.TreeDataProvider<SpecNode> {
 			const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.Collapsed);
 			item.iconPath = new vscode.ThemeIcon('checklist');
 			item.contextValue = 'mgcoding.spec';
+			return item;
+		}
+		if (node.kind === 'task') {
+			const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.None);
+			item.iconPath = new vscode.ThemeIcon(node.done ? 'pass-filled' : 'circle-large-outline');
+			item.contextValue = 'mgcoding.task';
+			item.tooltip = node.done ? 'Completato' : 'Da fare — esegui con ▶';
 			return item;
 		}
 		const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.None);
@@ -295,6 +354,10 @@ export class SpecsTreeProvider implements vscode.TreeDataProvider<SpecNode> {
 				if (await readIfExists(uri)) {
 					out.push({ kind: 'file', uri, label: fname });
 				}
+			}
+			const tasksMd = await readIfExists(vscode.Uri.joinPath(node.uri, 'tasks.md'));
+			for (const t of parseTasks(tasksMd)) {
+				out.push({ kind: 'task', specDir: node.uri, lineIdx: t.lineIdx, label: t.text, done: t.done });
 			}
 			return out;
 		}

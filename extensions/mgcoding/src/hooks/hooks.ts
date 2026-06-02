@@ -131,22 +131,55 @@ export async function createSampleHook(): Promise<void> {
 		vscode.window.showWarningMessage('Apri una cartella per creare un hook.');
 		return;
 	}
-	await vscode.workspace.fs.createDirectory(dir);
-	const name = await vscode.window.showInputBox({ prompt: 'Nome del nuovo hook', value: 'Nuovo hook' });
+	const name = await vscode.window.showInputBox({ prompt: 'Nome del hook', ignoreFocusOut: true });
 	if (!name) {
 		return;
 	}
-	const sample: Hook = {
+	const description = await vscode.window.showInputBox({ prompt: 'Descrizione (opzionale)', ignoreFocusOut: true }) ?? '';
+	const eventPick = await vscode.window.showQuickPick(
+		[
+			{ label: 'Al salvataggio file', value: 'onSave' as HookEvent },
+			{ label: 'Alla creazione file', value: 'onCreate' as HookEvent },
+			{ label: 'All\'eliminazione file', value: 'onDelete' as HookEvent },
+			{ label: 'Manuale (bottone ▶)', value: 'manual' as HookEvent }
+		],
+		{ placeHolder: 'Quando si attiva?' }
+	);
+	if (!eventPick) {
+		return;
+	}
+	const filePattern = await vscode.window.showInputBox({ prompt: 'Pattern file (glob), vuoto = tutti', value: '**/*.ts', ignoreFocusOut: true });
+	const actionPick = await vscode.window.showQuickPick(
+		[
+			{ label: 'Chiedi all\'agente (prompt)', value: 'ask' as HookAction },
+			{ label: 'Esegui comando shell', value: 'command' as HookAction }
+		],
+		{ placeHolder: 'Cosa fa?' }
+	);
+	if (!actionPick) {
+		return;
+	}
+	let prompt: string | undefined;
+	let command: string | undefined;
+	if (actionPick.value === 'ask') {
+		prompt = await vscode.window.showInputBox({ prompt: 'Prompt per l\'agente', ignoreFocusOut: true }) ?? '';
+	} else {
+		command = await vscode.window.showInputBox({ prompt: 'Comando shell (${file} = file coinvolto)', ignoreFocusOut: true }) ?? '';
+	}
+
+	await vscode.workspace.fs.createDirectory(dir);
+	const hook: Hook = {
 		name,
-		description: 'Descrivi cosa fa questo hook',
-		event: 'onSave',
-		filePattern: '**/*.ts',
-		action: 'ask',
-		prompt: 'Rivedi le modifiche e segnala possibili bug o miglioramenti.',
+		description,
+		event: eventPick.value,
+		...(filePattern ? { filePattern } : {}),
+		action: actionPick.value,
+		...(prompt ? { prompt } : {}),
+		...(command ? { command } : {}),
 		enabled: true
 	};
-	const file = vscode.Uri.joinPath(dir, `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.json`);
-	await vscode.workspace.fs.writeFile(file, ENC.encode(JSON.stringify(sample, null, 2)));
+	const file = vscode.Uri.joinPath(dir, `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'hook'}.json`);
+	await vscode.workspace.fs.writeFile(file, ENC.encode(JSON.stringify(hook, null, 2)));
 	const doc = await vscode.workspace.openTextDocument(file);
 	await vscode.window.showTextDocument(doc);
 }
@@ -258,6 +291,9 @@ export class HooksTreeProvider implements vscode.TreeDataProvider<HookNode> {
 		item.tooltip = h.description ?? '';
 		item.iconPath = new vscode.ThemeIcon(enabled ? 'zap' : 'circle-slash');
 		item.contextValue = 'mgcoding.hook';
+		if (h.uri) {
+			item.command = { command: 'vscode.open', title: 'Apri', arguments: [h.uri] };
+		}
 		return item;
 	}
 

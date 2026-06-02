@@ -13,7 +13,7 @@ import { McpTreeProvider, openMcpConfig } from './mcp/mcp';
 import { McpManager, setMcpManager } from './mcp/mcpClient';
 import { importFromKiro } from './migrate/importKiro';
 import { RunViewProvider } from './run/runView';
-import { createSpec, runSpecTasks, SpecsTreeProvider } from './specs/specs';
+import { createSpec, runSpecTask, runSpecTasks, SpecsTreeProvider } from './specs/specs';
 import { initSteering, SteeringTreeProvider } from './steering/steering';
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -58,11 +58,16 @@ export function activate(context: vscode.ExtensionContext): void {
 		}
 	}));
 
+	// MCP runtime (creato prima della tree per fornirle lo stato live)
+	const mcpManager = new McpManager();
+	setMcpManager(mcpManager);
+	context.subscriptions.push(mcpManager);
+
 	// Tree views (barra laterale sinistra)
 	const specsTree = new SpecsTreeProvider();
 	const hooksTree = new HooksTreeProvider();
 	const steeringTree = new SteeringTreeProvider();
-	const mcpTree = new McpTreeProvider();
+	const mcpTree = new McpTreeProvider(() => mcpManager.getStatuses());
 	context.subscriptions.push(
 		vscode.window.registerTreeDataProvider('mgcoding.specs', specsTree),
 		vscode.window.registerTreeDataProvider('mgcoding.hooks', hooksTree),
@@ -74,10 +79,6 @@ export function activate(context: vscode.ExtensionContext): void {
 	const hookManager = new HookManager(registry, () => hooksTree.refresh());
 	context.subscriptions.push(hookManager);
 
-	// MCP runtime
-	const mcpManager = new McpManager();
-	setMcpManager(mcpManager);
-	context.subscriptions.push(mcpManager);
 	const restartMcp = async () => { await mcpManager.start(); mcpTree.refresh(); };
 	void restartMcp();
 	const mcpWatcher = vscode.workspace.createFileSystemWatcher('**/{.mg/mcp.json,.kiro/settings/mcp.json}');
@@ -129,6 +130,12 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('mgcoding.runSpecTasks', (node?: { uri: vscode.Uri }) => {
 			if (node?.uri) {
 				return runSpecTasks(registry, node.uri, () => specsTree.refresh(), runView);
+			}
+			return undefined;
+		}),
+		vscode.commands.registerCommand('mgcoding.runSpecTask', (node?: { specDir: vscode.Uri; lineIdx: number }) => {
+			if (node?.specDir && typeof node.lineIdx === 'number') {
+				return runSpecTask(registry, node.specDir, node.lineIdx, () => specsTree.refresh(), runView);
 			}
 			return undefined;
 		}),

@@ -1,44 +1,16 @@
 /*---------------------------------------------------------------------------------------------
- *  MGCoding - MCP Servers: lettura/visualizzazione configurazione MCP
- *  File: <workspace>/.mg/mcp.json  =>  { "mcpServers": { "<name>": { command, args, disabled? } } }
- *  Nota: per ora è solo visualizzazione/configurazione; il client MCP verrà collegato in seguito.
+ *  MGCoding - MCP Servers: vista con stato di connessione live e tool per server
+ *  Config: <workspace>/.mg/mcp.json (o .kiro/settings/mcp.json)
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
-import { resolveFile } from '../util/paths';
+import { McpServerStatus } from './mcpClient';
 
 const ENC = new TextEncoder();
-const DEC = new TextDecoder();
-
-interface McpServer {
-	name: string;
-	command?: string;
-	args?: string[];
-	disabled?: boolean;
-}
 
 function mcpConfigUri(): vscode.Uri | undefined {
 	const f = vscode.workspace.workspaceFolders;
 	return f && f.length ? vscode.Uri.joinPath(f[0].uri, '.mg', 'mcp.json') : undefined;
-}
-
-async function readServers(): Promise<McpServer[]> {
-	const uri = await resolveFile('.mg/mcp.json', '.kiro/settings/mcp.json');
-	if (!uri) {
-		return [];
-	}
-	try {
-		const raw = JSON.parse(DEC.decode(await vscode.workspace.fs.readFile(uri)));
-		const servers = raw?.mcpServers ?? {};
-		return Object.entries(servers).map(([name, cfg]: [string, any]) => ({
-			name,
-			command: cfg?.command,
-			args: cfg?.args,
-			disabled: cfg?.disabled === true
-		}));
-	} catch {
-		return [];
-	}
 }
 
 export async function openMcpConfig(): Promise<void> {
@@ -65,28 +37,45 @@ export async function openMcpConfig(): Promise<void> {
 	await vscode.window.showTextDocument(doc);
 }
 
-interface McpNode {
-	server: McpServer;
-}
+type McpNode = { kind: 'server'; status: McpServerStatus } | { kind: 'tool'; name: string };
 
 export class McpTreeProvider implements vscode.TreeDataProvider<McpNode> {
 	private readonly _onDidChange = new vscode.EventEmitter<void>();
 	readonly onDidChangeTreeData = this._onDidChange.event;
+
+	constructor(private readonly getStatuses: () => McpServerStatus[]) { }
 
 	refresh(): void {
 		this._onDidChange.fire();
 	}
 
 	getTreeItem(node: McpNode): vscode.TreeItem {
-		const s = node.server;
-		const item = new vscode.TreeItem(s.name, vscode.TreeItemCollapsibleState.None);
-		item.description = s.disabled ? 'disabilitato' : (s.command ?? '');
-		item.iconPath = new vscode.ThemeIcon(s.disabled ? 'circle-slash' : 'server-environment');
-		item.tooltip = `${s.command ?? ''} ${(s.args ?? []).join(' ')}`.trim();
+		if (node.kind === 'tool') {
+			const item = new vscode.TreeItem(node.name, vscode.TreeItemCollapsibleState.None);
+			item.iconPath = new vscode.ThemeIcon('tools');
+			return item;
+		}
+		const s = node.status;
+		const item = new vscode.TreeItem(
+			s.name,
+			s.connected && s.tools.length ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None
+		);
+		item.description = s.connected ? `● ${s.tools.length} tool` : (s.error ?? 'non connesso');
+		item.iconPath = new vscode.ThemeIcon(
+			s.connected ? 'server-environment' : (s.error === 'disabilitato' ? 'circle-slash' : 'error')
+		);
+		item.tooltip = s.connected ? `${s.command} — connesso (${s.tools.length} tool)` : `${s.command} — ${s.error ?? 'non connesso'}`;
+		item.contextValue = 'mgcoding.mcpServer';
 		return item;
 	}
 
-	async getChildren(): Promise<McpNode[]> {
-		return (await readServers()).map(server => ({ server }));
+	getChildren(node?: McpNode): McpNode[] {
+		if (!node) {
+			return this.getStatuses().map(status => ({ kind: 'server' as const, status }));
+		}
+		if (node.kind === 'server') {
+			return node.status.tools.map(name => ({ kind: 'tool' as const, name }));
+		}
+		return [];
 	}
 }

@@ -128,16 +128,30 @@ class McpConnection {
 }
 
 /** Gestisce tutte le connessioni MCP e instrada le chiamate ai tool. */
+export interface McpServerStatus {
+	name: string;
+	command: string;
+	connected: boolean;
+	error?: string;
+	tools: string[];
+}
+
 export class McpManager implements vscode.Disposable {
 	private connections: McpConnection[] = [];
 	/** prefixedToolName -> { connection, originalName } */
 	private readonly toolMap = new Map<string, { conn: McpConnection; original: string }>();
+	private statuses: McpServerStatus[] = [];
 	private readonly log = vscode.window.createOutputChannel('MGCoding MCP');
+
+	getStatuses(): McpServerStatus[] {
+		return this.statuses;
+	}
 
 	async start(): Promise<void> {
 		this.dispose();
 		this.toolMap.clear();
 		this.connections = [];
+		this.statuses = [];
 
 		const folders = vscode.workspace.workspaceFolders;
 		if (!folders?.length) {
@@ -160,7 +174,11 @@ export class McpManager implements vscode.Disposable {
 		const cwd = folders[0].uri.fsPath;
 
 		for (const [serverName, cfg] of Object.entries<any>(servers)) {
-			if (cfg?.disabled === true || !cfg?.command) {
+			if (!cfg?.command) {
+				continue;
+			}
+			if (cfg?.disabled === true) {
+				this.statuses.push({ name: serverName, command: cfg.command, connected: false, error: 'disabilitato', tools: [] });
 				continue;
 			}
 			const conn = new McpConnection(serverName, cfg.command, cfg.args ?? [], cwd);
@@ -171,9 +189,13 @@ export class McpManager implements vscode.Disposable {
 				for (const tool of conn.tools) {
 					this.toolMap.set(`${serverName}__${tool.name}`, { conn, original: tool.name });
 				}
-				this.log.appendLine(`  -> connesso, ${conn.tools.length} tool: ${conn.tools.map(t => t.name).join(', ')}`);
+				const names = conn.tools.map(t => t.name);
+				this.statuses.push({ name: serverName, command: cfg.command, connected: true, tools: names });
+				this.log.appendLine(`  -> connesso, ${names.length} tool: ${names.join(', ')}`);
 			} catch (err) {
-				this.log.appendLine(`  -> ERRORE: ${err instanceof Error ? err.message : String(err)}`);
+				const msg = err instanceof Error ? err.message : String(err);
+				this.statuses.push({ name: serverName, command: cfg.command, connected: false, error: msg, tools: [] });
+				this.log.appendLine(`  -> ERRORE: ${msg}`);
 				conn.dispose();
 			}
 		}
