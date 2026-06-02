@@ -7,6 +7,7 @@ import * as vscode from 'vscode';
 import { complete } from '../agent/agent';
 import { runAgent } from '../agent/agentLoop';
 import { ProviderRegistry } from '../llm/registry';
+import { RunReporter } from '../run/runView';
 
 const ENC = new TextEncoder();
 const DEC = new TextDecoder();
@@ -169,7 +170,7 @@ function markTaskDone(md: string, lineIdx: number): string {
  * Esegue (o riprende) tutti i task non completati di una spec, uno alla volta,
  * usando l'agente con il contesto di requirements e design. Spunta i task completati.
  */
-export async function runSpecTasks(registry: ProviderRegistry, specDir: vscode.Uri, refresh: () => void): Promise<void> {
+export async function runSpecTasks(registry: ProviderRegistry, specDir: vscode.Uri, refresh: () => void, reporter: RunReporter): Promise<void> {
 	const tasksUri = vscode.Uri.joinPath(specDir, 'tasks.md');
 	let tasksMd = await readIfExists(tasksUri);
 	if (!tasksMd) {
@@ -180,14 +181,13 @@ export async function runSpecTasks(registry: ProviderRegistry, specDir: vscode.U
 	const design = await readIfExists(vscode.Uri.joinPath(specDir, 'design.md'));
 	const specName = specDir.path.split('/').pop() ?? 'spec';
 
-	const out = vscode.window.createOutputChannel('MGCoding Agent');
-	out.show(true);
-
 	const pending = parseTasks(tasksMd).filter(t => !t.done);
 	if (pending.length === 0) {
 		vscode.window.showInformationMessage(`Tutti i task di "${specName}" sono già completati.`);
 		return;
 	}
+
+	reporter.start(`Spec: ${specName}`, pending.map(t => t.text));
 
 	await vscode.window.withProgress(
 		{ location: vscode.ProgressLocation.Notification, title: `MGCoding: eseguo i task di ${specName}`, cancellable: true },
@@ -200,7 +200,8 @@ export async function runSpecTasks(registry: ProviderRegistry, specDir: vscode.U
 				}
 				const task = pending[i];
 				progress.report({ message: `(${i + 1}/${pending.length}) ${task.text.slice(0, 60)}`, increment: 100 / pending.length });
-				out.appendLine(`\n\n========== TASK ${i + 1}/${pending.length}: ${task.text} ==========`);
+				reporter.setStatus(i, 'running');
+				reporter.log(`▶ Task ${i + 1}/${pending.length}: ${task.text}`);
 
 				const prompt = `Stai implementando la funzionalità "${specName}" in modo spec-driven. Implementa SOLO il task indicato, usando i tool per leggere e scrivere i file necessari nel workspace.
 
@@ -218,12 +219,14 @@ Quando hai finito di implementare questo task, fornisci un breve riepilogo di co
 				const messages = [{ role: 'user' as const, content: prompt }];
 				try {
 					await runAgent(registry, messages, {
-						onAssistantText: t => out.appendLine(`\n🤖 ${t}`),
-						onToolStart: c => out.appendLine(`\n🔧 ${c.tool} ${JSON.stringify(c.args).slice(0, 200)}`),
-						onToolResult: r => out.appendLine(`↳ ${r.slice(0, 400)}`)
+						onAssistantText: t => reporter.log(`🤖 ${t.slice(0, 300)}`),
+						onToolStart: c => reporter.log(`🔧 ${c.tool} ${JSON.stringify(c.args).slice(0, 160)}`),
+						onToolResult: r => reporter.log(`↳ ${r.slice(0, 200)}`)
 					}, ac.signal);
+					reporter.setStatus(i, 'done');
 				} catch (err) {
-					out.appendLine(`[errore] ${String(err)}`);
+					reporter.setStatus(i, 'error');
+					reporter.log(`[errore] ${String(err)}`);
 				}
 
 				// spunta il task (rileggo per sicurezza e applico per indice)
@@ -234,7 +237,7 @@ Quando hai finito di implementare questo task, fornisci un breve riepilogo di co
 		}
 	);
 
-	out.appendLine('\n=== Esecuzione task terminata ===');
+	reporter.finish('=== Esecuzione task terminata ===');
 	vscode.window.showInformationMessage(`MGCoding: esecuzione task di "${specName}" terminata.`);
 }
 

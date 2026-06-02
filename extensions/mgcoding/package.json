@@ -58,6 +58,11 @@
 					"name": "Specs"
 				},
 				{
+					"type": "webview",
+					"id": "mgcoding.run",
+					"name": "Esecuzione"
+				},
+				{
 					"id": "mgcoding.hooks",
 					"name": "Agent Hooks"
 				},
@@ -99,6 +104,10 @@
 			{
 				"command": "mgcoding.runAgentTask",
 				"title": "MGCoding: Esegui task agente"
+			},
+			{
+				"command": "mgcoding.toggleAutopilot",
+				"title": "MGCoding: Autopilot on/off"
 			},
 			{
 				"command": "mgcoding.initSteering",

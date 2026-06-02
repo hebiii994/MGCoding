@@ -37,6 +37,21 @@ export class OllamaProvider implements LLMProvider {
 		return this.getConfig().model;
 	}
 
+	/** Elenca i modelli installati nel server Ollama (da /api/tags). */
+	async listModels(): Promise<string[]> {
+		const endpoint = this.getConfig().endpoint.replace(/\/$/, '');
+		try {
+			const res = await fetch(`${endpoint}/api/tags`, { method: 'GET' });
+			if (!res.ok) {
+				return [];
+			}
+			const data = await res.json() as { models?: { name?: string }[] };
+			return (data.models ?? []).map(m => m.name).filter((n): n is string => !!n);
+		} catch {
+			return [];
+		}
+	}
+
 	/** POST /api/chat con streaming NDJSON; restituisce gli oggetti JSON già parsati. */
 	private async *postNdjson(body: object, signal?: AbortSignal): AsyncIterable<any> {
 		const endpoint = this.getConfig().endpoint.replace(/\/$/, '');

@@ -31,7 +31,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	) {
 		this.disposables.push(vscode.workspace.onDidChangeConfiguration(e => {
 			if (e.affectsConfiguration('mgcoding')) {
-				this.post({ type: 'state', state: this.buildState() });
+				void this.sendState();
 			}
 		}));
 	}
@@ -44,7 +44,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		webviewView.webview.onDidReceiveMessage(async (msg: { type: string; text?: string; id?: string }) => {
 			switch (msg.type) {
 				case 'ready':
-					this.post({ type: 'state', state: this.buildState() });
+					await this.sendState();
 					break;
 				case 'send':
 					if (msg.text) {
@@ -53,9 +53,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 					break;
 				case 'setProvider':
 					if (msg.id) {
-						await vscode.workspace.getConfiguration('mgcoding')
-							.update('provider', msg.id, vscode.ConfigurationTarget.Global);
-						this.post({ type: 'state', state: this.buildState() });
+						const cfg = vscode.workspace.getConfiguration('mgcoding');
+						if (msg.id.startsWith('ollama:')) {
+							await cfg.update('ollama.model', msg.id.slice('ollama:'.length), vscode.ConfigurationTarget.Global);
+							await cfg.update('provider', 'ollama', vscode.ConfigurationTarget.Global);
+						} else {
+							await cfg.update('provider', 'claude', vscode.ConfigurationTarget.Global);
+						}
+						await this.sendState();
 					}
 					break;
 				case 'stop':
@@ -68,17 +73,30 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		});
 	}
 
-	private buildState(): ChatState {
+	private async buildState(): Promise<ChatState> {
 		const c = vscode.workspace.getConfiguration('mgcoding');
 		const claudeModel = c.get<string>('claude.model', 'claude-opus-4-8');
 		const ollamaModel = c.get<string>('ollama.model', 'qwen2.5-coder:14b');
+		const provider = c.get<string>('provider', 'ollama');
+
+		const options: ProviderOption[] = [{ id: 'claude', label: `Claude (API) · ${claudeModel}` }];
+		const installed = await this.registry.listOllamaModels();
+		const models = installed.length ? installed : [ollamaModel];
+		if (!models.includes(ollamaModel)) {
+			models.unshift(ollamaModel);
+		}
+		for (const m of models) {
+			options.push({ id: `ollama:${m}`, label: `Ollama · ${m}` });
+		}
+
 		return {
-			current: c.get<string>('provider', 'ollama'),
-			options: [
-				{ id: 'claude', label: `Claude (API) · ${claudeModel}` },
-				{ id: 'ollama', label: `Ollama (locale) · ${ollamaModel}` }
-			]
+			current: provider === 'claude' ? 'claude' : `ollama:${ollamaModel}`,
+			options
 		};
+	}
+
+	private async sendState(): Promise<void> {
+		this.post({ type: 'state', state: await this.buildState() });
 	}
 
 	private post(message: unknown): void {

@@ -53,6 +53,10 @@ export class ProviderRegistry implements vscode.Disposable {
 		return id === 'claude' ? this.claude : this.ollama;
 	}
 
+	listOllamaModels(): Promise<string[]> {
+		return this.ollama.listModels();
+	}
+
 	private updateStatusBar(): void {
 		const p = this.current();
 		this.statusBar.text = `$(sparkle) MGCoding: ${p.label} (${p.modelName()})`;

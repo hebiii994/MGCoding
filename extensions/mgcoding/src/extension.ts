@@ -11,6 +11,7 @@ import { createSampleHook, Hook, HookManager, HooksTreeProvider, toggleHook } fr
 import { ProviderRegistry } from './llm/registry';
 import { McpTreeProvider, openMcpConfig } from './mcp/mcp';
 import { McpManager, setMcpManager } from './mcp/mcpClient';
+import { RunViewProvider } from './run/runView';
 import { createSpec, runSpecTasks, SpecsTreeProvider } from './specs/specs';
 import { initSteering, SteeringTreeProvider } from './steering/steering';
 
@@ -29,6 +30,32 @@ export function activate(context: vscode.ExtensionContext): void {
 			webviewOptions: { retainContextWhenHidden: true }
 		})
 	);
+
+	// Vista "Esecuzione" (stato task live + autopilot)
+	const runView = new RunViewProvider(context.extensionUri);
+	context.subscriptions.push(runView);
+	context.subscriptions.push(
+		vscode.window.registerWebviewViewProvider(RunViewProvider.viewType, runView, {
+			webviewOptions: { retainContextWhenHidden: true }
+		})
+	);
+
+	// Indicatore Autopilot nella status bar
+	const autopilotItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
+	autopilotItem.command = 'mgcoding.toggleAutopilot';
+	const updateAutopilot = () => {
+		const on = vscode.workspace.getConfiguration('mgcoding').get<boolean>('autoApprove', false);
+		autopilotItem.text = on ? '$(rocket) Autopilot' : '$(shield) Supervised';
+		autopilotItem.tooltip = on ? 'MGCoding: Autopilot attivo (esegue senza conferma). Clicca per disattivare.' : 'MGCoding: modalità supervisionata (chiede conferma). Clicca per Autopilot.';
+	};
+	updateAutopilot();
+	autopilotItem.show();
+	context.subscriptions.push(autopilotItem);
+	context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e => {
+		if (e.affectsConfiguration('mgcoding.autoApprove')) {
+			updateAutopilot();
+		}
+	}));
 
 	// Tree views (barra laterale sinistra)
 	const specsTree = new SpecsTreeProvider();
@@ -68,26 +95,37 @@ export function activate(context: vscode.ExtensionContext): void {
 			if (!task) {
 				return;
 			}
-			const out = vscode.window.createOutputChannel('MGCoding Agent');
-			out.show(true);
-			out.appendLine(`\n=== Task: ${task} ===`);
+			runView.start('Task agente', [task]);
+			runView.setStatus(0, 'running');
 			const messages: ChatMessage[] = [{ role: 'user', content: task }];
-			await vscode.window.withProgress(
-				{ location: vscode.ProgressLocation.Notification, title: 'MGCoding: agente al lavoro…', cancellable: false },
-				async () => runAgent(registry, messages, {
-					onAssistantText: t => out.appendLine(`\n🤖 ${t}`),
-					onToolStart: c => out.appendLine(`\n🔧 ${c.tool} ${JSON.stringify(c.args)}`),
-					onToolResult: r => out.appendLine(`↳ ${r.slice(0, 500)}`)
-				})
-			);
-			out.appendLine('\n=== Fine ===');
+			try {
+				await vscode.window.withProgress(
+					{ location: vscode.ProgressLocation.Notification, title: 'MGCoding: agente al lavoro…', cancellable: false },
+					async () => runAgent(registry, messages, {
+						onAssistantText: t => runView.log(`🤖 ${t.slice(0, 300)}`),
+						onToolStart: c => runView.log(`🔧 ${c.tool} ${JSON.stringify(c.args).slice(0, 160)}`),
+						onToolResult: r => runView.log(`↳ ${r.slice(0, 200)}`)
+					})
+				);
+				runView.setStatus(0, 'done');
+			} catch (err) {
+				runView.setStatus(0, 'error');
+				runView.log(`[errore] ${String(err)}`);
+			}
+			runView.finish('=== Fine ===');
+		}),
+		vscode.commands.registerCommand('mgcoding.toggleAutopilot', async () => {
+			const cfg = vscode.workspace.getConfiguration('mgcoding');
+			const next = !cfg.get<boolean>('autoApprove', false);
+			await cfg.update('autoApprove', next, vscode.ConfigurationTarget.Global);
+			vscode.window.showInformationMessage(`MGCoding Autopilot: ${next ? 'ON (esegue senza conferma)' : 'OFF (supervisionato)'}`);
 		}),
 
 		vscode.commands.registerCommand('mgcoding.newSpec', () => createSpec(registry, () => specsTree.refresh())),
 		vscode.commands.registerCommand('mgcoding.refreshSpecs', () => specsTree.refresh()),
 		vscode.commands.registerCommand('mgcoding.runSpecTasks', (node?: { uri: vscode.Uri }) => {
 			if (node?.uri) {
-				return runSpecTasks(registry, node.uri, () => specsTree.refresh());
+				return runSpecTasks(registry, node.uri, () => specsTree.refresh(), runView);
 			}
 			return undefined;
 		}),
