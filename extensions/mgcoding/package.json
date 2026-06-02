@@ -125,6 +125,11 @@
 				"icon": "$(run-all)"
 			},
 			{
+				"command": "mgcoding.importFromKiro",
+				"title": "Importa da Kiro (.kiro → .mg)",
+				"icon": "$(cloud-download)"
+			},
+			{
 				"command": "mgcoding.refreshHooks",
 				"title": "Aggiorna",
 				"icon": "$(refresh)"
@@ -166,6 +171,11 @@
 					"command": "mgcoding.newSpec",
 					"when": "view == mgcoding.specs",
 					"group": "navigation@1"
+				},
+				{
+					"command": "mgcoding.importFromKiro",
+					"when": "view == mgcoding.specs",
+					"group": "navigation@3"
 				},
 				{
 					"command": "mgcoding.refreshSpecs",

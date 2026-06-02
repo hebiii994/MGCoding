@@ -11,6 +11,7 @@ import { createSampleHook, Hook, HookManager, HooksTreeProvider, toggleHook } fr
 import { ProviderRegistry } from './llm/registry';
 import { McpTreeProvider, openMcpConfig } from './mcp/mcp';
 import { McpManager, setMcpManager } from './mcp/mcpClient';
+import { importFromKiro } from './migrate/importKiro';
 import { RunViewProvider } from './run/runView';
 import { createSpec, runSpecTasks, SpecsTreeProvider } from './specs/specs';
 import { initSteering, SteeringTreeProvider } from './steering/steering';
@@ -123,6 +124,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 		vscode.commands.registerCommand('mgcoding.newSpec', () => createSpec(registry, () => specsTree.refresh())),
 		vscode.commands.registerCommand('mgcoding.refreshSpecs', () => specsTree.refresh()),
+		vscode.commands.registerCommand('mgcoding.importFromKiro', () => importFromKiro()),
 		vscode.commands.registerCommand('mgcoding.runSpecTasks', (node?: { uri: vscode.Uri }) => {
 			if (node?.uri) {
 				return runSpecTasks(registry, node.uri, () => specsTree.refresh(), runView);

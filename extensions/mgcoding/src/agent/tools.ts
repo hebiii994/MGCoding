@@ -54,19 +54,28 @@ export const TOOL_SPECS: ToolSpec[] = [
 	},
 	{
 		name: 'find_files',
-		description: 'Trova file per pattern glob (es. "**/*.ts"). Ritorna i percorsi relativi.',
-		args: '{"pattern": "**/*.ts", "maxResults": 50}',
-		inputSchema: { type: 'object', properties: { pattern: { type: 'string' }, maxResults: { type: 'number' } }, required: ['pattern'] }
+		description: 'Trova file per pattern glob, opzionalmente sotto una cartella "path". Ritorna i percorsi relativi.',
+		args: '{"pattern": "**/*.ts", "path": "src", "maxResults": 50}',
+		inputSchema: { type: 'object', properties: { pattern: { type: 'string' }, path: { type: 'string', description: 'Cartella base relativa entro cui cercare' }, maxResults: { type: 'number' } }, required: ['pattern'] }
 	},
 	{
 		name: 'search_text',
-		description: 'Cerca testo o regex nei file del workspace. Ritorna righe "file:linea: testo".',
-		args: '{"query": "pattern", "glob": "**/*.ts"}',
-		inputSchema: { type: 'object', properties: { query: { type: 'string' }, glob: { type: 'string' } }, required: ['query'] }
+		description: 'Cerca testo o regex nei file, opzionalmente sotto una cartella "path". Ritorna righe "file:linea: testo".',
+		args: '{"query": "pattern", "glob": "**/*.ts", "path": "src"}',
+		inputSchema: { type: 'object', properties: { query: { type: 'string' }, glob: { type: 'string' }, path: { type: 'string', description: 'Cartella base relativa' } }, required: ['query'] }
 	}
 ];
 
-const EXCLUDE = '**/{node_modules,.git,out,out-build,out-vscode,.build,dist,.vscode-test}/**';
+const EXCLUDE = '**/{node_modules,.git,out,out-build,out-vscode,.build,dist,.vscode-test,Library,Temp,Logs,obj,bin}/**';
+
+/** Combina una cartella base opzionale con un glob. */
+function scopedGlob(pattern: string, base?: unknown): string {
+	const b = base ? String(base).replace(/\\/g, '/').replace(/^\.?\//, '').replace(/\/$/, '') : '';
+	if (!b) {
+		return pattern;
+	}
+	return pattern.startsWith('**') ? `${b}/${pattern}` : `${b}/**/${pattern}`;
+}
 
 /** Tool built-in in formato Anthropic (tool-use nativo). */
 export function anthropicBuiltinTools(): AnthropicToolDef[] {
@@ -149,7 +158,7 @@ export async function executeTool(call: ToolCall): Promise<string> {
 			case 'find_files': {
 				const pattern = String(call.args.pattern ?? '**/*');
 				const max = Math.min(Number(call.args.maxResults ?? 100), 300);
-				const uris = await vscode.workspace.findFiles(pattern, EXCLUDE, max);
+				const uris = await vscode.workspace.findFiles(scopedGlob(pattern, call.args.path), EXCLUDE, max);
 				return uris.map(u => vscode.workspace.asRelativePath(u, false)).join('\n') || '(nessun file trovato)';
 			}
 			case 'search_text': {
@@ -157,7 +166,7 @@ export async function executeTool(call: ToolCall): Promise<string> {
 				if (!query) {
 					return 'Errore: query vuota.';
 				}
-				const glob = String(call.args.glob ?? '**/*');
+				const glob = scopedGlob(String(call.args.glob ?? '**/*'), call.args.path);
 				let re: RegExp | undefined;
 				try {
 					re = new RegExp(query, 'i');
