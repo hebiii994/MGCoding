@@ -120,32 +120,36 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 <meta charset="UTF-8" />
 <meta http-equiv="Content-Security-Policy" content="${csp}" />
 <style>
-	body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); margin: 0; padding: 0; display: flex; flex-direction: column; height: 100vh; }
-	#log { flex: 1; overflow-y: auto; padding: 8px; }
-	.msg { padding: 6px 8px; margin: 4px 0; border-radius: 6px; white-space: pre-wrap; word-wrap: break-word; }
-	.user { background: var(--vscode-input-background); }
-	.assistant { background: var(--vscode-editor-inactiveSelectionBackground); }
-	.tool { background: var(--vscode-textBlockQuote-background); border-left: 3px solid var(--vscode-focusBorder); font-family: var(--vscode-editor-font-family); font-size: 0.9em; }
-	.tool .head { font-weight: 600; }
-	.tool .result { opacity: 0.8; margin-top: 4px; max-height: 160px; overflow: auto; }
+	html, body { height: 100%; }
+	body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); margin: 0; display: flex; flex-direction: column; }
+	#log { flex: 1 1 auto; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+	.empty { margin: auto; text-align: center; opacity: 0.6; line-height: 1.7; padding: 16px; }
+	.msg { padding: 8px 10px; border-radius: 8px; white-space: pre-wrap; word-wrap: break-word; overflow-wrap: anywhere; max-width: 100%; box-sizing: border-box; }
+	.user { background: var(--vscode-input-background); align-self: flex-end; max-width: 92%; }
+	.assistant { background: var(--vscode-editor-inactiveSelectionBackground); align-self: flex-start; max-width: 100%; }
+	.tool { background: var(--vscode-textBlockQuote-background); border-left: 3px solid var(--vscode-focusBorder); font-family: var(--vscode-editor-font-family); font-size: 0.85em; align-self: stretch; }
+	.tool .head { font-weight: 600; margin-bottom: 2px; }
+	.tool .result { opacity: 0.85; max-height: 180px; overflow: auto; }
 	.error { color: var(--vscode-errorForeground); }
-	.empty { opacity: 0.6; padding: 12px 8px; }
-	#bottom { border-top: 1px solid var(--vscode-panel-border); padding: 8px; }
-	#input { width: 100%; box-sizing: border-box; resize: none; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); border-radius: 4px; padding: 6px; font-family: inherit; }
-	#row { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
-	#model { flex: 1; background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); border: 1px solid var(--vscode-dropdown-border); border-radius: 4px; padding: 3px; }
-	button { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; border-radius: 4px; padding: 4px 12px; cursor: pointer; }
-	#spinner { display: none; opacity: 0.7; padding: 4px 8px; font-style: italic; }
-	#spinner.on { display: block; }
+	#composer { flex: 0 0 auto; border-top: 1px solid var(--vscode-panel-border); padding: 8px; display: flex; flex-direction: column; gap: 6px; background: var(--vscode-sideBar-background); }
+	#input { width: 100%; box-sizing: border-box; resize: vertical; min-height: 40px; max-height: 200px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); border-radius: 6px; padding: 8px; font-family: inherit; font-size: 13px; }
+	#input:focus { outline: none; border-color: var(--vscode-focusBorder); }
+	#row { display: flex; align-items: center; gap: 6px; }
+	#model { flex: 1 1 auto; min-width: 0; background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); border: 1px solid var(--vscode-dropdown-border); border-radius: 6px; padding: 4px 6px; font-size: 12px; }
+	button { flex: 0 0 auto; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; border-radius: 6px; padding: 6px 14px; cursor: pointer; font-size: 13px; }
+	button:hover { background: var(--vscode-button-hoverBackground); }
+	#stop { display: none; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); padding: 6px 10px; }
+	body.busy #stop { display: inline-block; }
+	body.busy #send { opacity: 0.5; }
 </style>
 </head>
 <body>
-	<div id="log"><div class="empty">Chiedi qualcosa o descrivi un task… L'agente può leggere/scrivere file ed eseguire comandi.</div></div>
-	<div id="spinner">L'agente sta lavorando…</div>
-	<div id="bottom">
-		<textarea id="input" rows="3" placeholder="Scrivi un messaggio… (Invio per inviare, Shift+Invio per andare a capo)"></textarea>
+	<div id="log"><div class="empty">💬 Chiedi qualcosa o descrivi un task.<br/>L'agente può leggere e scrivere file ed eseguire comandi.</div></div>
+	<div id="composer">
+		<textarea id="input" rows="2" placeholder="Scrivi un messaggio…  (Invio = invia · Shift+Invio = a capo)"></textarea>
 		<div id="row">
 			<select id="model" title="Modello / provider"></select>
+			<button id="stop" title="Interrompi">⊘ Stop</button>
 			<button id="send">Invia</button>
 		</div>
 	</div>
@@ -155,7 +159,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	const input = document.getElementById('input');
 	const sendBtn = document.getElementById('send');
 	const model = document.getElementById('model');
-	const spinner = document.getElementById('spinner');
+	const stopBtn = document.getElementById('stop');
 	let emptied = false;
 	let current = null;
 
@@ -194,6 +198,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		vscode.postMessage({ type: 'send', text });
 	}
 	sendBtn.addEventListener('click', send);
+	stopBtn.addEventListener('click', () => vscode.postMessage({ type: 'stop' }));
 	input.addEventListener('keydown', e => {
 		if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
 	});
@@ -218,7 +223,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		else if (m.type === 'tool') { lastToolResult = addTool(m.name, m.args); }
 		else if (m.type === 'toolResult') { if (lastToolResult) { lastToolResult.textContent = m.text; log.scrollTop = log.scrollHeight; } }
 		else if (m.type === 'error') { add('error', '⚠ ' + m.text); }
-		else if (m.type === 'busy') { spinner.classList.toggle('on', m.value); }
+		else if (m.type === 'busy') { document.body.classList.toggle('busy', m.value); }
 	});
 
 	vscode.postMessage({ type: 'ready' });
