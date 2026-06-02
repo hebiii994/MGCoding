@@ -91,6 +91,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		this.abort = new AbortController();
 		try {
 			await runAgent(this.registry, this.history, {
+				onStreamStart: () => this.post({ type: 'streamStart' }),
+				onStreamDelta: t => this.post({ type: 'streamDelta', text: t }),
+				onStreamEnd: () => this.post({ type: 'streamEnd' }),
+				onStreamCancel: () => this.post({ type: 'streamCancel' }),
 				onAssistantText: t => this.post({ type: 'assistant', text: t }),
 				onToolStart: call => this.post({ type: 'tool', name: call.tool, args: JSON.stringify(call.args) }),
 				onToolResult: r => this.post({ type: 'toolResult', text: r })
@@ -153,6 +157,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	const model = document.getElementById('model');
 	const spinner = document.getElementById('spinner');
 	let emptied = false;
+	let current = null;
 
 	function clearEmpty() { if (!emptied) { log.innerHTML = ''; emptied = true; } }
 	function add(cls, text) {
@@ -205,6 +210,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 				model.appendChild(opt);
 			}
 		}
+		else if (m.type === 'streamStart') { current = add('assistant', ''); }
+		else if (m.type === 'streamDelta') { if (current) { current.textContent += m.text; log.scrollTop = log.scrollHeight; } }
+		else if (m.type === 'streamEnd') { current = null; }
+		else if (m.type === 'streamCancel') { if (current) { current.remove(); current = null; } }
 		else if (m.type === 'assistant') { add('assistant', m.text); }
 		else if (m.type === 'tool') { lastToolResult = addTool(m.name, m.args); }
 		else if (m.type === 'toolResult') { if (lastToolResult) { lastToolResult.textContent = m.text; log.scrollTop = log.scrollHeight; } }

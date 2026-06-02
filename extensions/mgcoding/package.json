@@ -28,6 +28,13 @@
 		"watch": "gulp watch-extension:mgcoding"
 	},
 	"contributes": {
+		"themes": [
+			{
+				"label": "MGCoding Green Dark",
+				"uiTheme": "vs-dark",
+				"path": "./themes/mgcoding-green-dark.json"
+			}
+		],
 		"viewsContainers": {
 			"activitybar": [
 				{
@@ -102,6 +109,11 @@
 				"command": "mgcoding.refreshSpecs",
 				"title": "Aggiorna",
 				"icon": "$(refresh)"
+			},
+			{
+				"command": "mgcoding.runSpecTasks",
+				"title": "Esegui tutti i task",
+				"icon": "$(run-all)"
 			},
 			{
 				"command": "mgcoding.refreshHooks",
@@ -183,6 +195,11 @@
 				}
 			],
 			"view/item/context": [
+				{
+					"command": "mgcoding.runSpecTasks",
+					"when": "view == mgcoding.specs && viewItem == mgcoding.spec",
+					"group": "inline@1"
+				},
 				{
 					"command": "mgcoding.runHook",
 					"when": "view == mgcoding.hooks && viewItem =~ /mgcoding.hook/",

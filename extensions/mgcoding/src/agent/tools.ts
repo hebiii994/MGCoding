@@ -5,6 +5,7 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as vscode from 'vscode';
+import { getMcpManager } from '../mcp/mcpClient';
 
 const execAsync = promisify(exec);
 const ENC = new TextEncoder();
@@ -86,8 +87,13 @@ export async function executeTool(call: ToolCall): Promise<string> {
 					return `[errore comando] ${err?.message ?? String(err)}\n${err?.stdout ?? ''}\n${err?.stderr ?? ''}`.trim();
 				}
 			}
-			default:
+			default: {
+				const mcp = getMcpManager();
+				if (mcp?.hasTool(call.tool)) {
+					return await mcp.callTool(call.tool, call.args);
+				}
 				return `Errore: tool sconosciuto "${call.tool}".`;
+			}
 		}
 	} catch (err) {
 		return `Errore tool ${call.tool}: ${err instanceof Error ? err.message : String(err)}`;

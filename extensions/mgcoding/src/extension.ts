@@ -9,7 +9,8 @@ import { ChatMessage } from './llm/types';
 import { createSampleHook, Hook, HookManager, HooksTreeProvider, toggleHook } from './hooks/hooks';
 import { ProviderRegistry } from './llm/registry';
 import { McpTreeProvider, openMcpConfig } from './mcp/mcp';
-import { createSpec, SpecsTreeProvider } from './specs/specs';
+import { McpManager, setMcpManager } from './mcp/mcpClient';
+import { createSpec, runSpecTasks, SpecsTreeProvider } from './specs/specs';
 import { initSteering, SteeringTreeProvider } from './steering/steering';
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -41,6 +42,18 @@ export function activate(context: vscode.ExtensionContext): void {
 	const hookManager = new HookManager(registry, () => hooksTree.refresh());
 	context.subscriptions.push(hookManager);
 
+	// MCP runtime
+	const mcpManager = new McpManager();
+	setMcpManager(mcpManager);
+	context.subscriptions.push(mcpManager);
+	const restartMcp = async () => { await mcpManager.start(); mcpTree.refresh(); };
+	void restartMcp();
+	const mcpWatcher = vscode.workspace.createFileSystemWatcher('**/.mg/mcp.json');
+	mcpWatcher.onDidChange(() => void restartMcp());
+	mcpWatcher.onDidCreate(() => void restartMcp());
+	mcpWatcher.onDidDelete(() => void restartMcp());
+	context.subscriptions.push(mcpWatcher);
+
 	// Comandi
 	context.subscriptions.push(
 		vscode.commands.registerCommand('mgcoding.switchProvider', () => registry.switchProvider()),
@@ -68,6 +81,12 @@ export function activate(context: vscode.ExtensionContext): void {
 
 		vscode.commands.registerCommand('mgcoding.newSpec', () => createSpec(registry, () => specsTree.refresh())),
 		vscode.commands.registerCommand('mgcoding.refreshSpecs', () => specsTree.refresh()),
+		vscode.commands.registerCommand('mgcoding.runSpecTasks', (node?: { uri: vscode.Uri }) => {
+			if (node?.uri) {
+				return runSpecTasks(registry, node.uri, () => specsTree.refresh());
+			}
+			return undefined;
+		}),
 
 		vscode.commands.registerCommand('mgcoding.newHook', async () => { await createSampleHook(); hooksTree.refresh(); }),
 		vscode.commands.registerCommand('mgcoding.refreshHooks', () => hooksTree.refresh()),
@@ -83,10 +102,11 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('mgcoding.refreshSteering', () => steeringTree.refresh()),
 
 		vscode.commands.registerCommand('mgcoding.openMcpConfig', () => openMcpConfig()),
-		vscode.commands.registerCommand('mgcoding.refreshMcp', () => mcpTree.refresh())
+		vscode.commands.registerCommand('mgcoding.refreshMcp', () => restartMcp())
 	);
 }
 
 export function deactivate(): void {
-	// le risorse sono gestite via context.subscriptions
+	setMcpManager(undefined);
+	// le altre risorse sono gestite via context.subscriptions
 }
