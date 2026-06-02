@@ -130,6 +130,7 @@ export class McpManager implements vscode.Disposable {
 	private connections: McpConnection[] = [];
 	/** prefixedToolName -> { connection, originalName } */
 	private readonly toolMap = new Map<string, { conn: McpConnection; original: string }>();
+	private readonly log = vscode.window.createOutputChannel('MGCoding MCP');
 
 	async start(): Promise<void> {
 		this.dispose();
@@ -138,6 +139,7 @@ export class McpManager implements vscode.Disposable {
 
 		const folders = vscode.workspace.workspaceFolders;
 		if (!folders?.length) {
+			this.log.appendLine('Nessun workspace: MCP non avviato.');
 			return;
 		}
 		const uri = vscode.Uri.joinPath(folders[0].uri, '.mg', 'mcp.json');
@@ -145,6 +147,7 @@ export class McpManager implements vscode.Disposable {
 		try {
 			config = JSON.parse(DEC.decode(await vscode.workspace.fs.readFile(uri)));
 		} catch {
+			this.log.appendLine('Nessun .mg/mcp.json valido.');
 			return;
 		}
 		const servers = config?.mcpServers ?? {};
@@ -155,16 +158,20 @@ export class McpManager implements vscode.Disposable {
 				continue;
 			}
 			const conn = new McpConnection(serverName, cfg.command, cfg.args ?? [], cwd);
+			this.log.appendLine(`Avvio server MCP "${serverName}": ${cfg.command} ${(cfg.args ?? []).join(' ')}`);
 			try {
 				await conn.start();
 				this.connections.push(conn);
 				for (const tool of conn.tools) {
 					this.toolMap.set(`${serverName}__${tool.name}`, { conn, original: tool.name });
 				}
-			} catch {
+				this.log.appendLine(`  -> connesso, ${conn.tools.length} tool: ${conn.tools.map(t => t.name).join(', ')}`);
+			} catch (err) {
+				this.log.appendLine(`  -> ERRORE: ${err instanceof Error ? err.message : String(err)}`);
 				conn.dispose();
 			}
 		}
+		this.log.appendLine(`MCP pronto: ${this.toolMap.size} tool totali.`);
 	}
 
 	/** Specifiche dei tool MCP da esporre all'agente. */
@@ -201,6 +208,10 @@ export class McpManager implements vscode.Disposable {
 	dispose(): void {
 		this.connections.forEach(c => c.dispose());
 		this.connections = [];
+	}
+
+	disposeLog(): void {
+		this.log.dispose();
 	}
 }
 
