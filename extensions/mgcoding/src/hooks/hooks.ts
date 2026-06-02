@@ -6,6 +6,7 @@
 import * as vscode from 'vscode';
 import { complete } from '../agent/agent';
 import { ProviderRegistry } from '../llm/registry';
+import { resolveFeatureDirs } from '../util/paths';
 
 type HookEvent = 'onSave' | 'onCreate' | 'onDelete' | 'manual';
 type HookAction = 'ask' | 'command';
@@ -40,32 +41,71 @@ function globToRegExp(glob: string): RegExp {
 	return new RegExp(`${re}$`);
 }
 
+/** Converte un hook in formato Kiro (.kiro.hook: when/then) nel nostro Hook. */
+function fromKiroHook(raw: any, uri: vscode.Uri): Hook | undefined {
+	if (!raw?.name) {
+		return undefined;
+	}
+	const whenType = raw.when?.type ?? '';
+	const event: HookEvent =
+		whenType === 'fileCreated' ? 'onCreate' :
+			whenType === 'fileDeleted' ? 'onDelete' :
+				whenType === 'userTriggered' || whenType === 'manual' ? 'manual' :
+					'onSave';
+	const patterns: string[] = raw.when?.patterns ?? [];
+	const thenType = raw.then?.type ?? 'askAgent';
+	const action: HookAction = thenType === 'runCommand' ? 'command' : 'ask';
+	return {
+		name: raw.name,
+		description: raw.description,
+		event,
+		filePattern: patterns[0],
+		action,
+		prompt: raw.then?.prompt,
+		command: raw.then?.command,
+		enabled: raw.enabled !== false,
+		uri
+	};
+}
+
 export async function loadHooks(): Promise<Hook[]> {
-	const dir = hooksDir();
-	if (!dir) {
-		return [];
-	}
-	let entries: [string, vscode.FileType][];
-	try {
-		entries = await vscode.workspace.fs.readDirectory(dir);
-	} catch {
-		return [];
-	}
+	const dirs = await resolveFeatureDirs('hooks');
 	const hooks: Hook[] = [];
-	for (const [name, type] of entries) {
-		if (type !== vscode.FileType.File || !name.endsWith('.json')) {
+	const seenNames = new Set<string>();
+	for (const dir of dirs) {
+		let entries: [string, vscode.FileType][];
+		try {
+			entries = await vscode.workspace.fs.readDirectory(dir);
+		} catch {
 			continue;
 		}
-		const uri = vscode.Uri.joinPath(dir, name);
-		try {
-			const hook = JSON.parse(DEC.decode(await vscode.workspace.fs.readFile(uri))) as Hook;
-			if (hook?.name && hook?.event && hook?.action) {
-				hook.uri = uri;
-				hook.enabled = hook.enabled !== false;
+		for (const [name, type] of entries) {
+			if (type !== vscode.FileType.File) {
+				continue;
+			}
+			const isKiro = name.endsWith('.kiro.hook');
+			if (!name.endsWith('.json') && !isKiro) {
+				continue;
+			}
+			const uri = vscode.Uri.joinPath(dir, name);
+			try {
+			const raw = JSON.parse(DEC.decode(await vscode.workspace.fs.readFile(uri)));
+			// Formato Kiro (when/then) oppure nostro (event/action)
+			const hook = (isKiro || raw?.when || raw?.then) ? fromKiroHook(raw, uri) : (() => {
+				if (raw?.name && raw?.event && raw?.action) {
+					raw.uri = uri;
+					raw.enabled = raw.enabled !== false;
+					return raw as Hook;
+				}
+				return undefined;
+			})();
+			if (hook && !seenNames.has(hook.name)) {
+				seenNames.add(hook.name);
 				hooks.push(hook);
 			}
 		} catch {
 			// ignora file non validi
+		}
 		}
 	}
 	return hooks;
@@ -75,9 +115,14 @@ export async function toggleHook(hook: Hook): Promise<void> {
 	if (!hook.uri) {
 		return;
 	}
-	const next: Hook = { ...hook, enabled: !(hook.enabled !== false) };
-	delete next.uri;
-	await vscode.workspace.fs.writeFile(hook.uri, ENC.encode(JSON.stringify(next, null, 2)));
+	// Riscrive solo il flag "enabled" preservando il formato originale (nostro o Kiro).
+	try {
+		const raw = JSON.parse(DEC.decode(await vscode.workspace.fs.readFile(hook.uri)));
+		raw.enabled = !(raw.enabled !== false);
+		await vscode.workspace.fs.writeFile(hook.uri, ENC.encode(JSON.stringify(raw, null, 2)));
+	} catch {
+		// ignora
+	}
 }
 
 export async function createSampleHook(): Promise<void> {
@@ -119,7 +164,7 @@ export class HookManager implements vscode.Disposable {
 		this.disposables.push(vscode.workspace.onDidCreateFiles(e => e.files.forEach(u => this.fire('onCreate', u))));
 		this.disposables.push(vscode.workspace.onDidDeleteFiles(e => e.files.forEach(u => this.fire('onDelete', u))));
 
-		const watcher = vscode.workspace.createFileSystemWatcher('**/.mg/hooks/*.json');
+		const watcher = vscode.workspace.createFileSystemWatcher('**/{.mg/hooks/*.json,.kiro/hooks/*}');
 		const reload = () => { void this.reload(); this.onChanged(); };
 		watcher.onDidChange(reload);
 		watcher.onDidCreate(reload);

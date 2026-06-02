@@ -8,6 +8,7 @@ import { complete } from '../agent/agent';
 import { runAgent } from '../agent/agentLoop';
 import { ProviderRegistry } from '../llm/registry';
 import { RunReporter } from '../run/runView';
+import { resolveFeatureDirs } from '../util/paths';
 
 const ENC = new TextEncoder();
 const DEC = new TextDecoder();
@@ -267,20 +268,25 @@ export class SpecsTreeProvider implements vscode.TreeDataProvider<SpecNode> {
 	}
 
 	async getChildren(node?: SpecNode): Promise<SpecNode[]> {
-		const root = specsRoot();
-		if (!root) {
-			return [];
-		}
 		if (!node) {
-			let entries: [string, vscode.FileType][];
-			try {
-				entries = await vscode.workspace.fs.readDirectory(root);
-			} catch {
-				return [];
+			const roots = await resolveFeatureDirs('specs');
+			const seen = new Set<string>();
+			const out: SpecNode[] = [];
+			for (const root of roots) {
+				let entries: [string, vscode.FileType][];
+				try {
+					entries = await vscode.workspace.fs.readDirectory(root);
+				} catch {
+					continue;
+				}
+				for (const [dirName, t] of entries) {
+					if (t === vscode.FileType.Directory && !seen.has(dirName)) {
+						seen.add(dirName);
+						out.push({ kind: 'spec', uri: vscode.Uri.joinPath(root, dirName), label: dirName });
+					}
+				}
 			}
-			return entries
-				.filter(([, t]) => t === vscode.FileType.Directory)
-				.map(([dirName]) => ({ kind: 'spec', uri: vscode.Uri.joinPath(root, dirName), label: dirName }));
+			return out;
 		}
 		if (node.kind === 'spec') {
 			const out: SpecNode[] = [];

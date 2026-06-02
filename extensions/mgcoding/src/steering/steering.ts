@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
+import { resolveFeatureDirs } from '../util/paths';
 
 type Inclusion = 'always' | 'fileMatch' | 'manual';
 
@@ -80,12 +81,20 @@ function globToRegExp(glob: string): RegExp {
  * e al file attivo.
  */
 export async function buildSteeringContext(): Promise<string> {
-	const folders = vscode.workspace.workspaceFolders;
-	if (!folders || folders.length === 0) {
+	const dirs = await resolveFeatureDirs('steering');
+	if (dirs.length === 0) {
 		return '';
 	}
-	const dir = vscode.Uri.joinPath(folders[0].uri, '.mg', 'steering');
-	const files = await readSteeringDir(dir);
+	const seen = new Set<string>();
+	const files: SteeringFile[] = [];
+	for (const dir of dirs) {
+		for (const f of await readSteeringDir(dir)) {
+			if (!seen.has(f.name)) {
+				seen.add(f.name);
+				files.push(f);
+			}
+		}
+	}
 	if (files.length === 0) {
 		return '';
 	}
@@ -163,16 +172,18 @@ export class SteeringTreeProvider implements vscode.TreeDataProvider<SteeringNod
 	}
 
 	async getChildren(): Promise<SteeringNode[]> {
-		const folders = vscode.workspace.workspaceFolders;
-		if (!folders?.length) {
-			return [];
+		const dirs = await resolveFeatureDirs('steering');
+		const seen = new Set<string>();
+		const nodes: SteeringNode[] = [];
+		for (const dir of dirs) {
+			for (const f of await readSteeringDir(dir)) {
+				if (seen.has(f.name)) {
+					continue;
+				}
+				seen.add(f.name);
+				nodes.push({ uri: vscode.Uri.joinPath(dir, `${f.name}.md`), label: f.name, inclusion: f.inclusion });
+			}
 		}
-		const dir = vscode.Uri.joinPath(folders[0].uri, '.mg', 'steering');
-		const files = await readSteeringDir(dir);
-		return files.map(f => ({
-			uri: vscode.Uri.joinPath(dir, `${f.name}.md`),
-			label: f.name,
-			inclusion: f.inclusion
-		}));
+		return nodes;
 	}
 }

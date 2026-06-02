@@ -7,6 +7,7 @@ import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
 import * as vscode from 'vscode';
 import { ToolSpec } from '../agent/tools';
 import { AnthropicToolDef } from '../llm/types';
+import { resolveFile } from '../util/paths';
 
 const DEC = new TextDecoder();
 
@@ -143,12 +144,16 @@ export class McpManager implements vscode.Disposable {
 			this.log.appendLine('Nessun workspace: MCP non avviato.');
 			return;
 		}
-		const uri = vscode.Uri.joinPath(folders[0].uri, '.mg', 'mcp.json');
+		const uri = await resolveFile('.mg/mcp.json', '.kiro/settings/mcp.json');
+		if (!uri) {
+			this.log.appendLine('Nessun mcp.json (.mg/mcp.json o .kiro/settings/mcp.json).');
+			return;
+		}
 		let config: any;
 		try {
 			config = JSON.parse(DEC.decode(await vscode.workspace.fs.readFile(uri)));
 		} catch {
-			this.log.appendLine('Nessun .mg/mcp.json valido.');
+			this.log.appendLine(`mcp.json non valido: ${uri.fsPath}`);
 			return;
 		}
 		const servers = config?.mcpServers ?? {};

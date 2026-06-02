@@ -79,7 +79,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(mcpManager);
 	const restartMcp = async () => { await mcpManager.start(); mcpTree.refresh(); };
 	void restartMcp();
-	const mcpWatcher = vscode.workspace.createFileSystemWatcher('**/.mg/mcp.json');
+	const mcpWatcher = vscode.workspace.createFileSystemWatcher('**/{.mg/mcp.json,.kiro/settings/mcp.json}');
 	mcpWatcher.onDidChange(() => void restartMcp());
 	mcpWatcher.onDidCreate(() => void restartMcp());
 	mcpWatcher.onDidDelete(() => void restartMcp());

@@ -5,6 +5,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
+import { resolveFile } from '../util/paths';
 
 const ENC = new TextEncoder();
 const DEC = new TextDecoder();
@@ -22,7 +23,7 @@ function mcpConfigUri(): vscode.Uri | undefined {
 }
 
 async function readServers(): Promise<McpServer[]> {
-	const uri = mcpConfigUri();
+	const uri = await resolveFile('.mg/mcp.json', '.kiro/settings/mcp.json');
 	if (!uri) {
 		return [];
 	}
