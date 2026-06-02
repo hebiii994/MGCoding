@@ -2,6 +2,7 @@
  *  MGCoding - loop agentico (ReAct con protocollo tool JSON, compatibile Claude e Ollama)
  *--------------------------------------------------------------------------------------------*/
 
+import * as vscode from 'vscode';
 import { ProviderRegistry } from '../llm/registry';
 import { AnthropicBlock, AnthropicMessage, ChatMessage, LLMProvider } from '../llm/types';
 import { getMcpManager } from '../mcp/mcpClient';
@@ -27,20 +28,29 @@ ${list}
 Usa percorsi relativi alla radice del workspace. Sii prudente con run_command.`;
 }
 
-const TOOL_RE = /```mg-tool\s*([\s\S]*?)```/;
+const TOOL_RE = /```(?:mg-tool|json)?\s*([\s\S]*?)```/;
 
+/** Estrae una tool-call accettando sia {tool,args} (mg-tool) sia {name,arguments} (stile function-call). */
 function parseToolCall(text: string): ToolCall | undefined {
+	let jsonStr: string | undefined;
 	const m = TOOL_RE.exec(text);
-	if (!m) {
+	if (m) {
+		jsonStr = m[1].trim();
+	} else if (text.trim().startsWith('{') && text.trim().endsWith('}')) {
+		jsonStr = text.trim();
+	}
+	if (!jsonStr) {
 		return undefined;
 	}
 	try {
-		const obj = JSON.parse(m[1].trim());
-		if (obj && typeof obj.tool === 'string') {
-			return { tool: obj.tool, args: obj.args ?? {} };
+		const obj = JSON.parse(jsonStr);
+		const name = obj.tool ?? obj.name;
+		const args = obj.args ?? obj.arguments ?? {};
+		if (typeof name === 'string') {
+			return { tool: name, args };
 		}
 	} catch {
-		// JSON malformato: ignora, verrà trattato come risposta finale
+		// JSON malformato: trattato come risposta finale
 	}
 	return undefined;
 }
@@ -70,8 +80,10 @@ export async function runAgent(
 	signal?: AbortSignal
 ): Promise<void> {
 	const provider = registry.current();
-	// Percorso preferito: tool-use NATIVO se il provider lo supporta (Claude).
-	if (typeof provider.streamAgent === 'function') {
+	// Percorso preferito: tool-use NATIVO se il provider lo supporta (Claude sempre; Ollama se abilitato).
+	const ollamaNative = provider.id !== 'ollama'
+		|| vscode.workspace.getConfiguration('mgcoding').get<boolean>('ollama.nativeTools', true);
+	if (typeof provider.streamAgent === 'function' && ollamaNative) {
 		return runNativeAgent(provider, messages, cb, signal);
 	}
 	return runJsonAgent(registry, messages, cb, signal);

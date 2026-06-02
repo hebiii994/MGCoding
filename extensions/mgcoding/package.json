@@ -248,6 +248,11 @@
 					"default": "qwen2.5-coder:14b",
 					"description": "Modello Ollama da usare (es. qwen2.5-coder:14b, llama3.1:8b)."
 				},
+				"mgcoding.ollama.nativeTools": {
+					"type": "boolean",
+					"default": false,
+					"description": "Usa il tool-use NATIVO di Ollama (function calling). Molti modelli coder (es. qwen2.5-coder) NON lo supportano e restituiscono la chiamata come testo: in tal caso lascia disattivato (verrà usato il protocollo testuale, più affidabile). Attivalo solo con modelli tool-capable (es. llama3.1)."
+				},
 				"mgcoding.autoApprove": {
 					"type": "boolean",
 					"default": false,
