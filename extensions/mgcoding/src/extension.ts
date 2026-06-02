@@ -5,6 +5,7 @@
 import * as vscode from 'vscode';
 import { runAgent } from './agent/agentLoop';
 import { ChatViewProvider } from './chat/chatViewProvider';
+import { registerDiffApproval } from './edit/diffApproval';
 import { ChatMessage } from './llm/types';
 import { createSampleHook, Hook, HookManager, HooksTreeProvider, toggleHook } from './hooks/hooks';
 import { ProviderRegistry } from './llm/registry';
@@ -16,6 +17,9 @@ import { initSteering, SteeringTreeProvider } from './steering/steering';
 export function activate(context: vscode.ExtensionContext): void {
 	const registry = new ProviderRegistry(context);
 	context.subscriptions.push(registry);
+
+	// Anteprima diff per le modifiche ai file
+	registerDiffApproval(context);
 
 	// Chat (barra laterale secondaria, a destra)
 	const chat = new ChatViewProvider(context.extensionUri, registry);

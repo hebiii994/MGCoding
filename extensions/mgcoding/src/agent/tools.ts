@@ -7,6 +7,7 @@ import { promisify } from 'util';
 import * as vscode from 'vscode';
 import { getMcpManager } from '../mcp/mcpClient';
 import { AnthropicToolDef } from '../llm/types';
+import { confirmWrite } from '../edit/diffApproval';
 
 const execAsync = promisify(exec);
 const ENC = new TextEncoder();
@@ -93,11 +94,26 @@ export async function executeTool(call: ToolCall): Promise<string> {
 				return DEC.decode(bytes);
 			}
 			case 'write_file': {
-				const uri = resolve(String(call.args.path));
-				const dir = vscode.Uri.joinPath(uri, '..');
-				await vscode.workspace.fs.createDirectory(dir);
-				await vscode.workspace.fs.writeFile(uri, ENC.encode(String(call.args.content ?? '')));
-				return `OK: scritto ${call.args.path}`;
+				const rel = String(call.args.path);
+				const uri = resolve(rel);
+				const newContent = String(call.args.content ?? '');
+				let oldContent = '';
+				try {
+					oldContent = DEC.decode(await vscode.workspace.fs.readFile(uri));
+				} catch {
+					// file nuovo
+				}
+				const cfg = vscode.workspace.getConfiguration('mgcoding');
+				const needApproval = cfg.get<boolean>('diffApproval', true) && !cfg.get<boolean>('autoApprove', false);
+				if (needApproval) {
+					const ok = await confirmWrite(rel, oldContent, newContent);
+					if (!ok) {
+						return `Modifica a ${rel} scartata dall'utente.`;
+					}
+				}
+				await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(uri, '..'));
+				await vscode.workspace.fs.writeFile(uri, ENC.encode(newContent));
+				return `OK: scritto ${rel}`;
 			}
 			case 'list_dir': {
 				const uri = resolve(String(call.args.path ?? '.'));

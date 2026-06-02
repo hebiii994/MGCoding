@@ -256,7 +256,12 @@
 				"mgcoding.autoApprove": {
 					"type": "boolean",
 					"default": false,
-					"description": "Se attivo, l'agente esegue i comandi shell senza chiedere conferma (autopilot)."
+					"description": "Se attivo, l'agente esegue i comandi shell e applica le modifiche ai file senza chiedere conferma (autopilot)."
+				},
+				"mgcoding.diffApproval": {
+					"type": "boolean",
+					"default": true,
+					"description": "Mostra un'anteprima diff e chiede conferma prima di scrivere un file (ignorato se autoApprove è attivo)."
 				}
 			}
 		}
