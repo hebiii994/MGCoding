@@ -111,16 +111,21 @@ export async function streamChat(
 	return full;
 }
 
-/** Completamento non-streaming: ritorna l'intera risposta. */
+/**
+ * Completamento non-streaming: ritorna l'intera risposta.
+ * Con `pureSystem` usa SOLO `systemExtra` come system prompt (senza il prompt
+ * agentico di base): utile per generare documenti puliti (es. spec).
+ */
 export async function complete(
 	registry: ProviderRegistry,
 	messages: ChatMessage[],
 	systemExtra?: string,
 	signal?: AbortSignal,
-	providerOverride?: LLMProvider
+	providerOverride?: LLMProvider,
+	pureSystem?: boolean
 ): Promise<string> {
 	const provider = providerOverride ?? registry.current();
-	const system = await buildSystemPrompt(systemExtra);
+	const system = pureSystem ? (systemExtra ?? '') : await buildSystemPrompt(systemExtra);
 	let full = '';
 	for await (const delta of provider.stream({ system, messages, signal })) {
 		full += delta;

@@ -8,6 +8,7 @@ import { complete } from '../agent/agent';
 import { track } from '../analytics/analytics';
 import { changedCount } from '../edit/checkpoint';
 import { SPEC_SYS, slugify, specsRoot, writeAndOpen } from '../specs/specs';
+import { splitThink } from '../util/parsing';
 import { ProviderRegistry } from '../llm/registry';
 import { ChatMessage } from '../llm/types';
 
@@ -392,7 +393,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			if (feedback) {
 				userPrompt += `\n\nIndicazioni di revisione dall'utente: ${feedback}\nRigenera il documento tenendone conto.`;
 			}
-			const content = await complete(this.registry, [{ role: 'user', content: userPrompt }], SPEC_SYS[phase]);
+			// pureSystem=true: niente prompt agentico, solo le istruzioni del documento.
+			const raw = await complete(this.registry, [{ role: 'user', content: userPrompt }], SPEC_SYS[phase], undefined, undefined, true);
+			// Rimuove l'eventuale ragionamento dei modelli "thinking" dal documento.
+			const content = splitThink(raw).answer.trim() || raw.trim();
 			const dir = vscode.Uri.joinPath(root, spec.slug);
 			await vscode.workspace.fs.createDirectory(dir);
 			await writeAndOpen(vscode.Uri.joinPath(dir, `${phase}.md`), content);
