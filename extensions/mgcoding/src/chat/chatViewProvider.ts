@@ -180,6 +180,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 				case 'pickContext':
 					await this.pickContext();
 					break;
+				case 'refreshState':
+					await this.sendState();
+					break;
 				case 'guidedSetup':
 					await vscode.commands.executeCommand('mgcoding.guidedSetup');
 					break;
@@ -240,21 +243,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		const provider = c.get<string>('provider', 'ollama');
 
 		const options: ProviderOption[] = [{ id: 'claude', label: `Claude (API) · ${claudeModel}` }];
+
+		// Ollama: solo i modelli REALMENTE installati sulla macchina dell'utente.
+		// (Se il provider attivo è Ollama, mostra comunque il modello selezionato.)
 		const installed = await this.registry.listOllamaModels();
-		const models = installed.length ? installed : [ollamaModel];
-		if (!models.includes(ollamaModel)) {
-			models.unshift(ollamaModel);
+		const ollamaList = [...installed];
+		if (provider === 'ollama' && ollamaModel && !ollamaList.includes(ollamaModel)) {
+			ollamaList.unshift(ollamaModel);
 		}
-		for (const m of models) {
+		for (const m of ollamaList) {
 			options.push({ id: `ollama:${m}`, label: `Ollama · ${m}` });
 		}
+
+		// OpenAI-compatibile: modelli esposti dall'endpoint configurato (Gemini/ChatGPT/…).
 		const oaiLabel = openAiProviderLabel(c.get<string>('openai.endpoint', ''));
 		const oai = await this.registry.listOpenAIModels();
-		const oaiModels = oai.length ? oai : [openaiModel];
-		if (!oaiModels.includes(openaiModel)) {
-			oaiModels.unshift(openaiModel);
+		const oaiList = [...oai];
+		if (provider === 'openai' && openaiModel && !oaiList.includes(openaiModel)) {
+			oaiList.unshift(openaiModel);
 		}
-		for (const m of oaiModels) {
+		for (const m of oaiList) {
 			options.push({ id: `openai:${m}`, label: `${oaiLabel} · ${m}` });
 		}
 
@@ -784,7 +792,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	input.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
 	function autoGrow() { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 200) + 'px'; }
 	input.addEventListener('input', autoGrow);
-	modelBtn.addEventListener('click', function (e) { e.stopPropagation(); modelMenu.classList.toggle('open'); });
+	modelBtn.addEventListener('click', function (e) { e.stopPropagation(); modelMenu.classList.toggle('open'); if (modelMenu.classList.contains('open')) { vscode.postMessage({ type: 'refreshState' }); } });
 	document.addEventListener('click', function () { modelMenu.classList.remove('open'); });
 	modelMenu.addEventListener('click', function (e) { e.stopPropagation(); });
 	function renderModelMenu(options, current) {
