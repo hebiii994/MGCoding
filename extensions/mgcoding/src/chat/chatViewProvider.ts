@@ -454,7 +454,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 <style>
 	:root { --mg-accent: #3fb950; --mg-accent-2: #2c7a45; }
 	html, body { height: 100%; }
-	body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); margin: 0; display: flex; flex-direction: column; }
+	body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); margin: 0; display: flex; flex-direction: column; overflow-x: hidden; }
 	#topbar { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--vscode-panel-border); }
 	#session { flex: 1 1 auto; min-width: 0; background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); border: 1px solid var(--vscode-dropdown-border); border-radius: 6px; padding: 3px 6px; font-size: 12px; }
 	.modebtn { flex: 0 0 auto; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; border-radius: 6px; padding: 3px 8px; font-size: 12px; cursor: pointer; }
@@ -530,7 +530,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	#model-btn:hover { background: var(--vscode-toolbar-hoverBackground, rgba(127,127,127,0.18)); opacity: 1; }
 	#model-cur { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	#model-btn .caret { flex: 0 0 auto; opacity: 0.7; font-size: 10px; }
-	#model-menu { position: absolute; bottom: calc(100% + 4px); left: 0; min-width: 220px; max-width: 320px; max-height: 260px; overflow-y: auto; background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border)); border-radius: 8px; box-shadow: 0 4px 14px rgba(0,0,0,0.35); padding: 4px; display: none; z-index: 20; }
+	#model-menu { position: absolute; bottom: calc(100% + 4px); right: 0; left: auto; min-width: 160px; max-width: calc(100vw - 24px); width: max-content; max-height: 260px; overflow-y: auto; overflow-x: hidden; background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border)); border-radius: 8px; box-shadow: 0 4px 14px rgba(0,0,0,0.35); padding: 4px; display: none; z-index: 20; box-sizing: border-box; }
 	#model-menu.open { display: block; }
 	.model-item { padding: 6px 9px; border-radius: 6px; font-size: 12px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 	.model-item:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.18)); }
