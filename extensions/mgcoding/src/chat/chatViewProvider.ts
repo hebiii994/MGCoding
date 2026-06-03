@@ -521,8 +521,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	#ctxpie { flex: 0 0 auto; display: flex; align-items: center; margin-left: 2px; }
 	#ctxpie svg { display: block; }
 	.spacer { flex: 1 1 auto; }
-	#model { flex: 0 1 auto; max-width: 48%; min-width: 0; background: transparent; color: var(--vscode-foreground); border: none; border-radius: 7px; padding: 4px 4px; font-size: 12px; opacity: 0.85; cursor: pointer; text-overflow: ellipsis; }
-	#model:hover { background: var(--vscode-toolbar-hoverBackground, rgba(127,127,127,0.18)); opacity: 1; }
+	#model-dd { position: relative; flex: 0 1 auto; min-width: 0; max-width: 52%; }
+	#model-btn { display: flex; align-items: center; gap: 4px; width: 100%; min-width: 0; background: transparent; color: var(--vscode-foreground); border: none; border-radius: 7px; padding: 4px 6px; font-size: 12px; opacity: 0.85; cursor: pointer; }
+	#model-btn:hover { background: var(--vscode-toolbar-hoverBackground, rgba(127,127,127,0.18)); opacity: 1; }
+	#model-cur { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	#model-btn .caret { flex: 0 0 auto; opacity: 0.7; font-size: 10px; }
+	#model-menu { position: absolute; bottom: calc(100% + 4px); left: 0; min-width: 220px; max-width: 320px; max-height: 260px; overflow-y: auto; background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border)); border-radius: 8px; box-shadow: 0 4px 14px rgba(0,0,0,0.35); padding: 4px; display: none; z-index: 20; }
+	#model-menu.open { display: block; }
+	.model-item { padding: 6px 9px; border-radius: 6px; font-size: 12px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+	.model-item:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.18)); }
+	.model-item.sel { background: color-mix(in srgb, var(--mg-accent) 22%, transparent); }
 	.toggle { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; background: transparent; border: none; color: var(--vscode-foreground); cursor: pointer; font-size: 12px; padding: 3px 4px; border-radius: 7px; }
 	.toggle:hover { background: var(--vscode-toolbar-hoverBackground, rgba(127,127,127,0.18)); }
 	.toggle .knob { width: 26px; height: 15px; border-radius: 9px; background: var(--vscode-input-border, #5a5a5a); position: relative; transition: background .15s; }
@@ -564,7 +572,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			<button class="iconbtn" id="attach" title="Allega immagine">📎</button>
 			<span id="ctxpie" title="Contesto utilizzato"></span>
 			<span class="spacer"></span>
-			<select id="model" title="Modello / provider"></select>
+			<div id="model-dd">
+				<button id="model-btn" title="Modello / provider"><span id="model-cur">…</span><span class="caret">▾</span></button>
+				<div id="model-menu"></div>
+			</div>
 			<button class="toggle" id="auto" title="Autopilot: esegue senza conferme"><span class="knob"></span><span>Autopilot</span></button>
 		</div>
 	</div>
@@ -573,7 +584,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	var log = document.getElementById('log');
 	var input = document.getElementById('input');
 	var sendBtn = document.getElementById('send');
-	var model = document.getElementById('model');
+	var modelBtn = document.getElementById('model-btn');
+	var modelMenu = document.getElementById('model-menu');
+	var modelCur = document.getElementById('model-cur');
 	var stopBtn = document.getElementById('stop');
 	var sessionSel = document.getElementById('session');
 	var newBtn = document.getElementById('newbtn');
@@ -741,7 +754,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	input.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
 	function autoGrow() { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 200) + 'px'; }
 	input.addEventListener('input', autoGrow);
-	model.addEventListener('change', function () { vscode.postMessage({ type: 'setProvider', id: model.value }); });
+	modelBtn.addEventListener('click', function (e) { e.stopPropagation(); modelMenu.classList.toggle('open'); });
+	document.addEventListener('click', function () { modelMenu.classList.remove('open'); });
+	modelMenu.addEventListener('click', function (e) { e.stopPropagation(); });
+	function renderModelMenu(options, current) {
+		modelMenu.innerHTML = '';
+		for (var i = 0; i < options.length; i++) {
+			(function (o) {
+				var it = document.createElement('div');
+				it.className = 'model-item' + (o.id === current ? ' sel' : '');
+				it.textContent = o.label;
+				it.addEventListener('click', function () {
+					modelMenu.classList.remove('open');
+					vscode.postMessage({ type: 'setProvider', id: o.id });
+				});
+				modelMenu.appendChild(it);
+				if (o.id === current) { modelCur.textContent = o.label; }
+			})(options[i]);
+		}
+	}
 	sessionSel.addEventListener('change', function () { vscode.postMessage({ type: 'switchSession', id: sessionSel.value }); });
 	hashBtn.addEventListener('click', function () { vscode.postMessage({ type: 'pickContext' }); });
 	attachBtn.addEventListener('click', function () { vscode.postMessage({ type: 'attachImage' }); });
@@ -792,14 +823,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	window.addEventListener('message', function (event) {
 		var m = event.data;
 		if (m.type === 'state') {
-			model.innerHTML = '';
-			for (var i = 0; i < m.state.options.length; i++) {
-				var o = m.state.options[i];
-				var opt = document.createElement('option');
-				opt.value = o.id; opt.textContent = o.label;
-				if (o.id === m.state.current) { opt.selected = true; }
-				model.appendChild(opt);
-			}
+			renderModelMenu(m.state.options, m.state.current);
 			sessionSel.innerHTML = '';
 			for (var j = 0; j < m.state.sessions.length; j++) {
 				var s = m.state.sessions[j];

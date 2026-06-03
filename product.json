@@ -2,6 +2,9 @@
 	"nameShort": "MGCoding",
 	"nameLong": "MGCoding",
 	"applicationName": "mgcoding",
+	"configurationDefaults": {
+		"security.workspace.trust.enabled": false
+	},
 	"dataFolderName": ".mgcoding",
 	"sharedDataFolderName": ".mgcoding-shared",
 	"win32MutexName": "mgcoding",
