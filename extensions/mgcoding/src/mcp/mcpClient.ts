@@ -29,6 +29,8 @@ class McpConnection {
 	private readonly pending = new Map<number, PendingRequest>();
 	private buffer = '';
 	tools: McpToolDef[] = [];
+	resources: string[] = [];
+	prompts: string[] = [];
 
 	constructor(readonly name: string, private readonly command: string, private readonly args: string[], private readonly cwd: string) { }
 
@@ -47,6 +49,18 @@ class McpConnection {
 		this.notify('notifications/initialized', {});
 		const res = await this.request('tools/list', {});
 		this.tools = (res?.tools ?? []) as McpToolDef[];
+		try {
+			const r = await this.request('resources/list', {});
+			this.resources = ((r?.resources ?? []) as { name?: string; uri?: string }[]).map(x => x.name || x.uri || '').filter(Boolean);
+		} catch {
+			this.resources = [];
+		}
+		try {
+			const p = await this.request('prompts/list', {});
+			this.prompts = ((p?.prompts ?? []) as { name?: string }[]).map(x => x.name || '').filter(Boolean);
+		} catch {
+			this.prompts = [];
+		}
 	}
 
 	private onData(text: string): void {
@@ -134,6 +148,8 @@ export interface McpServerStatus {
 	connected: boolean;
 	error?: string;
 	tools: string[];
+	resources: string[];
+	prompts: string[];
 }
 
 export class McpManager implements vscode.Disposable {
@@ -178,7 +194,7 @@ export class McpManager implements vscode.Disposable {
 				continue;
 			}
 			if (cfg?.disabled === true) {
-				this.statuses.push({ name: serverName, command: cfg.command, connected: false, error: 'disabilitato', tools: [] });
+				this.statuses.push({ name: serverName, command: cfg.command, connected: false, error: 'disabilitato', tools: [], resources: [], prompts: [] });
 				continue;
 			}
 			const conn = new McpConnection(serverName, cfg.command, cfg.args ?? [], cwd);
@@ -190,11 +206,11 @@ export class McpManager implements vscode.Disposable {
 					this.toolMap.set(`${serverName}__${tool.name}`, { conn, original: tool.name });
 				}
 				const names = conn.tools.map(t => t.name);
-				this.statuses.push({ name: serverName, command: cfg.command, connected: true, tools: names });
+				this.statuses.push({ name: serverName, command: cfg.command, connected: true, tools: names, resources: conn.resources, prompts: conn.prompts });
 				this.log.appendLine(`  -> connesso, ${names.length} tool: ${names.join(', ')}`);
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
-				this.statuses.push({ name: serverName, command: cfg.command, connected: false, error: msg, tools: [] });
+				this.statuses.push({ name: serverName, command: cfg.command, connected: false, error: msg, tools: [], resources: [], prompts: [] });
 				this.log.appendLine(`  -> ERRORE: ${msg}`);
 				conn.dispose();
 			}

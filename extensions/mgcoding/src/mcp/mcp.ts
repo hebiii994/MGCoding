@@ -37,7 +37,11 @@ export async function openMcpConfig(): Promise<void> {
 	await vscode.window.showTextDocument(doc);
 }
 
-type McpNode = { kind: 'server'; status: McpServerStatus } | { kind: 'tool'; name: string };
+type McpNode =
+	| { kind: 'server'; status: McpServerStatus }
+	| { kind: 'tool'; name: string }
+	| { kind: 'resource'; name: string }
+	| { kind: 'prompt'; name: string };
 
 export class McpTreeProvider implements vscode.TreeDataProvider<McpNode> {
 	private readonly _onDidChange = new vscode.EventEmitter<void>();
@@ -50,15 +54,17 @@ export class McpTreeProvider implements vscode.TreeDataProvider<McpNode> {
 	}
 
 	getTreeItem(node: McpNode): vscode.TreeItem {
-		if (node.kind === 'tool') {
+		if (node.kind === 'tool' || node.kind === 'resource' || node.kind === 'prompt') {
 			const item = new vscode.TreeItem(node.name, vscode.TreeItemCollapsibleState.None);
-			item.iconPath = new vscode.ThemeIcon('tools');
+			item.iconPath = new vscode.ThemeIcon(node.kind === 'tool' ? 'tools' : node.kind === 'resource' ? 'file-symlink-file' : 'comment-discussion');
+			item.description = node.kind;
 			return item;
 		}
 		const s = node.status;
+		const childCount = s.tools.length + s.resources.length + s.prompts.length;
 		const item = new vscode.TreeItem(
 			s.name,
-			s.connected && s.tools.length ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None
+			s.connected && childCount ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None
 		);
 		item.description = s.connected ? `● ${s.tools.length} tool` : (s.error ?? 'non connesso');
 		item.iconPath = new vscode.ThemeIcon(
@@ -74,7 +80,11 @@ export class McpTreeProvider implements vscode.TreeDataProvider<McpNode> {
 			return this.getStatuses().map(status => ({ kind: 'server' as const, status }));
 		}
 		if (node.kind === 'server') {
-			return node.status.tools.map(name => ({ kind: 'tool' as const, name }));
+			return [
+				...node.status.tools.map(name => ({ kind: 'tool' as const, name })),
+				...node.status.resources.map(name => ({ kind: 'resource' as const, name })),
+				...node.status.prompts.map(name => ({ kind: 'prompt' as const, name }))
+			];
 		}
 		return [];
 	}
