@@ -11,6 +11,31 @@ import { LLMProvider } from './types';
 const SECRET_CLAUDE_KEY = 'mgcoding.claude.apiKey';
 const SECRET_OPENAI_KEY = 'mgcoding.openai.apiKey';
 
+/** Preset di servizi OpenAI-compatibili pronti all'uso. */
+interface OpenAIPreset {
+	id: string;
+	label: string;
+	endpoint: string;
+	model: string;
+	azure?: boolean;
+	/** true => chiede all'utente endpoint/deployment (Azure o custom). */
+	prompt?: boolean;
+}
+
+const OPENAI_PRESETS: OpenAIPreset[] = [
+	{ id: 'chatgpt', label: 'ChatGPT (OpenAI)', endpoint: 'https://api.openai.com/v1', model: 'gpt-4o' },
+	{ id: 'gemini', label: 'Google Gemini', endpoint: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-2.5-pro' },
+	{ id: 'openrouter', label: 'OpenRouter (tutti i modelli)', endpoint: 'https://openrouter.ai/api/v1', model: 'anthropic/claude-3.7-sonnet' },
+	{ id: 'azure', label: 'Azure OpenAI (aziendale)', endpoint: '', model: '', azure: true, prompt: true },
+	{ id: 'lmstudio', label: 'LM Studio (locale)', endpoint: 'http://localhost:1234/v1', model: 'local-model' },
+	{ id: 'custom', label: 'Endpoint personalizzato…', endpoint: '', model: '', prompt: true }
+];
+
+/** Nome del secret per la API key di uno specifico endpoint (chiavi multiple coesistono). */
+function openAiSecretKeyFor(endpoint: string): string {
+	return endpoint ? `${SECRET_OPENAI_KEY}:${endpoint}` : SECRET_OPENAI_KEY;
+}
+
 export class ProviderRegistry implements vscode.Disposable {
 
 	private readonly claude: ClaudeProvider;
@@ -41,12 +66,17 @@ export class ProviderRegistry implements vscode.Disposable {
 			};
 		});
 		this.openai = new OpenAIProvider(
-			() => Promise.resolve(this.context.secrets.get(SECRET_OPENAI_KEY)),
+			() => {
+				const endpoint = vscode.workspace.getConfiguration('mgcoding').get<string>('openai.endpoint', 'http://localhost:1234/v1');
+				return Promise.resolve(this.context.secrets.get(openAiSecretKeyFor(endpoint)));
+			},
 			() => {
 				const c = vscode.workspace.getConfiguration('mgcoding');
 				return {
 					endpoint: c.get<string>('openai.endpoint', 'http://localhost:1234/v1'),
-					model: c.get<string>('openai.model', 'local-model')
+					model: c.get<string>('openai.model', 'local-model'),
+					azure: c.get<boolean>('openai.azure', false),
+					apiVersion: c.get<string>('openai.apiVersion', '2024-08-01-preview')
 				};
 			}
 		);
@@ -92,16 +122,53 @@ export class ProviderRegistry implements vscode.Disposable {
 	}
 
 	async setOpenAIKey(): Promise<void> {
+		const endpoint = vscode.workspace.getConfiguration('mgcoding').get<string>('openai.endpoint', 'http://localhost:1234/v1');
 		const key = await vscode.window.showInputBox({
-			prompt: 'API key per l\'endpoint OpenAI-compatibile (lascia vuoto per locale senza chiave)',
+			prompt: `API key per ${endpoint || 'l\'endpoint OpenAI-compatibile'} (lascia vuoto per locale senza chiave)`,
 			password: true,
 			ignoreFocusOut: true
 		});
 		if (key !== undefined) {
-			await this.context.secrets.store(SECRET_OPENAI_KEY, key.trim());
+			await this.context.secrets.store(openAiSecretKeyFor(endpoint), key.trim());
 			vscode.window.showInformationMessage('API key OpenAI-compat salvata.');
 			this.updateStatusBar();
 		}
+	}
+
+	/** Applica un preset OpenAI-compatibile: aggiorna config, chiede endpoint/modello/key se serve. */
+	private async applyOpenAiPreset(preset: OpenAIPreset): Promise<boolean> {
+		const c = vscode.workspace.getConfiguration('mgcoding');
+		let endpoint = preset.endpoint;
+		let model = preset.model;
+
+		if (preset.prompt) {
+			const ph = preset.azure
+				? 'https://<risorsa>.openai.azure.com/openai/deployments/<deployment>'
+				: 'https://… (base URL OpenAI-compatibile, es. .../v1)';
+			const ep = await vscode.window.showInputBox({ prompt: 'Endpoint (base URL)', placeHolder: ph, value: endpoint, ignoreFocusOut: true });
+			if (!ep) {
+				return false;
+			}
+			endpoint = ep.trim();
+			const md = await vscode.window.showInputBox({ prompt: 'Nome modello / deployment', value: model, ignoreFocusOut: true });
+			if (md === undefined) {
+				return false;
+			}
+			model = md.trim();
+		}
+
+		await c.update('provider', 'openai', vscode.ConfigurationTarget.Global);
+		await c.update('openai.endpoint', endpoint, vscode.ConfigurationTarget.Global);
+		await c.update('openai.model', model, vscode.ConfigurationTarget.Global);
+		await c.update('openai.azure', !!preset.azure, vscode.ConfigurationTarget.Global);
+
+		// Chiedi la API key solo se non già memorizzata per questo endpoint.
+		const existing = await this.context.secrets.get(openAiSecretKeyFor(endpoint));
+		if (!existing) {
+			await this.setOpenAIKey();
+		}
+		this.updateStatusBar();
+		return true;
 	}
 
 	private updateStatusBar(): void {
@@ -111,15 +178,24 @@ export class ProviderRegistry implements vscode.Disposable {
 	}
 
 	async switchProvider(): Promise<void> {
-		const picked = await vscode.window.showQuickPick(
-			[
-				{ label: 'Ollama (locale)', id: 'ollama' },
-				{ label: 'Claude (Anthropic)', id: 'claude' },
-				{ label: 'OpenAI-compatibile (LM Studio, OpenRouter…)', id: 'openai' }
-			],
-			{ placeHolder: 'Seleziona il provider LLM' }
-		);
+		type Item = vscode.QuickPickItem & { id: string; preset?: OpenAIPreset };
+		const items: Item[] = [
+			{ label: 'Ollama (locale)', id: 'ollama' },
+			{ label: 'Claude (Anthropic)', id: 'claude' },
+			{ label: 'Servizi OpenAI-compatibili', kind: vscode.QuickPickItemKind.Separator, id: '' },
+			...OPENAI_PRESETS.map(p => ({
+				label: p.label,
+				description: p.endpoint || (p.azure ? 'Azure' : 'personalizzato'),
+				id: 'openai',
+				preset: p
+			}))
+		];
+		const picked = await vscode.window.showQuickPick(items, { placeHolder: 'Seleziona il provider/servizio LLM' });
 		if (!picked) {
+			return;
+		}
+		if (picked.id === 'openai' && picked.preset) {
+			await this.applyOpenAiPreset(picked.preset);
 			return;
 		}
 		await vscode.workspace.getConfiguration('mgcoding').update('provider', picked.id, vscode.ConfigurationTarget.Global);

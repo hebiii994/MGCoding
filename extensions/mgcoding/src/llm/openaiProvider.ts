@@ -8,6 +8,10 @@ import { AgentStreamParams, AnthropicMessage, AnthropicStreamEvent, LLMError, LL
 export interface OpenAIConfig {
 	endpoint: string;
 	model: string;
+	/** Modalità Azure OpenAI: usa header 'api-key' e query ?api-version=. */
+	azure?: boolean;
+	/** api-version per Azure OpenAI (es. 2024-08-01-preview). */
+	apiVersion?: string;
 }
 
 type OpenAIPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } };
@@ -32,18 +36,36 @@ export class OpenAIProvider implements LLMProvider {
 		return this.getConfig().endpoint.replace(/\/$/, '');
 	}
 
+	/** URL di /chat/completions, con query api-version in modalità Azure. */
+	private chatUrl(): string {
+		const cfg = this.getConfig();
+		const url = `${this.base()}/chat/completions`;
+		return cfg.azure && cfg.apiVersion ? `${url}?api-version=${encodeURIComponent(cfg.apiVersion)}` : url;
+	}
+
+	private modelsUrl(): string {
+		const cfg = this.getConfig();
+		const url = `${this.base()}/models`;
+		return cfg.azure && cfg.apiVersion ? `${url}?api-version=${encodeURIComponent(cfg.apiVersion)}` : url;
+	}
+
 	private async headers(): Promise<Record<string, string>> {
 		const h: Record<string, string> = { 'content-type': 'application/json' };
 		const key = await this.getApiKey();
 		if (key) {
-			h['authorization'] = `Bearer ${key}`;
+			// Azure OpenAI usa l'header 'api-key'; gli altri usano il Bearer token.
+			if (this.getConfig().azure) {
+				h['api-key'] = key;
+			} else {
+				h['authorization'] = `Bearer ${key}`;
+			}
 		}
 		return h;
 	}
 
 	async isConfigured(): Promise<boolean> {
 		try {
-			const res = await fetch(`${this.base()}/models`, { headers: await this.headers() });
+			const res = await fetch(this.modelsUrl(), { headers: await this.headers() });
 			return res.ok;
 		} catch {
 			return false;
@@ -56,7 +78,7 @@ export class OpenAIProvider implements LLMProvider {
 
 	async listModels(): Promise<string[]> {
 		try {
-			const res = await fetch(`${this.base()}/models`, { headers: await this.headers() });
+			const res = await fetch(this.modelsUrl(), { headers: await this.headers() });
 			if (!res.ok) {
 				return [];
 			}
@@ -70,7 +92,7 @@ export class OpenAIProvider implements LLMProvider {
 	private async *postStream(body: object, signal?: AbortSignal): AsyncIterable<any> {
 		let res: Response;
 		try {
-			res = await fetch(`${this.base()}/chat/completions`, {
+			res = await fetch(this.chatUrl(), {
 				method: 'POST',
 				headers: await this.headers(),
 				body: JSON.stringify({ ...body, stream: true }),

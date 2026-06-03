@@ -293,6 +293,16 @@
 					"default": "local-model",
 					"description": "Modello per l'endpoint OpenAI-compatibile."
 				},
+				"mgcoding.openai.azure": {
+					"type": "boolean",
+					"default": false,
+					"description": "Modalità Azure OpenAI: usa l'header 'api-key' e aggiunge ?api-version= alle richieste."
+				},
+				"mgcoding.openai.apiVersion": {
+					"type": "string",
+					"default": "2024-08-01-preview",
+					"description": "api-version per Azure OpenAI (usato solo se openai.azure è attivo)."
+				},
 				"mgcoding.claude.model": {
 					"type": "string",
 					"default": "claude-opus-4-8",
