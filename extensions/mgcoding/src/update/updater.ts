@@ -137,27 +137,46 @@ async function downloadAndInstall(): Promise<void> {
 		return;
 	}
 
-	// Avvio diretto dell'installer come processo indipendente. Lo lasciamo gestire
-	// la chiusura/riapertura di MGCoding (Restart Manager di Inno). In più offriamo
-	// sempre un fallback manuale ("Mostra installer") che è infallibile.
+	// Aggiornamento automatico: un helper PowerShell indipendente attende che
+	// MGCoding si chiuda (così l'installer non trova istanze in esecuzione e non
+	// mostra prompt), installa in modo silenzioso e riapre l'app aggiornata.
+	const exePath = process.execPath;
+	const exeName = exePath.split(/[\\/]/).pop()?.replace(/\.exe$/i, '') ?? 'MGCoding';
+	const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
+	const psScript = [
+		"$ErrorActionPreference='SilentlyContinue';",
+		`$n=${q(exeName)};`,
+		// attende fino a ~30s che tutte le istanze di MGCoding si chiudano
+		'for($i=0;$i -lt 75 -and (Get-Process -Name $n);$i++){Start-Sleep -Milliseconds 400};',
+		// installazione silenziosa senza message box (force-close di eventuali residui)
+		`Start-Process -FilePath ${q(dest)} -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait;`,
+		// riapre MGCoding aggiornata
+		`Start-Process -FilePath ${q(exePath)}`
+	].join(' ');
+
 	let launchError = '';
 	try {
-		const child = spawn(dest, [], { detached: true, stdio: 'ignore' });
-		child.on('error', () => { /* fallback manuale sotto */ });
-		child.unref();
+		spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', psScript],
+			{ detached: true, stdio: 'ignore', windowsHide: true }).unref();
 	} catch (err) {
 		launchError = err instanceof Error ? err.message : String(err);
 	}
-	const pick = await vscode.window.showInformationMessage(
-		`MGCoding ${tag} è pronto da installare. L'installer dovrebbe aprirsi ora; segui i passaggi e l'app si chiuderà e riaprirà aggiornata. ` +
-		'Se non si apre, clicca "Mostra installer" e fai doppio clic sul file. ' +
-		'(Essendo non firmato, Windows potrebbe mostrare "Windows ha protetto il PC": clicca "Ulteriori informazioni" → "Esegui comunque".)' +
-		(launchError ? `\n${launchError}` : ''),
-		'Mostra installer'
-	);
-	if (pick === 'Mostra installer') {
-		await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(dest));
+
+	if (launchError) {
+		// Fallback infallibile: mostra il file da eseguire a mano.
+		const pick = await vscode.window.showErrorMessage(
+			`Aggiornamento automatico non riuscito (${launchError}). Puoi installarlo a mano: clicca "Mostra installer" e fai doppio clic sul file.`,
+			'Mostra installer'
+		);
+		if (pick === 'Mostra installer') {
+			await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(dest));
+		}
+		return;
 	}
+
+	vscode.window.showInformationMessage(`Aggiornamento a MGCoding ${tag} in corso: l'app si chiuderà e si riaprirà aggiornata tra pochi secondi…`);
+	// Chiude MGCoding così l'helper può completare l'installazione senza prompt.
+	setTimeout(() => void vscode.commands.executeCommand('workbench.action.quit'), 1200);
 }
 
 export async function checkForUpdates(context: vscode.ExtensionContext, manual: boolean): Promise<void> {
