@@ -358,6 +358,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 
 	private async handleSpecMessage(text: string): Promise<void> {
 		const session = this.active();
+		// Spec completata: se l'utente chiede di proseguire/eseguire i task, eseguili
+		// invece di iniziare una nuova spec.
+		if (session.spec && session.spec.phase === 'done' && /\b(continu|esegu|run|task|prosegu)/i.test(text)) {
+			this.post({ type: 'assistant', text: `▶ Eseguo i task di «${session.spec.name}»…` });
+			await this.runSpecTasksFromChat();
+			return;
+		}
 		if (!session.spec || session.spec.phase === 'done') {
 			const name = (text.trim().split('\n')[0] || 'Nuova funzionalità').slice(0, 60);
 			session.spec = { name, slug: slugify(name), idea: text.trim(), phase: 'requirements' };

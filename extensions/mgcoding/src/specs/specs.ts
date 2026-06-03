@@ -302,6 +302,33 @@ Al termine fornisci un breve riepilogo.`;
 	reporter.finish('=== Task terminato ===');
 }
 
+// ---- CodeLens su tasks.md: "Start task" per riga + Run all in cima (stile Kiro) ----
+
+/** Mostra azioni eseguibili direttamente nel tasks.md di una spec. */
+export class SpecTasksCodeLensProvider implements vscode.CodeLensProvider {
+	provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
+		const p = document.uri.path;
+		if (!/tasks\.md$/i.test(p) || !/specs/i.test(p)) {
+			return [];
+		}
+		const specDir = vscode.Uri.joinPath(document.uri, '..');
+		const top = new vscode.Range(0, 0, 0, 0);
+		const lenses: vscode.CodeLens[] = [
+			new vscode.CodeLens(top, { title: '$(run-all) Run all tasks', command: 'mgcoding.runSpecTasksHere', arguments: [document.uri] }),
+			new vscode.CodeLens(top, { title: '$(play-circle) Run all + optional', command: 'mgcoding.runSpecTasksHereOptional', arguments: [document.uri] })
+		];
+		for (const t of parseTasks(document.getText())) {
+			if (t.done) {
+				continue;
+			}
+			const range = new vscode.Range(t.lineIdx, 0, t.lineIdx, 0);
+			const title = t.optional ? '$(play) Start task (opzionale)' : '$(play) Start task';
+			lenses.push(new vscode.CodeLens(range, { title, command: 'mgcoding.runSpecTask', arguments: [{ specDir, lineIdx: t.lineIdx }] }));
+		}
+		return lenses;
+	}
+}
+
 // ---- Tree view ----
 
 type SpecNode =

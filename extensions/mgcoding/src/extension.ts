@@ -18,7 +18,7 @@ import { checkForUpdates } from './update/updater';
 import { initAnalytics, track, toggleAnalytics } from './analytics/analytics';
 import { registerAutocomplete } from './complete/autocomplete';
 import { RunViewProvider } from './run/runView';
-import { createSpec, runSpecTask, runSpecTasks, SpecsTreeProvider } from './specs/specs';
+import { createSpec, runSpecTask, runSpecTasks, SpecsTreeProvider, SpecTasksCodeLensProvider } from './specs/specs';
 import { initSteering, SteeringTreeProvider } from './steering/steering';
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -28,6 +28,11 @@ export function activate(context: vscode.ExtensionContext): void {
 	// Anteprima diff per le modifiche ai file
 	registerDiffApproval(context);
 	registerCheckpointDiff(context);
+
+	// CodeLens "Start task / Run all" nei tasks.md delle spec
+	context.subscriptions.push(
+		vscode.languages.registerCodeLensProvider({ pattern: '**/specs/**/tasks.md' }, new SpecTasksCodeLensProvider())
+	);
 
 	// Controllo aggiornamenti silenzioso all'avvio
 	void checkForUpdates(context, false);
