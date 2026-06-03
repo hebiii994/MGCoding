@@ -4,6 +4,7 @@
 
 import * as vscode from 'vscode';
 import { runAgent } from '../agent/agentLoop';
+import { track } from '../analytics/analytics';
 import { ProviderRegistry } from '../llm/registry';
 import { ChatMessage } from '../llm/types';
 
@@ -112,6 +113,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 						} else {
 							await cfg.update('provider', 'claude', vscode.ConfigurationTarget.Global);
 						}
+						track('provider_selected', { provider: msg.id.split(':')[0] });
 						await this.sendState();
 					}
 					break;
@@ -131,6 +133,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 					break;
 				case 'pickContext':
 					await this.pickContext();
+					break;
+				case 'guidedSetup':
+					await vscode.commands.executeCommand('mgcoding.guidedSetup');
 					break;
 				case 'newChat':
 					{
@@ -267,6 +272,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 
 	private async handleSend(text: string, images?: string[]): Promise<void> {
 		const session = this.active();
+		track('chat_sent', { mode: session.mode, provider: vscode.workspace.getConfiguration('mgcoding').get<string>('provider', 'ollama'), hasImages: !!images?.length });
 		if (session.title === 'Nuova sessione') {
 			session.title = (text || 'Immagine').slice(0, 40);
 		}
@@ -335,6 +341,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	.greatfor { margin: 18px 0 0; padding-left: 12px; border-left: 2px solid var(--mg-accent); }
 	.greatfor .gf-h { font-size: 12px; opacity: 0.8; margin-bottom: 6px; }
 	.greatfor ul { margin: 0; padding-left: 18px; font-size: 12.5px; opacity: 0.85; line-height: 1.7; }
+	.setup-link { display: block; margin: 18px auto 0; background: transparent; color: var(--mg-accent); border: 1px solid var(--mg-accent); border-radius: 8px; padding: 7px 14px; font-size: 12.5px; cursor: pointer; }
+	.setup-link:hover { background: color-mix(in srgb, var(--mg-accent) 14%, transparent); }
 	.msg { padding: 8px 10px; border-radius: 8px; word-wrap: break-word; overflow-wrap: anywhere; max-width: 100%; box-sizing: border-box; }
 	.user { background: var(--vscode-input-background); align-self: flex-end; max-width: 92%; white-space: pre-wrap; }
 	.assistant { background: var(--vscode-editor-inactiveSelectionBackground); align-self: flex-start; max-width: 100%; }
@@ -512,7 +520,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		var ul = document.createElement('ul');
 		['Esplorazione e test rapidi', 'Costruire quando i requisiti non sono chiari', 'Implementare un task'].forEach(function (t) { var li = document.createElement('li'); li.textContent = t; ul.appendChild(li); });
 		gf.appendChild(gfh); gf.appendChild(ul);
-		w.appendChild(icon); w.appendChild(title); w.appendChild(sub); w.appendChild(cards); w.appendChild(gf);
+		var setup = document.createElement('button'); setup.className = 'setup-link'; setup.textContent = '\\u2699 Configura un modello';
+		setup.addEventListener('click', function () { vscode.postMessage({ type: 'guidedSetup' }); });
+		w.appendChild(icon); w.appendChild(title); w.appendChild(sub); w.appendChild(cards); w.appendChild(gf); w.appendChild(setup);
 		log.appendChild(w);
 	}
 	function ensureCleared() { var e = log.querySelector('.empty'); if (e) { log.innerHTML = ''; } }

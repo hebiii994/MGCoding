@@ -3,7 +3,7 @@
 	"publisher": "mgcoding",
 	"displayName": "MGCoding",
 	"description": "Agente di sviluppo spec-driven (Specs, Steering, Hooks, MCP) con LLM locale o Claude.",
-	"version": "0.2.4",
+	"version": "0.2.5",
 	"license": "MIT",
 	"engines": {
 		"vscode": "^1.5.0"
@@ -87,6 +87,14 @@
 			{
 				"command": "mgcoding.switchProvider",
 				"title": "MGCoding: Cambia modello/provider"
+			},
+			{
+				"command": "mgcoding.guidedSetup",
+				"title": "MGCoding: Configurazione guidata"
+			},
+			{
+				"command": "mgcoding.toggleAnalytics",
+				"title": "MGCoding: Statistiche d'uso (attiva/disattiva)"
 			},
 			{
 				"command": "mgcoding.setApiKey",
@@ -302,6 +310,21 @@
 					"type": "string",
 					"default": "2024-08-01-preview",
 					"description": "api-version per Azure OpenAI (usato solo se openai.azure è attivo)."
+				},
+				"mgcoding.analytics.enabled": {
+					"type": "boolean",
+					"default": false,
+					"description": "Invia statistiche d'uso anonime (nessun prompt, codice o chiave). Disattivato di default; il consenso viene chiesto al primo avvio."
+				},
+				"mgcoding.analytics.key": {
+					"type": "string",
+					"default": "",
+					"description": "Project API key di PostHog (pubblica, formato phc_...) verso cui inviare gli eventi anonimi."
+				},
+				"mgcoding.analytics.host": {
+					"type": "string",
+					"default": "https://eu.i.posthog.com",
+					"description": "Host PostHog per gli eventi (default: cloud UE)."
 				},
 				"mgcoding.claude.model": {
 					"type": "string",

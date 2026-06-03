@@ -20,14 +20,18 @@ interface OpenAIPreset {
 	azure?: boolean;
 	/** true => chiede all'utente endpoint/deployment (Azure o custom). */
 	prompt?: boolean;
+	/** Pagina dove ottenere la API key (mostrata nella configurazione guidata). */
+	keyUrl?: string;
+	/** Nota mostrata nella configurazione guidata. */
+	note?: string;
 }
 
 const OPENAI_PRESETS: OpenAIPreset[] = [
-	{ id: 'chatgpt', label: 'ChatGPT (OpenAI)', endpoint: 'https://api.openai.com/v1', model: 'gpt-4o' },
-	{ id: 'gemini', label: 'Google Gemini', endpoint: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-2.5-pro' },
-	{ id: 'openrouter', label: 'OpenRouter (tutti i modelli)', endpoint: 'https://openrouter.ai/api/v1', model: 'anthropic/claude-3.7-sonnet' },
-	{ id: 'azure', label: 'Azure OpenAI (aziendale)', endpoint: '', model: '', azure: true, prompt: true },
-	{ id: 'lmstudio', label: 'LM Studio (locale)', endpoint: 'http://localhost:1234/v1', model: 'local-model' },
+	{ id: 'chatgpt', label: 'ChatGPT (OpenAI)', endpoint: 'https://api.openai.com/v1', model: 'gpt-4o', keyUrl: 'https://platform.openai.com/api-keys', note: 'Serve una API key di OpenAI Platform (a consumo): l\'abbonamento ChatGPT web non è sufficiente.' },
+	{ id: 'gemini', label: 'Google Gemini', endpoint: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-2.5-pro', keyUrl: 'https://aistudio.google.com/apikey', note: 'Serve una API key gratuita di Google AI Studio: l\'abbonamento Gemini Advanced non è sufficiente.' },
+	{ id: 'openrouter', label: 'OpenRouter (tutti i modelli)', endpoint: 'https://openrouter.ai/api/v1', model: 'anthropic/claude-3.7-sonnet', keyUrl: 'https://openrouter.ai/keys' },
+	{ id: 'azure', label: 'Azure OpenAI (aziendale)', endpoint: '', model: '', azure: true, prompt: true, note: 'Inserisci l\'URL del deployment Azure e la relativa key.' },
+	{ id: 'lmstudio', label: 'LM Studio (locale)', endpoint: 'http://localhost:1234/v1', model: 'local-model', note: 'Assicurati che LM Studio sia in esecuzione con il server locale attivo.' },
 	{ id: 'custom', label: 'Endpoint personalizzato…', endpoint: '', model: '', prompt: true }
 ];
 
@@ -136,7 +140,7 @@ export class ProviderRegistry implements vscode.Disposable {
 	}
 
 	/** Applica un preset OpenAI-compatibile: aggiorna config, chiede endpoint/modello/key se serve. */
-	private async applyOpenAiPreset(preset: OpenAIPreset): Promise<boolean> {
+	private async applyOpenAiPreset(preset: OpenAIPreset, forceKey = false): Promise<boolean> {
 		const c = vscode.workspace.getConfiguration('mgcoding');
 		let endpoint = preset.endpoint;
 		let model = preset.model;
@@ -162,13 +166,120 @@ export class ProviderRegistry implements vscode.Disposable {
 		await c.update('openai.model', model, vscode.ConfigurationTarget.Global);
 		await c.update('openai.azure', !!preset.azure, vscode.ConfigurationTarget.Global);
 
-		// Chiedi la API key solo se non già memorizzata per questo endpoint.
+		// Chiedi la API key se richiesto esplicitamente o se non già memorizzata per questo endpoint.
 		const existing = await this.context.secrets.get(openAiSecretKeyFor(endpoint));
-		if (!existing) {
+		if (forceKey || !existing) {
 			await this.setOpenAIKey();
 		}
 		this.updateStatusBar();
 		return true;
+	}
+
+	/** Testa la raggiungibilità del provider e mostra l'esito. */
+	private async testAndReport(provider: LLMProvider, label: string): Promise<void> {
+		const ok = await vscode.window.withProgress(
+			{ location: vscode.ProgressLocation.Notification, title: `Verifica connessione a ${label}…`, cancellable: false },
+			() => provider.isConfigured()
+		);
+		this.updateStatusBar();
+		if (ok) {
+			vscode.window.showInformationMessage(`✓ ${label} configurato e raggiungibile.`);
+		} else {
+			vscode.window.showWarningMessage(`⚠ ${label} configurato, ma il test di connessione non è riuscito. Verifica la chiave o l'endpoint.`);
+		}
+	}
+
+	/** Procedura guidata: scegli un servizio, ottieni la chiave, testala, scegli il modello. */
+	async guidedSetup(): Promise<void> {
+		type Item = vscode.QuickPickItem & { target: 'preset' | 'claude' | 'ollama'; presetId?: string };
+		const items: Item[] = [
+			{ label: '$(sparkle) Google Gemini', detail: 'API key gratuita da Google AI Studio', target: 'preset', presetId: 'gemini' },
+			{ label: 'ChatGPT (OpenAI)', detail: 'API key da OpenAI Platform', target: 'preset', presetId: 'chatgpt' },
+			{ label: 'Claude (Anthropic)', detail: 'API key da console.anthropic.com', target: 'claude' },
+			{ label: 'OpenRouter', detail: 'Tutti i modelli con una sola key', target: 'preset', presetId: 'openrouter' },
+			{ label: 'Azure OpenAI', detail: 'Endpoint aziendale', target: 'preset', presetId: 'azure' },
+			{ label: 'Ollama (locale)', detail: 'Modelli in locale, nessuna chiave', target: 'ollama' },
+			{ label: 'LM Studio (locale)', detail: 'Server locale OpenAI-compatibile', target: 'preset', presetId: 'lmstudio' }
+		];
+		const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Configurazione guidata: quale modello/servizio vuoi usare?', ignoreFocusOut: true });
+		if (!pick) {
+			return;
+		}
+
+		if (pick.target === 'claude') {
+			const go = await vscode.window.showInformationMessage(
+				'Claude richiede una API key Anthropic (sk-ant-…).',
+				'Apri pagina chiave',
+				'Ho già la chiave'
+			);
+			if (go === 'Apri pagina chiave') {
+				await vscode.env.openExternal(vscode.Uri.parse('https://console.anthropic.com/settings/keys'));
+			}
+			if (!go) {
+				return;
+			}
+			await vscode.workspace.getConfiguration('mgcoding').update('provider', 'claude', vscode.ConfigurationTarget.Global);
+			await this.setApiKey();
+			await this.testAndReport(this.claude, 'Claude');
+			return;
+		}
+
+		if (pick.target === 'ollama') {
+			const c = vscode.workspace.getConfiguration('mgcoding');
+			await c.update('provider', 'ollama', vscode.ConfigurationTarget.Global);
+			const endpoint = c.get<string>('ollama.endpoint', 'http://localhost:11434');
+			const models = await this.ollama.listModels();
+			if (!models.length) {
+				vscode.window.showWarningMessage(`Ollama non raggiungibile su ${endpoint}. Avvia Ollama (e scarica un modello con "ollama pull") poi riprova.`);
+				return;
+			}
+			const model = await vscode.window.showQuickPick(models, { placeHolder: 'Scegli il modello Ollama da usare' });
+			if (model) {
+				await c.update('ollama.model', model, vscode.ConfigurationTarget.Global);
+			}
+			await this.testAndReport(this.ollama, 'Ollama');
+			return;
+		}
+
+		// Servizi OpenAI-compatibili (preset)
+		const preset = OPENAI_PRESETS.find(p => p.id === pick.presetId);
+		if (!preset) {
+			return;
+		}
+		if (preset.keyUrl) {
+			const go = await vscode.window.showInformationMessage(
+				`${preset.label}. ${preset.note ?? ''}`.trim(),
+				'Apri pagina chiave',
+				'Ho già la chiave'
+			);
+			if (!go) {
+				return;
+			}
+			if (go === 'Apri pagina chiave') {
+				await vscode.env.openExternal(vscode.Uri.parse(preset.keyUrl));
+			}
+		} else if (preset.note) {
+			vscode.window.showInformationMessage(preset.note);
+		}
+		const ok = await this.applyOpenAiPreset(preset, true);
+		if (!ok) {
+			return;
+		}
+		// Offri la scelta del modello tra quelli esposti dall'endpoint, se disponibili.
+		try {
+			const models = await this.openai.listModels();
+			if (models.length) {
+				const current = vscode.workspace.getConfiguration('mgcoding').get<string>('openai.model', '');
+				const sorted = [current, ...models.filter(m => m !== current)].filter(Boolean);
+				const model = await vscode.window.showQuickPick(sorted, { placeHolder: `Scegli il modello (${preset.label})` });
+				if (model) {
+					await vscode.workspace.getConfiguration('mgcoding').update('openai.model', model, vscode.ConfigurationTarget.Global);
+				}
+			}
+		} catch {
+			// elenco modelli non disponibile: si tiene il default del preset
+		}
+		await this.testAndReport(this.openai, preset.label);
 	}
 
 	private updateStatusBar(): void {

@@ -15,6 +15,7 @@ import { McpTreeProvider, openMcpConfig } from './mcp/mcp';
 import { McpManager, setMcpManager } from './mcp/mcpClient';
 import { importFromKiro } from './migrate/importKiro';
 import { checkForUpdates } from './update/updater';
+import { initAnalytics, track, toggleAnalytics } from './analytics/analytics';
 import { registerAutocomplete } from './complete/autocomplete';
 import { RunViewProvider } from './run/runView';
 import { createSpec, runSpecTask, runSpecTasks, SpecsTreeProvider } from './specs/specs';
@@ -29,6 +30,23 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	// Controllo aggiornamenti silenzioso all'avvio
 	void checkForUpdates(context, false);
+
+	// Analytics anonimi opt-in (chiede il consenso una sola volta)
+	initAnalytics(context);
+	track('app_started');
+
+	// Primo avvio: proponi la configurazione guidata di un modello
+	if (!context.globalState.get<boolean>('mgcoding.firstRunDone', false)) {
+		void context.globalState.update('mgcoding.firstRunDone', true);
+		void vscode.window.showInformationMessage(
+			'Benvenuto in MGCoding! Vuoi configurare ora un modello (Gemini, ChatGPT, Claude, Ollama…)?',
+			'Configurazione guidata'
+		).then(choice => {
+			if (choice === 'Configurazione guidata') {
+				void registry.guidedSetup();
+			}
+		});
+	}
 
 	// Autocomplete inline (ghost text)
 	registerAutocomplete(context);
@@ -102,6 +120,8 @@ export function activate(context: vscode.ExtensionContext): void {
 	// Comandi
 	context.subscriptions.push(
 		vscode.commands.registerCommand('mgcoding.switchProvider', () => registry.switchProvider()),
+		vscode.commands.registerCommand('mgcoding.guidedSetup', () => registry.guidedSetup()),
+		vscode.commands.registerCommand('mgcoding.toggleAnalytics', () => toggleAnalytics()),
 		vscode.commands.registerCommand('mgcoding.setApiKey', () => registry.setApiKey()),
 		vscode.commands.registerCommand('mgcoding.setOpenAIKey', () => registry.setOpenAIKey()),
 		vscode.commands.registerCommand('mgcoding.openChat', () => vscode.commands.executeCommand('mgcoding.chat.focus')),
