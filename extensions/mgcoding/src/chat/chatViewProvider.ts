@@ -311,6 +311,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 <meta charset="UTF-8" />
 <meta http-equiv="Content-Security-Policy" content="${csp}" />
 <style>
+	:root { --mg-accent: #3fb950; --mg-accent-2: #2c7a45; }
 	html, body { height: 100%; }
 	body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); margin: 0; display: flex; flex-direction: column; }
 	#topbar { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--vscode-panel-border); }
@@ -320,6 +321,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	#newbtn { flex: 0 0 auto; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; border-radius: 6px; padding: 3px 9px; cursor: pointer; }
 	#log { flex: 1 1 auto; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
 	.empty { margin: auto; text-align: center; opacity: 0.6; line-height: 1.7; padding: 16px; }
+	.welcome { margin: auto; width: 100%; max-width: 520px; padding: 24px 18px; box-sizing: border-box; }
+	.welcome-icon { text-align: center; font-size: 26px; line-height: 1; margin-bottom: 10px; }
+	.welcome-title { text-align: center; font-size: 30px; font-weight: 700; margin: 0 0 6px; background: linear-gradient(90deg, var(--mg-accent), var(--mg-accent-2)); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+	.welcome-sub { text-align: center; opacity: 0.7; font-size: 13px; margin-bottom: 20px; }
+	.cards { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+	.card { text-align: left; background: var(--vscode-editor-inactiveSelectionBackground); border: 1px solid var(--vscode-panel-border); border-radius: 10px; padding: 14px; cursor: pointer; transition: border-color .15s, background .15s; }
+	.card:hover { border-color: var(--mg-accent); }
+	.card.active { border-color: var(--mg-accent); background: color-mix(in srgb, var(--mg-accent) 14%, transparent); }
+	.card .card-h { display: flex; align-items: center; gap: 7px; font-weight: 600; font-size: 14px; margin-bottom: 6px; }
+	.card .card-h .ic { color: var(--mg-accent); }
+	.card p { margin: 0; font-size: 12px; opacity: 0.72; line-height: 1.5; }
+	.greatfor { margin: 18px 0 0; padding-left: 12px; border-left: 2px solid var(--mg-accent); }
+	.greatfor .gf-h { font-size: 12px; opacity: 0.8; margin-bottom: 6px; }
+	.greatfor ul { margin: 0; padding-left: 18px; font-size: 12.5px; opacity: 0.85; line-height: 1.7; }
 	.msg { padding: 8px 10px; border-radius: 8px; word-wrap: break-word; overflow-wrap: anywhere; max-width: 100%; box-sizing: border-box; }
 	.user { background: var(--vscode-input-background); align-self: flex-end; max-width: 92%; white-space: pre-wrap; }
 	.assistant { background: var(--vscode-editor-inactiveSelectionBackground); align-self: flex-start; max-width: 100%; }
@@ -365,7 +380,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		<button class="modebtn" id="mode-vibe" title="Chat-first">Vibe</button>
 		<button class="modebtn" id="mode-spec" title="Spec-driven">Spec</button>
 	</div>
-	<div id="log"><div class="empty">💬 Chiedi qualcosa o descrivi un task.</div></div>
+	<div id="log"></div>
 	<div id="composer">
 		<div id="thumbs"></div>
 		<textarea id="input" rows="2" placeholder="Scrivi un messaggio…  (Invio = invia · @file · incolla immagini)"></textarea>
@@ -398,6 +413,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	var pendingImages = [];
 	var current = null;
 	var lastToolResult = null;
+	var currentMode = 'vibe';
 	var BT = String.fromCharCode(96);
 	var fenceRe = new RegExp(BT + BT + BT + '(\\\\w*)\\\\n?([\\\\s\\\\S]*?)' + BT + BT + BT, 'g');
 	var inlineRe = new RegExp(BT + '([^' + BT + ']+)' + BT, 'g');
@@ -441,6 +457,33 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		return { think: raw.slice(open + 7, close), answer: raw.slice(0, open) + raw.slice(close + 8), thinking: false };
 	}
 	function showEmpty(txt) { log.innerHTML = '<div class="empty">' + txt + '</div>'; }
+	function card(mode, icon, title, desc) {
+		var c = document.createElement('div'); c.className = 'card' + (currentMode === mode ? ' active' : ''); c.setAttribute('data-mode', mode);
+		var h = document.createElement('div'); h.className = 'card-h';
+		var ic = document.createElement('span'); ic.className = 'ic'; ic.textContent = icon; h.appendChild(ic);
+		var t = document.createElement('span'); t.textContent = title; h.appendChild(t);
+		var p = document.createElement('p'); p.textContent = desc;
+		c.appendChild(h); c.appendChild(p);
+		c.addEventListener('click', function () { vscode.postMessage({ type: 'setMode', mode: mode }); input.focus(); });
+		return c;
+	}
+	function showWelcome() {
+		log.innerHTML = '';
+		var w = document.createElement('div'); w.className = 'welcome';
+		var icon = document.createElement('div'); icon.className = 'welcome-icon'; icon.textContent = '\\u2728';
+		var title = document.createElement('div'); title.className = 'welcome-title'; title.textContent = "Let's build";
+		var sub = document.createElement('div'); sub.className = 'welcome-sub'; sub.textContent = 'Pianifica, cerca o costruisci qualsiasi cosa';
+		var cards = document.createElement('div'); cards.className = 'cards';
+		cards.appendChild(card('vibe', '\\uD83D\\uDCAC', 'Vibe', 'Prima parli, poi costruisci. Esplora idee e itera mentre scopri cosa serve.'));
+		cards.appendChild(card('spec', '\\uD83D\\uDCCB', 'Spec', 'Prima pianifichi, poi costruisci. Crea requisiti e design prima di scrivere codice.'));
+		var gf = document.createElement('div'); gf.className = 'greatfor';
+		var gfh = document.createElement('div'); gfh.className = 'gf-h'; gfh.textContent = 'Ottimo per:';
+		var ul = document.createElement('ul');
+		['Esplorazione e test rapidi', 'Costruire quando i requisiti non sono chiari', 'Implementare un task'].forEach(function (t) { var li = document.createElement('li'); li.textContent = t; ul.appendChild(li); });
+		gf.appendChild(gfh); gf.appendChild(ul);
+		w.appendChild(icon); w.appendChild(title); w.appendChild(sub); w.appendChild(cards); w.appendChild(gf);
+		log.appendChild(w);
+	}
 	function ensureCleared() { var e = log.querySelector('.empty'); if (e) { log.innerHTML = ''; } }
 	function makeAssistant() {
 		ensureCleared();
@@ -542,8 +585,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 				if (s.id === m.state.activeId) { so.selected = true; }
 				sessionSel.appendChild(so);
 			}
+			currentMode = m.state.mode;
 			modeVibe.className = 'modebtn' + (m.state.mode === 'vibe' ? ' active' : '');
 			modeSpec.className = 'modebtn' + (m.state.mode === 'spec' ? ' active' : '');
+			var wcards = log.querySelectorAll('.welcome .card');
+			for (var wc = 0; wc < wcards.length; wc++) { wcards[wc].className = 'card' + (wcards[wc].getAttribute('data-mode') === currentMode ? ' active' : ''); }
 			autoBtn.className = 'modebtn' + (m.state.autopilot ? ' active' : '');
 			autoBtn.textContent = m.state.autopilot ? 'Autopilot' : 'Auto';
 			ctxSpan.textContent = '~' + (m.state.tokens >= 1000 ? (m.state.tokens / 1000).toFixed(1) + 'k' : m.state.tokens) + ' tok';
@@ -556,7 +602,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		else if (m.type === 'addImage') { pendingImages.push(m.dataUrl); renderThumbs(); }
 		else if (m.type === 'restore') {
 			log.innerHTML = '';
-			if (!m.messages || m.messages.length === 0) { showEmpty('💬 Chiedi qualcosa o descrivi un task.'); }
+			if (!m.messages || m.messages.length === 0) { showWelcome(); }
 			else {
 				for (var k = 0; k < m.messages.length; k++) {
 					var mm = m.messages[k];
@@ -576,6 +622,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		else if (m.type === 'busy') { document.body.classList.toggle('busy', m.value); }
 	});
 
+	showWelcome();
 	vscode.postMessage({ type: 'ready' });
 </script>
 </body>

@@ -41,6 +41,8 @@ export function activate(context: vscode.ExtensionContext): void {
 			webviewOptions: { retainContextWhenHidden: true }
 		})
 	);
+	// Rivela la chat all'avvio così è già pronta (non una vista vuota da cliccare).
+	void vscode.commands.executeCommand('mgcoding.chat.focus');
 
 	// Vista "Esecuzione" (stato task live + autopilot)
 	const runView = new RunViewProvider(context.extensionUri);
