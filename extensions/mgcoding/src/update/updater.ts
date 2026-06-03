@@ -137,27 +137,25 @@ async function downloadAndInstall(): Promise<void> {
 		return;
 	}
 
-	// Aggiornamento automatico: un helper PowerShell indipendente attende che
-	// MGCoding si chiuda (così l'installer non trova istanze in esecuzione e non
-	// mostra prompt), installa in modo silenzioso e riapre l'app aggiornata.
+	// Aggiornamento automatico. Uno script .bat (lanciato VIA explorer.exe, così
+	// gira FUORI dal processo di MGCoding e sopravvive alla sua chiusura) attende
+	// la chiusura dell'app, installa in silenzio e riapre l'app aggiornata.
 	const exePath = process.execPath;
-	const exeName = exePath.split(/[\\/]/).pop()?.replace(/\.exe$/i, '') ?? 'MGCoding';
-	const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
-	const psScript = [
-		"$ErrorActionPreference='SilentlyContinue';",
-		`$n=${q(exeName)};`,
-		// attende fino a ~30s che tutte le istanze di MGCoding si chiudano
-		'for($i=0;$i -lt 75 -and (Get-Process -Name $n);$i++){Start-Sleep -Milliseconds 400};',
-		// installazione silenziosa senza message box (force-close di eventuali residui)
-		`Start-Process -FilePath ${q(dest)} -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait;`,
-		// riapre MGCoding aggiornata
-		`Start-Process -FilePath ${q(exePath)}`
-	].join(' ');
+	const exeName = exePath.split(/[\\/]/).pop() ?? 'MGCoding.exe';
+	const batPath = path.join(os.tmpdir(), `mgcoding-update-${tag}.bat`);
+	const bat = [
+		'@echo off',
+		':wait',
+		`tasklist /FI "IMAGENAME eq ${exeName}" 2>NUL | find /I "${exeName}" >NUL && (timeout /t 1 /nobreak >NUL & goto wait)`,
+		`"${dest}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`,
+		`start "" "${exePath}"`,
+		'del "%~f0"'
+	].join('\r\n');
 
 	let launchError = '';
 	try {
-		spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', psScript],
-			{ detached: true, stdio: 'ignore', windowsHide: true }).unref();
+		fs.writeFileSync(batPath, bat, 'utf8');
+		spawn('explorer.exe', [batPath], { detached: true, stdio: 'ignore' }).unref();
 	} catch (err) {
 		launchError = err instanceof Error ? err.message : String(err);
 	}
@@ -175,8 +173,8 @@ async function downloadAndInstall(): Promise<void> {
 	}
 
 	vscode.window.showInformationMessage(`Aggiornamento a MGCoding ${tag} in corso: l'app si chiuderà e si riaprirà aggiornata tra pochi secondi…`);
-	// Chiude MGCoding così l'helper può completare l'installazione senza prompt.
-	setTimeout(() => void vscode.commands.executeCommand('workbench.action.quit'), 1200);
+	// Chiude MGCoding così l'installer può sostituire i file senza prompt.
+	setTimeout(() => void vscode.commands.executeCommand('workbench.action.quit'), 1500);
 }
 
 export async function checkForUpdates(context: vscode.ExtensionContext, manual: boolean): Promise<void> {
