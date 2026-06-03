@@ -3,13 +3,13 @@
 [![Latest release](https://img.shields.io/github/v/release/hebiii994/MGCoding)](https://github.com/hebiii994/MGCoding/releases/latest)
 [![Download](https://img.shields.io/github/downloads/hebiii994/MGCoding/total)](https://github.com/hebiii994/MGCoding/releases)
 
-**MGCoding** è un IDE agentico *spec-driven*, fork di [Visual Studio Code / Code-OSS](https://github.com/microsoft/vscode), ispirato a [Kiro](https://kiro.dev). Porta un agente di codifica completo dentro l'editor, con **LLM locali (Ollama)** oppure **modelli cloud (Claude, ChatGPT, Gemini, …)**, scegliendo liberamente quale usare.
+**MGCoding** è un IDE agentico *spec-driven*, fork di [Visual Studio Code / Code-OSS](https://github.com/microsoft/vscode). Porta un agente di codifica completo dentro l'editor, con **LLM locali (Ollama)** oppure **modelli cloud (Claude, ChatGPT, Gemini, …)**, scegliendo liberamente quale usare.
 
-> Basato su Code-OSS sotto licenza [MIT](LICENSE.txt). MGCoding non è affiliato a Microsoft né a Kiro.
+> Basato su Code-OSS sotto licenza [MIT](LICENSE.txt). MGCoding non è affiliato a Microsoft.
 
 ## Caratteristiche principali
 
-- **Workflow Kiro-style** — gestione di **SPEC** (`.mg/specs`), **Steering** (`.mg/steering`) e **Agent Hooks** (`.mg/hooks`), con lettura retro-compatibile delle cartelle `.kiro` esistenti.
+- **Workflow spec-driven** — gestione di **SPEC** (`.mg/specs`: requirements → design → tasks), **Steering** (`.mg/steering`) e **Agent Hooks** (`.mg/hooks`), con import dei progetti `.kiro` esistenti.
 - **Provider LLM intercambiabili** — passa al volo tra:
   - **Ollama** (locale, anche su un altro PC della rete)
   - **Claude** (Anthropic)
@@ -54,7 +54,7 @@ L'estensione che implementa MGCoding vive in [`extensions/mgcoding`](extensions/
 
 ## Crediti
 
-MGCoding è un fork di [Visual Studio Code – Code-OSS](https://github.com/microsoft/vscode) (Microsoft, licenza MIT) e si ispira al modello agentico di [Kiro](https://kiro.dev).
+MGCoding è un fork di [Visual Studio Code – Code-OSS](https://github.com/microsoft/vscode) (Microsoft, licenza MIT).
 
 ## Licenza
 

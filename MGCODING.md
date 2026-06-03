@@ -1,6 +1,6 @@
 # MGCoding
 
-Fork di **Code – OSS** (la base open source di Visual Studio Code) ispirato a [Kiro](https://kiro.dev): un IDE agentico **spec-driven** che usa **LLM locali (Ollama)** oppure **Claude** (API Anthropic), a scelta e intercambiabili.
+Fork di **Code – OSS** (la base open source di Visual Studio Code): un IDE agentico **spec-driven** che usa **LLM locali (Ollama)** oppure **Claude** (API Anthropic), a scelta e intercambiabili.
 
 ## Funzionalità
 
