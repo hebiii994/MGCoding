@@ -137,20 +137,26 @@ async function downloadAndInstall(): Promise<void> {
 		return;
 	}
 
-	// 'start' avvia l'installer come processo INDIPENDENTE (sopravvive alla chiusura
-	// di MGCoding). Non chiudiamo noi l'app: ci pensa l'installer (Restart Manager),
-	// così al termine viene anche riaperta automaticamente.
+	// Avvio diretto dell'installer come processo indipendente. Lo lasciamo gestire
+	// la chiusura/riapertura di MGCoding (Restart Manager di Inno). In più offriamo
+	// sempre un fallback manuale ("Mostra installer") che è infallibile.
+	let launchError = '';
 	try {
-		spawn('cmd.exe', ['/c', `start "" "${dest}"`], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
-		vscode.window.showInformationMessage('Installer avviato: segui i passaggi (Avanti → Installa). MGCoding si chiuderà e si riaprirà aggiornata.');
+		const child = spawn(dest, [], { detached: true, stdio: 'ignore' });
+		child.on('error', () => { /* fallback manuale sotto */ });
+		child.unref();
 	} catch (err) {
-		const open = await vscode.window.showErrorMessage(
-			`Impossibile avviare l'installer automaticamente (${err instanceof Error ? err.message : String(err)}). Puoi eseguirlo a mano da:\n${dest}`,
-			'Apri cartella'
-		);
-		if (open === 'Apri cartella') {
-			await vscode.env.openExternal(vscode.Uri.file(path.dirname(dest)));
-		}
+		launchError = err instanceof Error ? err.message : String(err);
+	}
+	const pick = await vscode.window.showInformationMessage(
+		`MGCoding ${tag} è pronto da installare. L'installer dovrebbe aprirsi ora; segui i passaggi e l'app si chiuderà e riaprirà aggiornata. ` +
+		'Se non si apre, clicca "Mostra installer" e fai doppio clic sul file. ' +
+		'(Essendo non firmato, Windows potrebbe mostrare "Windows ha protetto il PC": clicca "Ulteriori informazioni" → "Esegui comunque".)' +
+		(launchError ? `\n${launchError}` : ''),
+		'Mostra installer'
+	);
+	if (pick === 'Mostra installer') {
+		await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(dest));
 	}
 }
 

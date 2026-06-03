@@ -26,10 +26,13 @@ class Analytics {
 
 	/** Chiede il consenso una sola volta (opt-in, default disattivato). */
 	async maybeAskConsent(): Promise<void> {
-		if (this.context.globalState.get<boolean>(CONSENT_ASKED, false)) {
+		// Persistito nelle impostazioni utente (più affidabile del globalState) e nel globalState.
+		const askedSetting = this.cfg().get<boolean>('analytics.asked', false);
+		if (askedSetting || this.enabled() || this.context.globalState.get<boolean>(CONSENT_ASKED, false)) {
 			return;
 		}
 		await this.context.globalState.update(CONSENT_ASKED, true);
+		await this.cfg().update('analytics.asked', true, vscode.ConfigurationTarget.Global);
 		const choice = await vscode.window.showInformationMessage(
 			'MGCoding può raccogliere statistiche d\'uso anonime per migliorare il prodotto (nessun codice, prompt o chiave viene inviato). Vuoi attivarle?',
 			'Attiva',
