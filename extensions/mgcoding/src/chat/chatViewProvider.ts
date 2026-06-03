@@ -5,6 +5,7 @@
 import * as vscode from 'vscode';
 import { runAgent } from '../agent/agentLoop';
 import { track } from '../analytics/analytics';
+import { changedCount } from '../edit/checkpoint';
 import { ProviderRegistry } from '../llm/registry';
 import { ChatMessage } from '../llm/types';
 
@@ -79,6 +80,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 				case 'ready':
 					await this.sendState();
 					this.post({ type: 'restore', messages: this.active().messages });
+					this.post({ type: 'changes', count: changedCount() });
+					break;
+				case 'viewChanges':
+					await vscode.commands.executeCommand('mgcoding.viewChanges');
+					break;
+				case 'revertChanges':
+					await vscode.commands.executeCommand('mgcoding.revertChanges');
+					this.post({ type: 'changes', count: changedCount() });
 					break;
 				case 'send':
 					if (msg.text || (msg.images && msg.images.length)) {
@@ -299,6 +308,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		} finally {
 			this.abort = undefined;
 			this.post({ type: 'busy', value: false });
+			this.post({ type: 'changes', count: changedCount() });
 			await this.save();
 			await this.sendState();
 		}
@@ -362,6 +372,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	.reason { margin-bottom: 6px; font-size: 0.85em; opacity: 0.85; }
 	.reason summary { cursor: pointer; opacity: 0.8; }
 	.reason-body { margin-top: 4px; padding: 6px 8px; border-left: 2px solid var(--vscode-panel-border); white-space: pre-wrap; font-family: var(--vscode-editor-font-family); opacity: 0.8; max-height: 240px; overflow: auto; }
+	#changes { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; margin: 0 8px 6px; padding: 7px 10px; border: 1px solid var(--mg-accent); border-radius: 10px; background: color-mix(in srgb, var(--mg-accent) 12%, transparent); font-size: 12px; }
+	#changes-label { font-weight: 600; }
+	#changes button { background: transparent; color: var(--vscode-foreground); border: 1px solid var(--vscode-input-border, #5a5a5a); border-radius: 6px; padding: 3px 9px; font-size: 11.5px; cursor: pointer; }
+	#changes button:hover { background: var(--vscode-toolbar-hoverBackground, rgba(127,127,127,0.18)); }
+	#changes #changes-revert { border-color: var(--mg-accent); color: var(--mg-accent); }
 	#composer { flex: 0 0 auto; padding: 8px; display: flex; flex-direction: column; gap: 6px; background: var(--vscode-sideBar-background); }
 	.field { position: relative; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 12px; background: var(--vscode-input-background); padding: 8px 10px 6px; transition: border-color .15s; }
 	.field:focus-within { border-color: var(--mg-accent); }
@@ -403,6 +418,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		<button class="modebtn" id="mode-spec" title="Spec-driven">Spec</button>
 	</div>
 	<div id="log"></div>
+	<div id="changes" style="display:none">
+		<span id="changes-label"></span>
+		<span class="spacer"></span>
+		<button id="changes-view" title="Apri le diff delle modifiche">Vedi tutto</button>
+		<button id="changes-revert" title="Ripristina i file allo stato precedente">Ripristina</button>
+	</div>
 	<div id="composer">
 		<div id="thumbs"></div>
 		<div class="field">
@@ -599,6 +620,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	hashBtn.addEventListener('click', function () { vscode.postMessage({ type: 'pickContext' }); });
 	attachBtn.addEventListener('click', function () { vscode.postMessage({ type: 'attachImage' }); });
 	autoBtn.addEventListener('click', function () { vscode.postMessage({ type: 'toggleAutopilot' }); });
+	var changesBar = document.getElementById('changes');
+	var changesLabel = document.getElementById('changes-label');
+	document.getElementById('changes-view').addEventListener('click', function () { vscode.postMessage({ type: 'viewChanges' }); });
+	document.getElementById('changes-revert').addEventListener('click', function () { vscode.postMessage({ type: 'revertChanges' }); });
+	function renderChanges(n) {
+		if (n > 0) {
+			changesLabel.textContent = '\\u2713 ' + n + (n === 1 ? ' file modificato' : ' file modificati');
+			changesBar.style.display = 'flex';
+		} else {
+			changesBar.style.display = 'none';
+		}
+	}
 	input.addEventListener('paste', function (e) {
 		var items = (e.clipboardData || {}).items || [];
 		for (var i = 0; i < items.length; i++) {
@@ -662,6 +695,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		else if (m.type === 'toolResult') { if (lastToolResult) { lastToolResult.textContent = m.text; log.scrollTop = log.scrollHeight; } }
 		else if (m.type === 'error') { addStatic('error', '⚠ ' + m.text); }
 		else if (m.type === 'busy') { document.body.classList.toggle('busy', m.value); }
+		else if (m.type === 'changes') { renderChanges(m.count || 0); }
 	});
 
 	showWelcome();
