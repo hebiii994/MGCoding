@@ -318,7 +318,7 @@
 				},
 				"mgcoding.analytics.key": {
 					"type": "string",
-					"default": "",
+					"default": "phc_qWFuCFcg6AU2WHeGxkghAzqKBPdjjEdm8EJ9jb58A43t",
 					"description": "Project API key di PostHog (pubblica, formato phc_...) verso cui inviare gli eventi anonimi."
 				},
 				"mgcoding.analytics.host": {
