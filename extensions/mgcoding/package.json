@@ -93,6 +93,26 @@
 				"title": "MGCoding: Configurazione guidata"
 			},
 			{
+				"command": "mgcoding.specOpenRequirements",
+				"title": "Requirements",
+				"icon": "$(book)"
+			},
+			{
+				"command": "mgcoding.specOpenDesign",
+				"title": "Design",
+				"icon": "$(type-hierarchy)"
+			},
+			{
+				"command": "mgcoding.specOpenTasks",
+				"title": "Task list",
+				"icon": "$(checklist)"
+			},
+			{
+				"command": "mgcoding.runSpecTasksHere",
+				"title": "Run all tasks",
+				"icon": "$(run-all)"
+			},
+			{
 				"command": "mgcoding.toggleAnalytics",
 				"title": "MGCoding: Statistiche d'uso (attiva/disattiva)"
 			},
@@ -203,6 +223,28 @@
 			}
 		],
 		"menus": {
+			"editor/title": [
+				{
+					"command": "mgcoding.specOpenRequirements",
+					"when": "resourcePath =~ /specs/ && (resourceFilename == requirements.md || resourceFilename == design.md || resourceFilename == tasks.md)",
+					"group": "navigation@1"
+				},
+				{
+					"command": "mgcoding.specOpenDesign",
+					"when": "resourcePath =~ /specs/ && (resourceFilename == requirements.md || resourceFilename == design.md || resourceFilename == tasks.md)",
+					"group": "navigation@2"
+				},
+				{
+					"command": "mgcoding.specOpenTasks",
+					"when": "resourcePath =~ /specs/ && (resourceFilename == requirements.md || resourceFilename == design.md || resourceFilename == tasks.md)",
+					"group": "navigation@3"
+				},
+				{
+					"command": "mgcoding.runSpecTasksHere",
+					"when": "resourcePath =~ /specs/ && (resourceFilename == requirements.md || resourceFilename == design.md || resourceFilename == tasks.md)",
+					"group": "navigation@4"
+				}
+			],
 			"view/title": [
 				{
 					"command": "mgcoding.newSpec",

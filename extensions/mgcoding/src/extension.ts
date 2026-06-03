@@ -201,8 +201,34 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('mgcoding.refreshSteering', () => steeringTree.refresh()),
 
 		vscode.commands.registerCommand('mgcoding.openMcpConfig', () => openMcpConfig()),
-		vscode.commands.registerCommand('mgcoding.refreshMcp', () => restartMcp())
+		vscode.commands.registerCommand('mgcoding.refreshMcp', () => restartMcp()),
+
+		// Barra spec (pulsanti nella title bar dell'editor per i file di una spec)
+		vscode.commands.registerCommand('mgcoding.specOpenRequirements', (uri?: vscode.Uri) => openSpecSibling(uri, 'requirements.md')),
+		vscode.commands.registerCommand('mgcoding.specOpenDesign', (uri?: vscode.Uri) => openSpecSibling(uri, 'design.md')),
+		vscode.commands.registerCommand('mgcoding.specOpenTasks', (uri?: vscode.Uri) => openSpecSibling(uri, 'tasks.md')),
+		vscode.commands.registerCommand('mgcoding.runSpecTasksHere', (uri?: vscode.Uri) => {
+			const u = uri ?? vscode.window.activeTextEditor?.document.uri;
+			if (!u) {
+				return undefined;
+			}
+			return runSpecTasks(registry, vscode.Uri.joinPath(u, '..'), () => specsTree.refresh(), runView);
+		})
 	);
+}
+
+/** Apre un documento fratello (requirements/design/tasks) nella stessa cartella spec. */
+async function openSpecSibling(uri: vscode.Uri | undefined, name: string): Promise<void> {
+	const u = uri ?? vscode.window.activeTextEditor?.document.uri;
+	if (!u) {
+		return;
+	}
+	const sibling = vscode.Uri.joinPath(u, '..', name);
+	try {
+		await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(sibling), { preview: false });
+	} catch {
+		vscode.window.showWarningMessage(`${name} non presente in questa spec.`);
+	}
 }
 
 export function deactivate(): void {
