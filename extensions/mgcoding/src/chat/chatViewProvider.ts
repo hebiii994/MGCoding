@@ -39,6 +39,24 @@ interface Session {
 	spec?: SpecState;
 }
 
+/** Nome leggibile del servizio in base all'endpoint OpenAI-compatibile. */
+function openAiProviderLabel(endpoint: string): string {
+	const e = (endpoint || '').toLowerCase();
+	if (e.includes('generativelanguage.googleapis')) {
+		return 'Gemini';
+	}
+	if (e.includes('api.openai.com')) {
+		return 'ChatGPT';
+	}
+	if (e.includes('openrouter.ai')) {
+		return 'OpenRouter';
+	}
+	if (e.includes('azure.com')) {
+		return 'Azure';
+	}
+	return 'OpenAI-compat';
+}
+
 const SPEC_PHASE_TITLE: Record<Exclude<SpecPhase, 'done'>, string> = {
 	requirements: '📋 Requisiti',
 	design: '🏗 Design',
@@ -230,13 +248,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		for (const m of models) {
 			options.push({ id: `ollama:${m}`, label: `Ollama · ${m}` });
 		}
+		const oaiLabel = openAiProviderLabel(c.get<string>('openai.endpoint', ''));
 		const oai = await this.registry.listOpenAIModels();
 		const oaiModels = oai.length ? oai : [openaiModel];
 		if (!oaiModels.includes(openaiModel)) {
 			oaiModels.unshift(openaiModel);
 		}
 		for (const m of oaiModels) {
-			options.push({ id: `openai:${m}`, label: `OpenAI-compat · ${m}` });
+			options.push({ id: `openai:${m}`, label: `${oaiLabel} · ${m}` });
 		}
 
 		const current = provider === 'claude' ? 'claude' : provider === 'openai' ? `openai:${openaiModel}` : `ollama:${ollamaModel}`;
