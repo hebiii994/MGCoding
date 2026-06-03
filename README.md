@@ -1,78 +1,61 @@
-# Visual Studio Code - Open Source ("Code - OSS")
-[![Feature Requests](https://img.shields.io/github/issues/microsoft/vscode/feature-request.svg)](https://github.com/microsoft/vscode/issues?q=is%3Aopen+is%3Aissue+label%3Afeature-request+sort%3Areactions-%2B1-desc)
-[![Bugs](https://img.shields.io/github/issues/microsoft/vscode/bug.svg)](https://github.com/microsoft/vscode/issues?utf8=✓&q=is%3Aissue+is%3Aopen+label%3Abug)
-[![Gitter](https://img.shields.io/badge/chat-on%20gitter-yellow.svg)](https://gitter.im/Microsoft/vscode)
+# MGCoding
 
-## The Repository
+[![Latest release](https://img.shields.io/github/v/release/hebiii994/MGCoding)](https://github.com/hebiii994/MGCoding/releases/latest)
+[![Download](https://img.shields.io/github/downloads/hebiii994/MGCoding/total)](https://github.com/hebiii994/MGCoding/releases)
 
-This repository ("`Code - OSS`") is where we (Microsoft) develop the [Visual Studio Code](https://code.visualstudio.com) product together with the community. Not only do we work on code and issues here, but we also publish our [roadmap](https://github.com/microsoft/vscode/wiki/Roadmap), [monthly iteration plans](https://github.com/microsoft/vscode/wiki/Iteration-Plans), and our [endgame plans](https://github.com/microsoft/vscode/wiki/Running-the-Endgame). This source code is available to everyone under the standard [MIT license](https://github.com/microsoft/vscode/blob/main/LICENSE.txt).
+**MGCoding** è un IDE agentico *spec-driven*, fork di [Visual Studio Code / Code-OSS](https://github.com/microsoft/vscode), ispirato a [Kiro](https://kiro.dev). Porta un agente di codifica completo dentro l'editor, con **LLM locali (Ollama)** oppure **modelli cloud (Claude, ChatGPT, Gemini, …)**, scegliendo liberamente quale usare.
 
-## Visual Studio Code
+> Basato su Code-OSS sotto licenza [MIT](LICENSE.txt). MGCoding non è affiliato a Microsoft né a Kiro.
 
-<p align="center">
-  <img alt="VS Code in action" src="https://github.com/user-attachments/assets/56af271c-949d-454c-a3ea-16188c063414">
-</p>
+## Caratteristiche principali
 
-[Visual Studio Code](https://code.visualstudio.com) is a distribution of the `Code - OSS` repository with Microsoft-specific customizations released under a traditional [Microsoft product license](https://code.visualstudio.com/License/).
+- **Workflow Kiro-style** — gestione di **SPEC** (`.mg/specs`), **Steering** (`.mg/steering`) e **Agent Hooks** (`.mg/hooks`), con lettura retro-compatibile delle cartelle `.kiro` esistenti.
+- **Provider LLM intercambiabili** — passa al volo tra:
+  - **Ollama** (locale, anche su un altro PC della rete)
+  - **Claude** (Anthropic)
+  - **ChatGPT** (OpenAI), **Google Gemini**, **OpenRouter**, **Azure OpenAI**, **LM Studio** o qualsiasi endpoint OpenAI-compatibile
 
-[Visual Studio Code](https://code.visualstudio.com) combines the simplicity of a code editor with what developers need for their core edit-build-debug cycle. It provides comprehensive code editing, navigation, and understanding support along with lightweight debugging, a rich extensibility model, and lightweight integration with existing tools.
+  Ogni endpoint conserva la propria API key: nessun provider è obbligato come default.
+- **Agente con strumenti** — lettura/scrittura file, esecuzione comandi, patch mirate, ricerca; con **diff e approvazione**, **checkpoint/revert** delle modifiche e **Autopilot**.
+- **Chat avanzata** — modalità **Vibe** e **Spec**, storico multi-sessione, Markdown e blocchi di codice (copia/inserisci), menzioni `@file`, selettore `#context`, **immagini (vision)** e pannello **Ragionamento** (Ollama thinking / Claude extended thinking).
+- **Inline edit (Ctrl+I)** e **autocomplete ghost-text** (FIM via Ollama).
+- **MCP (Model Context Protocol)** — client stdio reale con stato live dei server e tool/risorse/prompt esposti.
+- **Auto-updater in-app** — controlla le nuove release su GitHub e propone l'aggiornamento.
 
-Visual Studio Code is updated monthly with new features and bug fixes. You can download it for Windows, macOS, and Linux on [Visual Studio Code's website](https://code.visualstudio.com/Download). To get the latest releases every day, install the [Insiders build](https://code.visualstudio.com/insiders).
+## Installazione
 
-## Contributing
+### Windows
+Scarica l'ultimo **`MGCodingSetup.exe`** dalla pagina [Releases](https://github.com/hebiii994/MGCoding/releases/latest) ed eseguilo. Gli aggiornamenti successivi verranno proposti automaticamente dall'app.
 
-There are many ways in which you can participate in this project, for example:
+### macOS (Apple Silicon)
+Il pacchetto va costruito su un Mac. Vedi [`build/mgcoding/MAC-BUILD.md`](build/mgcoding/MAC-BUILD.md).
 
-* [Submit bugs and feature requests](https://github.com/microsoft/vscode/issues), and help us verify as they are checked in
-* Review [source code changes](https://github.com/microsoft/vscode/pulls)
-* Review the [documentation](https://github.com/microsoft/vscode-docs) and make pull requests for anything from typos to new content.
+## Configurazione rapida
 
-If you are interested in fixing issues and contributing directly to the code base,
-please see the document [How to Contribute](https://github.com/microsoft/vscode/wiki/How-to-Contribute), which covers the following:
+1. Apri una cartella di progetto.
+2. Comando **`MGCoding: Cambia modello/provider`** (o clic sulla status bar) → scegli il provider/servizio.
+3. Per i servizi cloud inserisci l'API key quando richiesta (salvata in modo sicuro nel SecretStorage, mai nel repo).
 
-* [How to build and run from source](https://github.com/microsoft/vscode/wiki/How-to-Contribute)
-* [The development workflow, including debugging and running tests](https://github.com/microsoft/vscode/wiki/How-to-Contribute#debugging)
-* [Coding guidelines](https://github.com/microsoft/vscode/wiki/Coding-Guidelines)
-* [Submitting pull requests](https://github.com/microsoft/vscode/wiki/How-to-Contribute#pull-requests)
-* [Finding an issue to work on](https://github.com/microsoft/vscode/wiki/How-to-Contribute#where-to-contribute)
-* [Contributing to translations](https://aka.ms/vscodeloc)
+### Usare un LLM locale da un altro dispositivo
+Sul PC con Ollama: avvialo con `OLLAMA_HOST=0.0.0.0:11434` e apri la porta nel firewall. Sul client imposta `mgcoding.ollama.endpoint = http://IP-DEL-PC:11434` (stessa rete o VPN).
 
-## Feedback
+## Build da sorgente
 
-* Ask a question on [Stack Overflow](https://stackoverflow.com/questions/tagged/vscode)
-* [Request a new feature](CONTRIBUTING.md)
-* Upvote [popular feature requests](https://github.com/microsoft/vscode/issues?q=is%3Aopen+is%3Aissue+label%3Afeature-request+sort%3Areactions-%2B1-desc)
-* [File an issue](https://github.com/microsoft/vscode/issues)
-* Connect with the extension author community on [GitHub Discussions](https://github.com/microsoft/vscode-discussions/discussions) or [Slack](https://aka.ms/vscode-dev-community)
-* Follow [@code](https://x.com/code) and let us know what you think!
+Requisiti: Node.js 24.x, Python 3, toolchain di build nativa (vedi i prerequisiti di Code-OSS).
 
-See our [wiki](https://github.com/microsoft/vscode/wiki/Feedback-Channels) for a description of each of these channels and information on some other available community-driven channels.
+```bash
+npm ci
+npx gulp compile-extension:mgcoding     # compila l'estensione MGCoding
+npx gulp vscode-win32-x64               # build app Windows
+npx gulp vscode-win32-x64-user-setup    # installer (user-setup)
+```
 
-## Related Projects
+L'estensione che implementa MGCoding vive in [`extensions/mgcoding`](extensions/mgcoding).
 
-Many of the core components and extensions to VS Code live in their own repositories on GitHub. For example, the [node debug adapter](https://github.com/microsoft/vscode-node-debug) and the [mono debug adapter](https://github.com/microsoft/vscode-mono-debug) repositories are separate from each other. For a complete list, please visit the [Related Projects](https://github.com/microsoft/vscode/wiki/Related-Projects) page on our [wiki](https://github.com/microsoft/vscode/wiki).
+## Crediti
 
-## Bundled Extensions
+MGCoding è un fork di [Visual Studio Code – Code-OSS](https://github.com/microsoft/vscode) (Microsoft, licenza MIT) e si ispira al modello agentico di [Kiro](https://kiro.dev).
 
-VS Code includes a set of built-in extensions located in the [extensions](extensions) folder, including grammars and snippets for many languages. Extensions that provide rich language support (inline suggestions, Go to Definition) for a language have the suffix `language-features`. For example, the `json` extension provides coloring for `JSON` and the `json-language-features` extension provides rich language support for `JSON`.
+## Licenza
 
-## Development Container
-
-This repository includes a Visual Studio Code Dev Containers / GitHub Codespaces development container.
-
-* For [Dev Containers](https://aka.ms/vscode-remote/download/containers), use the **Dev Containers: Clone Repository in Container Volume...** command which creates a Docker volume for better disk I/O on macOS and Windows.
-  * If you already have VS Code and Docker installed, you can also click [here](https://vscode.dev/redirect?url=vscode://ms-vscode-remote.remote-containers/cloneInVolume?url=https://github.com/microsoft/vscode) to get started. This will cause VS Code to automatically install the Dev Containers extension if needed, clone the source code into a container volume, and spin up a dev container for use.
-
-* For Codespaces, install the [GitHub Codespaces](https://marketplace.visualstudio.com/items?itemName=GitHub.codespaces) extension in VS Code, and use the **Codespaces: Create New Codespace** command.
-
-Docker / the Codespace should have at least **4 cores and 6 GB of RAM (8 GB recommended)** to run a full build. See the [development container README](.devcontainer/README.md) for more information.
-
-## Code of Conduct
-
-This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/). For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
-
-## License
-
-Copyright (c) Microsoft Corporation. All rights reserved.
-
-Licensed under the [MIT](LICENSE.txt) license.
+Distribuito sotto licenza [MIT](LICENSE.txt). Il codice di Code-OSS è Copyright (c) Microsoft Corporation.
