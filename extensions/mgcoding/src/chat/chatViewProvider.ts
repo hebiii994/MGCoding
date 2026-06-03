@@ -73,15 +73,31 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		webviewView.webview.options = { enableScripts: true, localResourceRoots: [this.extensionUri] };
 		webviewView.webview.html = this.getHtml();
 
-		webviewView.webview.onDidReceiveMessage(async (msg: { type: string; text?: string; id?: string; mode?: ChatMode }) => {
+		webviewView.webview.onDidReceiveMessage(async (msg: { type: string; text?: string; id?: string; mode?: ChatMode; images?: string[] }) => {
 			switch (msg.type) {
 				case 'ready':
 					await this.sendState();
 					this.post({ type: 'restore', messages: this.active().messages });
 					break;
 				case 'send':
-					if (msg.text) {
-						await this.handleSend(msg.text);
+					if (msg.text || (msg.images && msg.images.length)) {
+						await this.handleSend(msg.text ?? '', msg.images);
+					}
+					break;
+				case 'attachImage':
+					{
+						const picks = await vscode.window.showOpenDialog({ canSelectMany: true, filters: { Immagini: ['png', 'jpg', 'jpeg', 'gif', 'webp'] } });
+						for (const uri of picks ?? []) {
+							try {
+								const bytes = await vscode.workspace.fs.readFile(uri);
+								const ext = uri.path.split('.').pop()?.toLowerCase() ?? 'png';
+								const mt = ext === 'jpg' ? 'jpeg' : ext;
+								const b64 = Buffer.from(bytes).toString('base64');
+								this.post({ type: 'addImage', dataUrl: `data:image/${mt};base64,${b64}` });
+							} catch {
+								// ignora
+							}
+						}
 					}
 					break;
 				case 'setProvider':
@@ -249,12 +265,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		return blocks.length ? `${text}\n\n${blocks.join('\n\n')}` : text;
 	}
 
-	private async handleSend(text: string): Promise<void> {
+	private async handleSend(text: string, images?: string[]): Promise<void> {
 		const session = this.active();
 		if (session.title === 'Nuova sessione') {
-			session.title = text.slice(0, 40);
+			session.title = (text || 'Immagine').slice(0, 40);
 		}
-		session.messages.push({ role: 'user', content: await this.augmentWithMentions(text) });
+		const userMsg: ChatMessage = { role: 'user', content: await this.augmentWithMentions(text) };
+		if (images?.length) {
+			userMsg.images = images.slice(0, 4);
+		}
+		session.messages.push(userMsg);
 		this.post({ type: 'busy', value: true });
 		this.abort = new AbortController();
 		const systemExtra = session.mode === 'spec' ? SPEC_MODE_PROMPT : VIBE_MODE_PROMPT;
@@ -284,7 +304,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 
 	private getHtml(): string {
 		const nonce = String(Math.random()).slice(2);
-		const csp = `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';`;
+		const csp = `default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'nonce-${nonce}';`;
 		return `<!DOCTYPE html>
 <html lang="it">
 <head>
@@ -324,7 +344,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	#input:focus { outline: none; border-color: var(--vscode-focusBorder); }
 	#row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 	#ctx { font-size: 11px; opacity: 0.65; white-space: nowrap; }
-	#hash { flex: 0 0 auto; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); padding: 6px 9px; }
+	#hash, #attach { flex: 0 0 auto; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); padding: 6px 9px; }
+	#thumbs { display: flex; gap: 4px; flex-wrap: wrap; }
+	#thumbs span { position: relative; }
+	#thumbs img { height: 46px; border-radius: 4px; display: block; }
+	#thumbs .x { position: absolute; top: -6px; right: -6px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border-radius: 50%; width: 16px; height: 16px; font-size: 11px; line-height: 16px; text-align: center; cursor: pointer; }
+	.msg img.thumb { max-height: 140px; border-radius: 6px; margin: 4px 4px 0 0; }
 	#model { flex: 1 1 auto; min-width: 0; background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); border: 1px solid var(--vscode-dropdown-border); border-radius: 6px; padding: 4px 6px; font-size: 12px; }
 	button { flex: 0 0 auto; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; border-radius: 6px; padding: 6px 14px; cursor: pointer; font-size: 13px; }
 	button:hover { background: var(--vscode-button-hoverBackground); }
@@ -342,9 +367,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	</div>
 	<div id="log"><div class="empty">💬 Chiedi qualcosa o descrivi un task.</div></div>
 	<div id="composer">
-		<textarea id="input" rows="2" placeholder="Scrivi un messaggio…  (Invio = invia · Shift+Invio = a capo · @file per allegare)"></textarea>
+		<div id="thumbs"></div>
+		<textarea id="input" rows="2" placeholder="Scrivi un messaggio…  (Invio = invia · @file · incolla immagini)"></textarea>
 		<div id="row">
 			<button id="hash" title="Aggiungi contesto (file)">#</button>
+			<button id="attach" title="Allega immagine">📎</button>
 			<select id="model" title="Modello / provider"></select>
 			<span id="ctx" title="Token stimati nel contesto"></span>
 			<button class="modebtn" id="auto" title="Autopilot: esegue senza conferme">Auto</button>
@@ -364,8 +391,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	var modeVibe = document.getElementById('mode-vibe');
 	var modeSpec = document.getElementById('mode-spec');
 	var hashBtn = document.getElementById('hash');
+	var attachBtn = document.getElementById('attach');
 	var autoBtn = document.getElementById('auto');
 	var ctxSpan = document.getElementById('ctx');
+	var thumbs = document.getElementById('thumbs');
+	var pendingImages = [];
 	var current = null;
 	var lastToolResult = null;
 	var BT = String.fromCharCode(96);
@@ -450,12 +480,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		log.appendChild(el); log.scrollTop = log.scrollHeight;
 		return res;
 	}
+	function renderThumbs() {
+		thumbs.innerHTML = '';
+		pendingImages.forEach(function (d, idx) {
+			var wrap = document.createElement('span');
+			var im = document.createElement('img'); im.src = d; wrap.appendChild(im);
+			var x = document.createElement('span'); x.className = 'x'; x.textContent = '×';
+			x.addEventListener('click', function () { pendingImages.splice(idx, 1); renderThumbs(); });
+			wrap.appendChild(x); thumbs.appendChild(wrap);
+		});
+	}
+	function addThumbsTo(el, imgs) {
+		for (var i = 0; i < imgs.length; i++) { var im = document.createElement('img'); im.className = 'thumb'; im.src = imgs[i]; el.appendChild(im); }
+	}
 	function send() {
 		var text = input.value.trim();
-		if (!text) { return; }
-		addStatic('user', text);
+		if (!text && pendingImages.length === 0) { return; }
+		var el = addStatic('user', text || '(immagine)');
+		if (pendingImages.length) { addThumbsTo(el, pendingImages); }
 		input.value = '';
-		vscode.postMessage({ type: 'send', text: text });
+		vscode.postMessage({ type: 'send', text: text, images: pendingImages });
+		pendingImages = []; renderThumbs();
 	}
 	sendBtn.addEventListener('click', send);
 	stopBtn.addEventListener('click', function () { vscode.postMessage({ type: 'stop' }); });
@@ -466,7 +511,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	model.addEventListener('change', function () { vscode.postMessage({ type: 'setProvider', id: model.value }); });
 	sessionSel.addEventListener('change', function () { vscode.postMessage({ type: 'switchSession', id: sessionSel.value }); });
 	hashBtn.addEventListener('click', function () { vscode.postMessage({ type: 'pickContext' }); });
+	attachBtn.addEventListener('click', function () { vscode.postMessage({ type: 'attachImage' }); });
 	autoBtn.addEventListener('click', function () { vscode.postMessage({ type: 'toggleAutopilot' }); });
+	input.addEventListener('paste', function (e) {
+		var items = (e.clipboardData || {}).items || [];
+		for (var i = 0; i < items.length; i++) {
+			if (items[i].type && items[i].type.indexOf('image/') === 0) {
+				var f = items[i].getAsFile();
+				if (f) { var r = new FileReader(); r.onload = function () { pendingImages.push(r.result); renderThumbs(); }; r.readAsDataURL(f); }
+			}
+		}
+	});
 
 	window.addEventListener('message', function (event) {
 		var m = event.data;
@@ -498,10 +553,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			input.value = input.value.slice(0, p) + m.text + input.value.slice(p);
 			input.focus();
 		}
+		else if (m.type === 'addImage') { pendingImages.push(m.dataUrl); renderThumbs(); }
 		else if (m.type === 'restore') {
 			log.innerHTML = '';
 			if (!m.messages || m.messages.length === 0) { showEmpty('💬 Chiedi qualcosa o descrivi un task.'); }
-			else { for (var k = 0; k < m.messages.length; k++) { addStatic(m.messages[k].role === 'assistant' ? 'assistant' : 'user', m.messages[k].content); } }
+			else {
+				for (var k = 0; k < m.messages.length; k++) {
+					var mm = m.messages[k];
+					var el = addStatic(mm.role === 'assistant' ? 'assistant' : 'user', mm.content);
+					if (mm.images && mm.images.length) { addThumbsTo(el, mm.images); }
+				}
+			}
 		}
 		else if (m.type === 'streamStart') { current = makeAssistant(); }
 		else if (m.type === 'streamDelta') { if (current) { current.raw += m.text; renderAssistant(current); } }

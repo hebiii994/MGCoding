@@ -4,7 +4,7 @@
  *  tradotto da/verso il formato Anthropic per condividere lo stesso loop agentico.
  *--------------------------------------------------------------------------------------------*/
 
-import { AgentStreamParams, AnthropicMessage, AnthropicStreamEvent, LLMError, LLMProvider, LLMRequest } from './types';
+import { AgentStreamParams, AnthropicMessage, AnthropicStreamEvent, LLMError, LLMProvider, LLMRequest, parseDataUrl } from './types';
 
 export interface OllamaConfig {
 	endpoint: string;
@@ -100,7 +100,13 @@ export class OllamaProvider implements LLMProvider {
 		const cfg = this.getConfig();
 		const messages = [
 			...(req.system ? [{ role: 'system', content: req.system }] : []),
-			...req.messages.map(m => ({ role: m.role, content: m.content }))
+			...req.messages.map(m => {
+				const msg: { role: string; content: string; images?: string[] } = { role: m.role, content: m.content };
+				if (m.images?.length) {
+					msg.images = m.images.map(d => parseDataUrl(d)?.data).filter((x): x is string => !!x);
+				}
+				return msg;
+			})
 		];
 		let thinkOpen = false;
 		for await (const evt of this.postNdjson({ model: cfg.model, messages, ...(cfg.think ? { think: true } : {}) }, req.signal)) {

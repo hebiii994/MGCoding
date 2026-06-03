@@ -7,6 +7,8 @@ export type ChatRole = 'system' | 'user' | 'assistant';
 export interface ChatMessage {
 	role: ChatRole;
 	content: string;
+	/** Immagini allegate (data URL: data:image/...;base64,...). */
+	images?: string[];
 }
 
 export interface LLMRequest {
@@ -29,8 +31,15 @@ export interface AnthropicToolDef {
 export type AnthropicBlock =
 	| { type: 'text'; text: string }
 	| { type: 'thinking'; thinking: string; signature?: string }
+	| { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
 	| { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
 	| { type: 'tool_result'; tool_use_id: string; content: string };
+
+/** Spezza un data URL (data:image/png;base64,XXXX) in media_type e dati base64. */
+export function parseDataUrl(dataUrl: string): { mediaType: string; data: string } | undefined {
+	const m = /^data:([^;]+);base64,(.*)$/s.exec(dataUrl);
+	return m ? { mediaType: m[1], data: m[2] } : undefined;
+}
 
 export interface AnthropicMessage {
 	role: 'user' | 'assistant';

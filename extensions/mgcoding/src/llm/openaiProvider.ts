@@ -10,9 +10,11 @@ export interface OpenAIConfig {
 	model: string;
 }
 
+type OpenAIPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } };
+
 interface OpenAIMessage {
 	role: string;
-	content: string | null;
+	content: string | null | OpenAIPart[];
 	tool_calls?: { id: string; type: 'function'; function: { name: string; arguments: string } }[];
 	tool_call_id?: string;
 }
@@ -146,7 +148,16 @@ export class OpenAIProvider implements LLMProvider {
 					}
 				} else {
 					const text = m.content.filter(b => b.type === 'text').map(b => (b as { text: string }).text).join('');
-					out.push({ role: 'user', content: text });
+					const images = m.content.filter(b => b.type === 'image') as { source: { media_type: string; data: string } }[];
+					if (images.length) {
+						const parts: OpenAIPart[] = [{ type: 'text', text }];
+						for (const im of images) {
+							parts.push({ type: 'image_url', image_url: { url: `data:${im.source.media_type};base64,${im.source.data}` } });
+						}
+						out.push({ role: 'user', content: parts });
+					} else {
+						out.push({ role: 'user', content: text });
+					}
 				}
 			}
 		}

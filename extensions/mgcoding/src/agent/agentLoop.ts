@@ -4,7 +4,7 @@
 
 import * as vscode from 'vscode';
 import { ProviderRegistry } from '../llm/registry';
-import { AnthropicBlock, AnthropicMessage, ChatMessage, LLMProvider } from '../llm/types';
+import { AnthropicBlock, AnthropicMessage, ChatMessage, LLMProvider, parseDataUrl } from '../llm/types';
 import { getMcpManager } from '../mcp/mcpClient';
 import { beginCheckpoint } from '../edit/checkpoint';
 import { parseToolCall, TOOL_RE } from '../util/parsing';
@@ -155,10 +155,19 @@ async function runNativeAgent(
 	const streaming = typeof cb.onStreamDelta === 'function';
 
 	// Costruisce i messaggi Anthropic dallo storico testuale.
-	const messages: AnthropicMessage[] = history.map(m => ({
-		role: m.role === 'assistant' ? 'assistant' : 'user',
-		content: [{ type: 'text', text: m.content }]
-	}));
+	const messages: AnthropicMessage[] = history.map(m => {
+		const content: AnthropicBlock[] = [];
+		if (m.images?.length && m.role === 'user') {
+			for (const img of m.images) {
+				const p = parseDataUrl(img);
+				if (p) {
+					content.push({ type: 'image', source: { type: 'base64', media_type: p.mediaType, data: p.data } });
+				}
+			}
+		}
+		content.push({ type: 'text', text: m.content });
+		return { role: m.role === 'assistant' ? 'assistant' : 'user', content };
+	});
 
 	for (let i = 0; i < MAX_ITERATIONS; i++) {
 		if (signal?.aborted) {
