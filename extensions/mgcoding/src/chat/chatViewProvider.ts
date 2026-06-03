@@ -354,23 +354,37 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	.reason { margin-bottom: 6px; font-size: 0.85em; opacity: 0.85; }
 	.reason summary { cursor: pointer; opacity: 0.8; }
 	.reason-body { margin-top: 4px; padding: 6px 8px; border-left: 2px solid var(--vscode-panel-border); white-space: pre-wrap; font-family: var(--vscode-editor-font-family); opacity: 0.8; max-height: 240px; overflow: auto; }
-	#composer { flex: 0 0 auto; border-top: 1px solid var(--vscode-panel-border); padding: 8px; display: flex; flex-direction: column; gap: 6px; background: var(--vscode-sideBar-background); }
-	#input { width: 100%; box-sizing: border-box; resize: vertical; min-height: 40px; max-height: 200px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); border-radius: 6px; padding: 8px; font-family: inherit; font-size: 13px; }
-	#input:focus { outline: none; border-color: var(--vscode-focusBorder); }
-	#row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-	#ctx { font-size: 11px; opacity: 0.65; white-space: nowrap; }
-	#hash, #attach { flex: 0 0 auto; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); padding: 6px 9px; }
+	#composer { flex: 0 0 auto; padding: 8px; display: flex; flex-direction: column; gap: 6px; background: var(--vscode-sideBar-background); }
+	.field { position: relative; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 12px; background: var(--vscode-input-background); padding: 8px 10px 6px; transition: border-color .15s; }
+	.field:focus-within { border-color: var(--mg-accent); }
+	#input { width: 100%; box-sizing: border-box; resize: none; min-height: 22px; max-height: 200px; background: transparent; color: var(--vscode-input-foreground); border: none; padding: 0 34px 0 0; font-family: inherit; font-size: 13px; line-height: 1.4; }
+	#input:focus { outline: none; }
+	#sendwrap { position: absolute; top: 6px; right: 6px; }
+	#send, #stop { width: 28px; height: 28px; padding: 0; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 15px; line-height: 1; border: none; cursor: pointer; }
+	#send { background: var(--mg-accent); color: #06210f; font-weight: 700; }
+	#send:hover { filter: brightness(1.08); }
+	#stop { display: none; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+	body.busy #stop { display: flex; }
+	body.busy #send { display: none; }
+	#row { display: flex; align-items: center; gap: 4px; padding: 0 2px; }
+	.iconbtn { flex: 0 0 auto; width: 28px; height: 28px; padding: 0; display: flex; align-items: center; justify-content: center; background: transparent; color: var(--vscode-foreground); border: none; border-radius: 7px; cursor: pointer; opacity: 0.75; font-size: 14px; }
+	.iconbtn:hover { background: var(--vscode-toolbar-hoverBackground, rgba(127,127,127,0.18)); opacity: 1; }
+	#ctxpie { flex: 0 0 auto; display: flex; align-items: center; margin-left: 2px; }
+	#ctxpie svg { display: block; }
+	.spacer { flex: 1 1 auto; }
+	#model { flex: 0 1 auto; max-width: 48%; min-width: 0; background: transparent; color: var(--vscode-foreground); border: none; border-radius: 7px; padding: 4px 4px; font-size: 12px; opacity: 0.85; cursor: pointer; text-overflow: ellipsis; }
+	#model:hover { background: var(--vscode-toolbar-hoverBackground, rgba(127,127,127,0.18)); opacity: 1; }
+	.toggle { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; background: transparent; border: none; color: var(--vscode-foreground); cursor: pointer; font-size: 12px; padding: 3px 4px; border-radius: 7px; }
+	.toggle:hover { background: var(--vscode-toolbar-hoverBackground, rgba(127,127,127,0.18)); }
+	.toggle .knob { width: 26px; height: 15px; border-radius: 9px; background: var(--vscode-input-border, #5a5a5a); position: relative; transition: background .15s; }
+	.toggle .knob::after { content: ''; position: absolute; top: 2px; left: 2px; width: 11px; height: 11px; border-radius: 50%; background: #fff; transition: left .15s; }
+	.toggle.on .knob { background: var(--mg-accent); }
+	.toggle.on .knob::after { left: 13px; }
 	#thumbs { display: flex; gap: 4px; flex-wrap: wrap; }
 	#thumbs span { position: relative; }
 	#thumbs img { height: 46px; border-radius: 4px; display: block; }
 	#thumbs .x { position: absolute; top: -6px; right: -6px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border-radius: 50%; width: 16px; height: 16px; font-size: 11px; line-height: 16px; text-align: center; cursor: pointer; }
 	.msg img.thumb { max-height: 140px; border-radius: 6px; margin: 4px 4px 0 0; }
-	#model { flex: 1 1 auto; min-width: 0; background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); border: 1px solid var(--vscode-dropdown-border); border-radius: 6px; padding: 4px 6px; font-size: 12px; }
-	button { flex: 0 0 auto; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; border-radius: 6px; padding: 6px 14px; cursor: pointer; font-size: 13px; }
-	button:hover { background: var(--vscode-button-hoverBackground); }
-	#stop { display: none; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); padding: 6px 10px; }
-	body.busy #stop { display: inline-block; }
-	body.busy #send { opacity: 0.5; }
 </style>
 </head>
 <body>
@@ -383,15 +397,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	<div id="log"></div>
 	<div id="composer">
 		<div id="thumbs"></div>
-		<textarea id="input" rows="2" placeholder="Scrivi un messaggio…  (Invio = invia · @file · incolla immagini)"></textarea>
+		<div class="field">
+			<textarea id="input" rows="1" placeholder="Chiedi qualcosa o descrivi un task…"></textarea>
+			<div id="sendwrap">
+				<button id="send" title="Invia (Invio)">↑</button>
+				<button id="stop" title="Interrompi">■</button>
+			</div>
+		</div>
 		<div id="row">
-			<button id="hash" title="Aggiungi contesto (file)">#</button>
-			<button id="attach" title="Allega immagine">📎</button>
+			<button class="iconbtn" id="hash" title="Aggiungi contesto (file)">#</button>
+			<button class="iconbtn" id="attach" title="Allega immagine">📎</button>
+			<span id="ctxpie" title="Contesto utilizzato"></span>
+			<span class="spacer"></span>
 			<select id="model" title="Modello / provider"></select>
-			<span id="ctx" title="Token stimati nel contesto"></span>
-			<button class="modebtn" id="auto" title="Autopilot: esegue senza conferme">Auto</button>
-			<button id="stop" title="Interrompi">⊘ Stop</button>
-			<button id="send">Invia</button>
+			<button class="toggle" id="auto" title="Autopilot: esegue senza conferme"><span class="knob"></span><span>Autopilot</span></button>
 		</div>
 	</div>
 <script nonce="${nonce}">
@@ -408,7 +427,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	var hashBtn = document.getElementById('hash');
 	var attachBtn = document.getElementById('attach');
 	var autoBtn = document.getElementById('auto');
-	var ctxSpan = document.getElementById('ctx');
+	var ctxPie = document.getElementById('ctxpie');
+	var CTX_WINDOW = 128000;
+	function renderCtxPie(tokens) {
+		var pct = Math.max(0, Math.min(1, tokens / CTX_WINDOW));
+		var r = 6, c = 2 * Math.PI * r, off = c * (1 - pct);
+		var tokTxt = tokens >= 1000 ? (tokens / 1000).toFixed(1) + 'k' : tokens;
+		ctxPie.title = 'Contesto: ~' + tokTxt + ' token (' + Math.round(pct * 100) + '%)';
+		ctxPie.innerHTML =
+			'<svg width="16" height="16" viewBox="0 0 16 16">' +
+			'<circle cx="8" cy="8" r="6" fill="none" stroke="var(--vscode-input-border,#5a5a5a)" stroke-width="3" opacity="0.4"/>' +
+			'<circle cx="8" cy="8" r="6" fill="none" stroke="var(--mg-accent)" stroke-width="3" stroke-linecap="round" stroke-dasharray="' + c.toFixed(2) + '" stroke-dashoffset="' + off.toFixed(2) + '" transform="rotate(-90 8 8)"/>' +
+			'</svg>';
+	}
 	var thumbs = document.getElementById('thumbs');
 	var pendingImages = [];
 	var current = null;
@@ -541,7 +572,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		if (!text && pendingImages.length === 0) { return; }
 		var el = addStatic('user', text || '(immagine)');
 		if (pendingImages.length) { addThumbsTo(el, pendingImages); }
-		input.value = '';
+		input.value = ''; input.style.height = 'auto';
 		vscode.postMessage({ type: 'send', text: text, images: pendingImages });
 		pendingImages = []; renderThumbs();
 	}
@@ -551,6 +582,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	modeVibe.addEventListener('click', function () { vscode.postMessage({ type: 'setMode', mode: 'vibe' }); });
 	modeSpec.addEventListener('click', function () { vscode.postMessage({ type: 'setMode', mode: 'spec' }); });
 	input.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
+	function autoGrow() { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 200) + 'px'; }
+	input.addEventListener('input', autoGrow);
 	model.addEventListener('change', function () { vscode.postMessage({ type: 'setProvider', id: model.value }); });
 	sessionSel.addEventListener('change', function () { vscode.postMessage({ type: 'switchSession', id: sessionSel.value }); });
 	hashBtn.addEventListener('click', function () { vscode.postMessage({ type: 'pickContext' }); });
@@ -590,9 +623,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			modeSpec.className = 'modebtn' + (m.state.mode === 'spec' ? ' active' : '');
 			var wcards = log.querySelectorAll('.welcome .card');
 			for (var wc = 0; wc < wcards.length; wc++) { wcards[wc].className = 'card' + (wcards[wc].getAttribute('data-mode') === currentMode ? ' active' : ''); }
-			autoBtn.className = 'modebtn' + (m.state.autopilot ? ' active' : '');
-			autoBtn.textContent = m.state.autopilot ? 'Autopilot' : 'Auto';
-			ctxSpan.textContent = '~' + (m.state.tokens >= 1000 ? (m.state.tokens / 1000).toFixed(1) + 'k' : m.state.tokens) + ' tok';
+			autoBtn.className = 'toggle' + (m.state.autopilot ? ' on' : '');
+			renderCtxPie(m.state.tokens || 0);
 		}
 		else if (m.type === 'insertRef') {
 			var p = input.selectionStart || input.value.length;
