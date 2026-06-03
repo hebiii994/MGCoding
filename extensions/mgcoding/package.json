@@ -58,11 +58,6 @@
 					"name": "Specs"
 				},
 				{
-					"type": "webview",
-					"id": "mgcoding.run",
-					"name": "Esecuzione"
-				},
-				{
 					"id": "mgcoding.hooks",
 					"name": "Agent Hooks"
 				},

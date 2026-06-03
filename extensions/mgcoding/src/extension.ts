@@ -17,7 +17,6 @@ import { importFromKiro } from './migrate/importKiro';
 import { checkForUpdates } from './update/updater';
 import { initAnalytics, track, toggleAnalytics } from './analytics/analytics';
 import { registerAutocomplete } from './complete/autocomplete';
-import { RunViewProvider } from './run/runView';
 import { createSpec, runSpecTask, runSpecTasks, SpecsTreeProvider, SpecTasksCodeLensProvider } from './specs/specs';
 import { initSteering, SteeringTreeProvider } from './steering/steering';
 
@@ -68,14 +67,8 @@ export function activate(context: vscode.ExtensionContext): void {
 	// Rivela la chat all'avvio così è già pronta (non una vista vuota da cliccare).
 	void vscode.commands.executeCommand('mgcoding.chat.focus');
 
-	// Vista "Esecuzione" (stato task live + autopilot)
-	const runView = new RunViewProvider(context.extensionUri);
-	context.subscriptions.push(runView);
-	context.subscriptions.push(
-		vscode.window.registerWebviewViewProvider(RunViewProvider.viewType, runView, {
-			webviewOptions: { retainContextWhenHidden: true }
-		})
-	);
+	// L'avanzamento dell'esecuzione dei task viene mostrato DENTRO la chat (a destra).
+	const runView = chat.runReporter();
 
 	// Indicatore Autopilot nella status bar
 	const autopilotItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);

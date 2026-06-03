@@ -9,6 +9,7 @@ import { track } from '../analytics/analytics';
 import { changedCount } from '../edit/checkpoint';
 import { SPEC_SYS, slugify, specsRoot, writeAndOpen } from '../specs/specs';
 import { splitThink } from '../util/parsing';
+import { RunReporter } from '../run/runView';
 import { ProviderRegistry } from '../llm/registry';
 import { ChatMessage } from '../llm/types';
 
@@ -468,6 +469,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		}
 	}
 
+	/** Reporter che mostra l'avanzamento dell'esecuzione task DENTRO la chat (a destra). */
+	runReporter(): RunReporter {
+		return {
+			start: (title, steps) => {
+				void vscode.commands.executeCommand('mgcoding.chat.focus');
+				this.post({ type: 'busy', value: true });
+				this.post({ type: 'run', phase: 'start', text: `${title} — ${steps.length} task` });
+			},
+			setStatus: () => { /* i dettagli arrivano via log */ },
+			log: (line: string) => this.post({ type: 'run', phase: 'append', text: line }),
+			finish: (message?: string) => {
+				if (message) {
+					this.post({ type: 'run', phase: 'append', text: message });
+				}
+				this.post({ type: 'run', phase: 'end' });
+				this.post({ type: 'busy', value: false });
+				this.post({ type: 'changes', count: changedCount() });
+			}
+		};
+	}
+
 	private async runSpecTasksFromChat(): Promise<void> {
 		const spec = this.active().spec;
 		const root = specsRoot();
@@ -524,6 +546,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	.msg { padding: 8px 10px; border-radius: 8px; word-wrap: break-word; overflow-wrap: anywhere; max-width: 100%; box-sizing: border-box; }
 	.user { background: var(--vscode-input-background); align-self: flex-end; max-width: 92%; white-space: pre-wrap; }
 	.assistant { background: var(--vscode-editor-inactiveSelectionBackground); align-self: flex-start; max-width: 100%; }
+	.run-block { align-self: stretch; background: var(--vscode-textBlockQuote-background); border-left: 3px solid var(--mg-accent); border-radius: 6px; }
+	.run-block .run-head { font-weight: 600; padding: 7px 9px; }
+	.run-block .run-body { padding: 0 9px 7px; font-family: var(--vscode-editor-font-family); font-size: 0.85em; opacity: 0.9; max-height: 320px; overflow: auto; }
+	.run-line { white-space: pre-wrap; word-break: break-word; padding: 1px 0; }
 	.tool { background: var(--vscode-textBlockQuote-background); border-left: 3px solid var(--vscode-focusBorder); font-family: var(--vscode-editor-font-family); font-size: 0.85em; align-self: stretch; }
 	.tool .head { font-weight: 600; margin-bottom: 2px; }
 	.tool .result { opacity: 0.85; max-height: 180px; overflow: auto; white-space: pre-wrap; }
@@ -654,6 +680,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	var pendingImages = [];
 	var current = null;
 	var lastToolResult = null;
+	var runBlock = null;
 	var currentMode = 'vibe';
 	var BT = String.fromCharCode(96);
 	var fenceRe = new RegExp(BT + BT + BT + '(\\\\w*)\\\\n?([\\\\s\\\\S]*?)' + BT + BT + BT, 'g');
@@ -910,6 +937,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		else if (m.type === 'busy') { document.body.classList.toggle('busy', m.value); }
 		else if (m.type === 'changes') { renderChanges(m.count || 0); }
 		else if (m.type === 'specActions') { renderSpecActions(m.phase); }
+		else if (m.type === 'run') {
+			if (m.phase === 'start') {
+				ensureCleared();
+				runBlock = document.createElement('div'); runBlock.className = 'msg run-block';
+				var rh = document.createElement('div'); rh.className = 'run-head'; rh.textContent = '\\u25B6 ' + m.text;
+				var rb = document.createElement('div'); rb.className = 'run-body';
+				runBlock.appendChild(rh); runBlock.appendChild(rb); runBlock._body = rb;
+				log.appendChild(runBlock); log.scrollTop = log.scrollHeight;
+			} else if (m.phase === 'append' && runBlock) {
+				var rl = document.createElement('div'); rl.className = 'run-line'; rl.textContent = m.text;
+				runBlock._body.appendChild(rl); log.scrollTop = log.scrollHeight;
+			} else if (m.phase === 'end') {
+				runBlock = null;
+			}
+		}
 	});
 
 	showWelcome();
