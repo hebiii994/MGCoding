@@ -106,6 +106,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 						await this.sendState();
 					}
 					break;
+				case 'toggleAutopilot':
+					{
+						const cfg = vscode.workspace.getConfiguration('mgcoding');
+						await cfg.update('autoApprove', !cfg.get<boolean>('autoApprove', false), vscode.ConfigurationTarget.Global);
+						await this.sendState();
+					}
+					break;
+				case 'pickContext':
+					await this.pickContext();
+					break;
 				case 'newChat':
 					{
 						const s = this.makeSession();
@@ -141,7 +151,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		});
 	}
 
-	private async buildState(): Promise<{ current: string; options: ProviderOption[]; sessions: { id: string; title: string }[]; activeId: string; mode: ChatMode }> {
+	private async buildState(): Promise<{ current: string; options: ProviderOption[]; sessions: { id: string; title: string }[]; activeId: string; mode: ChatMode; autopilot: boolean; tokens: number }> {
 		const c = vscode.workspace.getConfiguration('mgcoding');
 		const claudeModel = c.get<string>('claude.model', 'claude-opus-4-8');
 		const ollamaModel = c.get<string>('ollama.model', 'qwen2.5-coder:14b');
@@ -167,12 +177,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		}
 
 		const current = provider === 'claude' ? 'claude' : provider === 'openai' ? `openai:${openaiModel}` : `ollama:${ollamaModel}`;
+		const chars = this.active().messages.reduce((n, m) => n + m.content.length, 0);
 		return {
 			current,
 			options,
 			sessions: this.sessions.map(s => ({ id: s.id, title: s.title })),
 			activeId: this.activeId,
-			mode: this.active().mode
+			mode: this.active().mode,
+			autopilot: c.get<boolean>('autoApprove', false),
+			tokens: Math.round(chars / 4)
 		};
 	}
 
@@ -182,6 +195,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 
 	private post(message: unknown): void {
 		this.view?.webview.postMessage(message);
+	}
+
+	/** Mostra un selettore di contesto (file) e inserisce il riferimento @percorso nel composer. */
+	private async pickContext(): Promise<void> {
+		const uris = await vscode.workspace.findFiles('**/*', '**/{node_modules,.git,out,out-build,out-vscode,.build,dist,Library,Temp,Logs,obj,bin}/**', 1000);
+		const items = uris
+			.map(u => vscode.workspace.asRelativePath(u, false))
+			.sort()
+			.map(label => ({ label }));
+		const picked = await vscode.window.showQuickPick(items, { placeHolder: 'Aggiungi contesto: scegli un file da allegare (@)', matchOnDetail: true });
+		if (picked) {
+			this.post({ type: 'insertRef', text: `@${picked.label} ` });
+		}
 	}
 
 	/** Allega il contenuto dei file citati con @percorso. */
@@ -296,7 +322,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	#composer { flex: 0 0 auto; border-top: 1px solid var(--vscode-panel-border); padding: 8px; display: flex; flex-direction: column; gap: 6px; background: var(--vscode-sideBar-background); }
 	#input { width: 100%; box-sizing: border-box; resize: vertical; min-height: 40px; max-height: 200px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); border-radius: 6px; padding: 8px; font-family: inherit; font-size: 13px; }
 	#input:focus { outline: none; border-color: var(--vscode-focusBorder); }
-	#row { display: flex; align-items: center; gap: 6px; }
+	#row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+	#ctx { font-size: 11px; opacity: 0.65; white-space: nowrap; }
+	#hash { flex: 0 0 auto; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); padding: 6px 9px; }
 	#model { flex: 1 1 auto; min-width: 0; background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); border: 1px solid var(--vscode-dropdown-border); border-radius: 6px; padding: 4px 6px; font-size: 12px; }
 	button { flex: 0 0 auto; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; border-radius: 6px; padding: 6px 14px; cursor: pointer; font-size: 13px; }
 	button:hover { background: var(--vscode-button-hoverBackground); }
@@ -316,7 +344,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	<div id="composer">
 		<textarea id="input" rows="2" placeholder="Scrivi un messaggio…  (Invio = invia · Shift+Invio = a capo · @file per allegare)"></textarea>
 		<div id="row">
+			<button id="hash" title="Aggiungi contesto (file)">#</button>
 			<select id="model" title="Modello / provider"></select>
+			<span id="ctx" title="Token stimati nel contesto"></span>
+			<button class="modebtn" id="auto" title="Autopilot: esegue senza conferme">Auto</button>
 			<button id="stop" title="Interrompi">⊘ Stop</button>
 			<button id="send">Invia</button>
 		</div>
@@ -332,6 +363,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	var newBtn = document.getElementById('newbtn');
 	var modeVibe = document.getElementById('mode-vibe');
 	var modeSpec = document.getElementById('mode-spec');
+	var hashBtn = document.getElementById('hash');
+	var autoBtn = document.getElementById('auto');
+	var ctxSpan = document.getElementById('ctx');
 	var current = null;
 	var lastToolResult = null;
 	var BT = String.fromCharCode(96);
@@ -431,6 +465,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	input.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
 	model.addEventListener('change', function () { vscode.postMessage({ type: 'setProvider', id: model.value }); });
 	sessionSel.addEventListener('change', function () { vscode.postMessage({ type: 'switchSession', id: sessionSel.value }); });
+	hashBtn.addEventListener('click', function () { vscode.postMessage({ type: 'pickContext' }); });
+	autoBtn.addEventListener('click', function () { vscode.postMessage({ type: 'toggleAutopilot' }); });
 
 	window.addEventListener('message', function (event) {
 		var m = event.data;
@@ -453,6 +489,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			}
 			modeVibe.className = 'modebtn' + (m.state.mode === 'vibe' ? ' active' : '');
 			modeSpec.className = 'modebtn' + (m.state.mode === 'spec' ? ' active' : '');
+			autoBtn.className = 'modebtn' + (m.state.autopilot ? ' active' : '');
+			autoBtn.textContent = m.state.autopilot ? 'Autopilot' : 'Auto';
+			ctxSpan.textContent = '~' + (m.state.tokens >= 1000 ? (m.state.tokens / 1000).toFixed(1) + 'k' : m.state.tokens) + ' tok';
+		}
+		else if (m.type === 'insertRef') {
+			var p = input.selectionStart || input.value.length;
+			input.value = input.value.slice(0, p) + m.text + input.value.slice(p);
+			input.focus();
 		}
 		else if (m.type === 'restore') {
 			log.innerHTML = '';
