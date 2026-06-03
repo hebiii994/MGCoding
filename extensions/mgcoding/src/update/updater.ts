@@ -129,25 +129,28 @@ async function downloadAndInstall(): Promise<void> {
 	}
 
 	const go = await vscode.window.showInformationMessage(
-		`MGCoding ${tag} è stato scaricato. Installa ora? L'app si chiuderà e si riaprirà aggiornata.`,
+		`MGCoding ${tag} è stato scaricato. Avviare l'installazione ora? Si aprirà l'installer: MGCoding verrà chiusa e riaperta aggiornata automaticamente.`,
 		{ modal: true },
-		'Installa e riavvia'
+		'Installa ora'
 	);
-	if (go !== 'Installa e riavvia') {
+	if (go !== 'Installa ora') {
 		return;
 	}
 
-	// Avvia l'installer in modo indipendente: attende che l'app si chiuda, poi installa in silenzio e riapre.
+	// 'start' avvia l'installer come processo INDIPENDENTE (sopravvive alla chiusura
+	// di MGCoding). Non chiudiamo noi l'app: ci pensa l'installer (Restart Manager),
+	// così al termine viene anche riaperta automaticamente.
 	try {
-		const child = spawn(
-			'cmd.exe',
-			['/c', `timeout /t 2 /nobreak >nul & "${dest}" /SILENT /NORESTART`],
-			{ detached: true, stdio: 'ignore', windowsHide: true }
-		);
-		child.unref();
-		setTimeout(() => void vscode.commands.executeCommand('workbench.action.quit'), 700);
+		spawn('cmd.exe', ['/c', `start "" "${dest}"`], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+		vscode.window.showInformationMessage('Installer avviato: segui i passaggi (Avanti → Installa). MGCoding si chiuderà e si riaprirà aggiornata.');
 	} catch (err) {
-		vscode.window.showErrorMessage(`Impossibile avviare l'installer: ${err instanceof Error ? err.message : String(err)}`);
+		const open = await vscode.window.showErrorMessage(
+			`Impossibile avviare l'installer automaticamente (${err instanceof Error ? err.message : String(err)}). Puoi eseguirlo a mano da:\n${dest}`,
+			'Apri cartella'
+		);
+		if (open === 'Apri cartella') {
+			await vscode.env.openExternal(vscode.Uri.file(path.dirname(dest)));
+		}
 	}
 }
 
