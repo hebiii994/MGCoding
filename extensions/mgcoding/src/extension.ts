@@ -14,6 +14,7 @@ import { ProviderRegistry } from './llm/registry';
 import { McpTreeProvider, openMcpConfig } from './mcp/mcp';
 import { McpManager, setMcpManager } from './mcp/mcpClient';
 import { importFromKiro } from './migrate/importKiro';
+import { checkForUpdates } from './update/updater';
 import { RunViewProvider } from './run/runView';
 import { createSpec, runSpecTask, runSpecTasks, SpecsTreeProvider } from './specs/specs';
 import { initSteering, SteeringTreeProvider } from './steering/steering';
@@ -24,6 +25,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	// Anteprima diff per le modifiche ai file
 	registerDiffApproval(context);
+
+	// Controllo aggiornamenti silenzioso all'avvio
+	void checkForUpdates(context, false);
 
 	// Chat (barra laterale secondaria, a destra)
 	const chat = new ChatViewProvider(context.extensionUri, registry, context.workspaceState);
@@ -96,6 +100,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('mgcoding.setOpenAIKey', () => registry.setOpenAIKey()),
 		vscode.commands.registerCommand('mgcoding.openChat', () => vscode.commands.executeCommand('mgcoding.chat.focus')),
 		vscode.commands.registerCommand('mgcoding.inlineEdit', () => inlineEdit(registry)),
+		vscode.commands.registerCommand('mgcoding.checkUpdates', () => checkForUpdates(context, true)),
 		vscode.commands.registerCommand('mgcoding.revertChanges', async () => {
 			if (!hasCheckpoint()) {
 				vscode.window.showInformationMessage('Nessuna modifica dell\'agente da ripristinare.');

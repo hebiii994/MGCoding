@@ -3,7 +3,7 @@
 	"publisher": "mgcoding",
 	"displayName": "MGCoding",
 	"description": "Agente di sviluppo spec-driven (Specs, Steering, Hooks, MCP) con LLM locale o Claude.",
-	"version": "0.0.1",
+	"version": "0.2.0",
 	"license": "MIT",
 	"engines": {
 		"vscode": "^1.5.0"
@@ -116,6 +116,10 @@
 			{
 				"command": "mgcoding.revertChanges",
 				"title": "MGCoding: Ripristina modifiche agente (checkpoint)"
+			},
+			{
+				"command": "mgcoding.checkUpdates",
+				"title": "MGCoding: Controlla aggiornamenti"
 			},
 			{
 				"command": "mgcoding.toggleAutopilot",
