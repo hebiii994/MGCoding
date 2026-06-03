@@ -4,8 +4,10 @@
 
 import * as vscode from 'vscode';
 import { runAgent } from '../agent/agentLoop';
+import { complete } from '../agent/agent';
 import { track } from '../analytics/analytics';
 import { changedCount } from '../edit/checkpoint';
+import { SPEC_SYS, slugify, specsRoot, writeAndOpen } from '../specs/specs';
 import { ProviderRegistry } from '../llm/registry';
 import { ChatMessage } from '../llm/types';
 
@@ -16,15 +18,31 @@ interface ProviderOption {
 
 type ChatMode = 'vibe' | 'spec';
 
+type SpecPhase = 'requirements' | 'design' | 'tasks' | 'done';
+
+interface SpecState {
+	name: string;
+	slug: string;
+	idea: string;
+	phase: SpecPhase;
+	requirements?: string;
+	design?: string;
+	tasks?: string;
+}
+
 interface Session {
 	id: string;
 	title: string;
 	mode: ChatMode;
 	messages: ChatMessage[];
+	spec?: SpecState;
 }
 
-const SPEC_MODE_PROMPT = `MODALITÀ SPEC (spec-driven): pianifica prima di implementare.
-Se non esiste già una spec adatta in .mg/specs/, proponi e crea con write_file: prima requirements.md (user story + criteri EARS), poi design.md, poi tasks.md in .mg/specs/<feature>/, chiedendo conferma tra una fase e l'altra. Se la spec esiste, aggiornala. Non scrivere codice finché i task non sono approvati.`;
+const SPEC_PHASE_TITLE: Record<Exclude<SpecPhase, 'done'>, string> = {
+	requirements: '📋 Requisiti',
+	design: '🏗 Design',
+	tasks: '✅ Task'
+};
 
 const VIBE_MODE_PROMPT = `MODALITÀ VIBE: esplora e implementa rapidamente, iterando. Puoi modificare il codice direttamente con i tool quando opportuno.`;
 
@@ -145,6 +163,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 					break;
 				case 'guidedSetup':
 					await vscode.commands.executeCommand('mgcoding.guidedSetup');
+					break;
+				case 'specApprove':
+					await this.approveSpec();
+					break;
+				case 'specRegenerate':
+					{
+						const sp = this.active().spec;
+						if (sp && sp.phase !== 'done') {
+							await this.runSpecPhase(sp.phase, undefined);
+						}
+					}
+					break;
+				case 'specRunTasks':
+					await this.runSpecTasksFromChat();
 					break;
 				case 'newChat':
 					{
@@ -282,6 +314,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	private async handleSend(text: string, images?: string[]): Promise<void> {
 		const session = this.active();
 		track('chat_sent', { mode: session.mode, provider: vscode.workspace.getConfiguration('mgcoding').get<string>('provider', 'ollama'), hasImages: !!images?.length });
+		if (session.mode === 'spec') {
+			if (session.title === 'Nuova sessione') {
+				session.title = (text || 'Spec').slice(0, 40);
+			}
+			await this.handleSpecMessage(text);
+			return;
+		}
 		if (session.title === 'Nuova sessione') {
 			session.title = (text || 'Immagine').slice(0, 40);
 		}
@@ -292,7 +331,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		session.messages.push(userMsg);
 		this.post({ type: 'busy', value: true });
 		this.abort = new AbortController();
-		const systemExtra = session.mode === 'spec' ? SPEC_MODE_PROMPT : VIBE_MODE_PROMPT;
+		const systemExtra = VIBE_MODE_PROMPT;
 		try {
 			await runAgent(this.registry, session.messages, {
 				onStreamStart: () => this.post({ type: 'streamStart' }),
@@ -312,6 +351,88 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			await this.save();
 			await this.sendState();
 		}
+	}
+
+	// ---- Workflow Spec guidato (requirements → design → tasks → esecuzione) ----
+
+	private async handleSpecMessage(text: string): Promise<void> {
+		const session = this.active();
+		if (!session.spec || session.spec.phase === 'done') {
+			const name = (text.trim().split('\n')[0] || 'Nuova funzionalità').slice(0, 60);
+			session.spec = { name, slug: slugify(name), idea: text.trim(), phase: 'requirements' };
+			await this.runSpecPhase('requirements');
+		} else {
+			// L'utente fornisce indicazioni: rigenero la fase corrente tenendone conto.
+			await this.runSpecPhase(session.spec.phase as Exclude<SpecPhase, 'done'>, text.trim());
+		}
+	}
+
+	private async runSpecPhase(phase: Exclude<SpecPhase, 'done'>, feedback?: string): Promise<void> {
+		const session = this.active();
+		const spec = session.spec;
+		const root = specsRoot();
+		if (!spec) {
+			return;
+		}
+		if (!root) {
+			this.post({ type: 'error', text: 'Apri una cartella per usare il workflow Spec.' });
+			return;
+		}
+		this.post({ type: 'busy', value: true });
+		this.post({ type: 'assistant', text: `${SPEC_PHASE_TITLE[phase]} — sto generando per «${spec.name}»…` });
+		try {
+			let userPrompt: string;
+			if (phase === 'requirements') {
+				userPrompt = `Funzionalità: ${spec.name}\nDescrizione: ${spec.idea}`;
+			} else if (phase === 'design') {
+				userPrompt = `Funzionalità: ${spec.name}\nRequisiti:\n${spec.requirements ?? ''}`;
+			} else {
+				userPrompt = `Funzionalità: ${spec.name}\nDesign:\n${spec.design ?? ''}`;
+			}
+			if (feedback) {
+				userPrompt += `\n\nIndicazioni di revisione dall'utente: ${feedback}\nRigenera il documento tenendone conto.`;
+			}
+			const content = await complete(this.registry, [{ role: 'user', content: userPrompt }], SPEC_SYS[phase]);
+			const dir = vscode.Uri.joinPath(root, spec.slug);
+			await vscode.workspace.fs.createDirectory(dir);
+			await writeAndOpen(vscode.Uri.joinPath(dir, `${phase}.md`), content);
+			spec[phase] = content;
+			this.post({ type: 'assistant', text: content });
+			this.post({ type: 'specActions', phase });
+			await this.save();
+		} catch (err) {
+			this.post({ type: 'error', text: err instanceof Error ? err.message : String(err) });
+		} finally {
+			this.post({ type: 'busy', value: false });
+		}
+	}
+
+	private async approveSpec(): Promise<void> {
+		const spec = this.active().spec;
+		if (!spec) {
+			return;
+		}
+		if (spec.phase === 'requirements') {
+			spec.phase = 'design';
+			await this.runSpecPhase('design');
+		} else if (spec.phase === 'design') {
+			spec.phase = 'tasks';
+			await this.runSpecPhase('tasks');
+		} else if (spec.phase === 'tasks') {
+			spec.phase = 'done';
+			await this.save();
+			this.post({ type: 'assistant', text: `✅ Spec «${spec.name}» completata in \`.mg/specs/${spec.slug}/\`. Puoi eseguire i task qui sotto.` });
+			this.post({ type: 'specActions', phase: 'done' });
+		}
+	}
+
+	private async runSpecTasksFromChat(): Promise<void> {
+		const spec = this.active().spec;
+		const root = specsRoot();
+		if (!spec || !root) {
+			return;
+		}
+		await vscode.commands.executeCommand('mgcoding.runSpecTasks', { uri: vscode.Uri.joinPath(root, spec.slug) });
 	}
 
 	dispose(): void {
@@ -353,6 +474,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	.greatfor ul { margin: 0; padding-left: 18px; font-size: 12.5px; opacity: 0.85; line-height: 1.7; }
 	.setup-link { display: block; margin: 18px auto 0; background: transparent; color: var(--mg-accent); border: 1px solid var(--mg-accent); border-radius: 8px; padding: 7px 14px; font-size: 12.5px; cursor: pointer; }
 	.setup-link:hover { background: color-mix(in srgb, var(--mg-accent) 14%, transparent); }
+	.spec-actions { align-self: stretch; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 12px; border: 1px solid var(--mg-accent); border-radius: 10px; background: color-mix(in srgb, var(--mg-accent) 10%, transparent); }
+	.spec-actions .sa-label { font-weight: 600; font-size: 12.5px; margin-right: 4px; }
+	.spec-actions button { background: transparent; color: var(--vscode-foreground); border: 1px solid var(--vscode-input-border, #5a5a5a); border-radius: 7px; padding: 5px 12px; font-size: 12px; cursor: pointer; }
+	.spec-actions button.primary { background: var(--mg-accent); color: #06210f; border-color: var(--mg-accent); font-weight: 600; }
+	.spec-actions button:hover { filter: brightness(1.08); }
 	.msg { padding: 8px 10px; border-radius: 8px; word-wrap: break-word; overflow-wrap: anywhere; max-width: 100%; box-sizing: border-box; }
 	.user { background: var(--vscode-input-background); align-self: flex-end; max-width: 92%; white-space: pre-wrap; }
 	.assistant { background: var(--vscode-editor-inactiveSelectionBackground); align-self: flex-start; max-width: 100%; }
@@ -632,6 +758,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			changesBar.style.display = 'none';
 		}
 	}
+	function specBtn(card, label, msg, primary) {
+		var b = document.createElement('button'); b.textContent = label; if (primary) { b.className = 'primary'; }
+		b.addEventListener('click', function () { vscode.postMessage({ type: msg }); card.remove(); });
+		card.appendChild(b);
+	}
+	function renderSpecActions(phase) {
+		ensureCleared();
+		var card = document.createElement('div'); card.className = 'spec-actions';
+		var lbl = document.createElement('span'); lbl.className = 'sa-label';
+		if (phase === 'done') {
+			lbl.textContent = 'Spec pronta. Vuoi eseguire i task ora?';
+			card.appendChild(lbl);
+			specBtn(card, '\\u25B6 Esegui i task', 'specRunTasks', true);
+		} else {
+			lbl.textContent = phase === 'requirements' ? 'Approvi i requisiti?' : phase === 'design' ? 'Approvi il design?' : 'Approvi i task?';
+			card.appendChild(lbl);
+			specBtn(card, 'Approva e continua', 'specApprove', true);
+			specBtn(card, 'Rigenera', 'specRegenerate', false);
+		}
+		log.appendChild(card); log.scrollTop = log.scrollHeight;
+	}
 	input.addEventListener('paste', function (e) {
 		var items = (e.clipboardData || {}).items || [];
 		for (var i = 0; i < items.length; i++) {
@@ -696,6 +843,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		else if (m.type === 'error') { addStatic('error', '⚠ ' + m.text); }
 		else if (m.type === 'busy') { document.body.classList.toggle('busy', m.value); }
 		else if (m.type === 'changes') { renderChanges(m.count || 0); }
+		else if (m.type === 'specActions') { renderSpecActions(m.phase); }
 	});
 
 	showWelcome();

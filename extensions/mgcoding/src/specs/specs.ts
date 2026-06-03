@@ -13,16 +13,48 @@ import { resolveFeatureDirs } from '../util/paths';
 const ENC = new TextEncoder();
 const DEC = new TextDecoder();
 
-function slugify(name: string): string {
+export function slugify(name: string): string {
 	return name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'feature';
 }
 
-function specsRoot(): vscode.Uri | undefined {
+export function specsRoot(): vscode.Uri | undefined {
 	const f = vscode.workspace.workspaceFolders;
 	return f && f.length ? vscode.Uri.joinPath(f[0].uri, '.mg', 'specs') : undefined;
 }
 
-async function writeAndOpen(uri: vscode.Uri, content: string): Promise<void> {
+/** System prompt per ciascuna fase del workflow spec-driven. */
+export const SPEC_SYS = {
+	requirements: `Genera un documento requirements.md spec-driven. Struttura:
+# Requisiti: <nome>
+## Introduzione (2-3 righe)
+## Requisiti
+Per ogni requisito numerato:
+### Requisito N: <titolo>
+**User story:** Come <ruolo>, voglio <obiettivo>, così che <beneficio>.
+**Criteri di accettazione** in notazione EARS:
+1. WHEN <evento> THE SYSTEM SHALL <comportamento>
+2. IF <condizione> THEN THE SYSTEM SHALL <comportamento>
+3. WHILE <stato> THE SYSTEM SHALL <comportamento>
+Copri casi felici, errori e casi limite. Solo Markdown, nessun preambolo.`,
+	design: `Genera un documento design.md (architettura tecnica) coerente con i requisiti dati. Sezioni:
+# Design: <nome>
+## Panoramica
+## Architettura (componenti e responsabilità; usa un diagramma mermaid se utile)
+## Componenti e interfacce (firme/API principali)
+## Modello dati (tipi/strutture)
+## Gestione degli errori
+## Strategia di test
+Mappa esplicitamente le scelte ai requisiti. Solo Markdown.`,
+	tasks: `Genera un documento tasks.md: piano di implementazione come checklist Markdown ("- [ ] ...").
+Regole:
+- Ogni task è piccolo, concreto e verificabile (idealmente una singola unità di lavoro).
+- Ordina i task per dipendenza (prima le fondamenta).
+- Ogni task cita i requisiti che soddisfa, es: "(Req 1.2, 3.1)".
+- Includi task di test dove sensato.
+- Solo passi implementabili nel codice (niente deploy/manuali). Solo Markdown.`
+};
+
+export async function writeAndOpen(uri: vscode.Uri, content: string): Promise<void> {
 	await vscode.workspace.fs.writeFile(uri, ENC.encode(content));
 	const doc = await vscode.workspace.openTextDocument(uri);
 	await vscode.window.showTextDocument(doc, { preview: false });
@@ -70,18 +102,7 @@ export async function createSpec(registry: ProviderRegistry, refresh: () => void
 	const requirements = await generatePhase(
 		registry,
 		'requirements',
-		`Genera un documento requirements.md spec-driven (stile Kiro). Struttura:
-# Requisiti: <nome>
-## Introduzione (2-3 righe)
-## Requisiti
-Per ogni requisito numerato:
-### Requisito N: <titolo>
-**User story:** Come <ruolo>, voglio <obiettivo>, così che <beneficio>.
-**Criteri di accettazione** in notazione EARS:
-1. WHEN <evento> THE SYSTEM SHALL <comportamento>
-2. IF <condizione> THEN THE SYSTEM SHALL <comportamento>
-3. WHILE <stato> THE SYSTEM SHALL <comportamento>
-Copri casi felici, errori e casi limite. Solo Markdown, nessun preambolo.`,
+		SPEC_SYS.requirements,
 		`Funzionalità: ${name}\nDescrizione: ${desc}`
 	);
 	await writeAndOpen(vscode.Uri.joinPath(dir, 'requirements.md'), requirements);
@@ -99,15 +120,7 @@ Copri casi felici, errori e casi limite. Solo Markdown, nessun preambolo.`,
 	const design = await generatePhase(
 		registry,
 		'design',
-		`Genera un documento design.md (architettura tecnica) coerente con i requisiti dati. Sezioni:
-# Design: <nome>
-## Panoramica
-## Architettura (componenti e responsabilità; usa un diagramma mermaid se utile)
-## Componenti e interfacce (firme/API principali)
-## Modello dati (tipi/strutture)
-## Gestione degli errori
-## Strategia di test
-Mappa esplicitamente le scelte ai requisiti. Solo Markdown.`,
+		SPEC_SYS.design,
 		`Funzionalità: ${name}\nRequisiti:\n${requirements}`
 	);
 	await writeAndOpen(vscode.Uri.joinPath(dir, 'design.md'), design);
@@ -124,13 +137,7 @@ Mappa esplicitamente le scelte ai requisiti. Solo Markdown.`,
 	const tasks = await generatePhase(
 		registry,
 		'tasks',
-		`Genera un documento tasks.md: piano di implementazione come checklist Markdown ("- [ ] ...").
-Regole:
-- Ogni task è piccolo, concreto e verificabile (idealmente una singola unità di lavoro).
-- Ordina i task per dipendenza (prima le fondamenta).
-- Ogni task cita i requisiti che soddisfa, es: "(Req 1.2, 3.1)".
-- Includi task di test dove sensato.
-- Solo passi implementabili nel codice (niente deploy/manuali). Solo Markdown.`,
+		SPEC_SYS.tasks,
 		`Funzionalità: ${name}\nDesign:\n${design}`
 	);
 	await writeAndOpen(vscode.Uri.joinPath(dir, 'tasks.md'), tasks);
