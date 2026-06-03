@@ -283,6 +283,16 @@
 					"default": 8192,
 					"description": "Numero massimo di token in output per Claude."
 				},
+				"mgcoding.claude.thinking": {
+					"type": "boolean",
+					"default": false,
+					"description": "Abilita l'extended thinking di Claude (mostra il ragionamento nel pannello Ragionamento)."
+				},
+				"mgcoding.claude.thinkingBudget": {
+					"type": "number",
+					"default": 2048,
+					"description": "Budget di token per il ragionamento di Claude (quando thinking è attivo)."
+				},
 				"mgcoding.ollama.endpoint": {
 					"type": "string",
 					"default": "http://localhost:11434",
@@ -292,6 +302,11 @@
 					"type": "string",
 					"default": "qwen2.5-coder:14b",
 					"description": "Modello Ollama da usare (es. qwen2.5-coder:14b, llama3.1:8b)."
+				},
+				"mgcoding.ollama.think": {
+					"type": "boolean",
+					"default": false,
+					"description": "Attiva il ragionamento (campo 'thinking') per i modelli Ollama che lo supportano (es. deepseek-r1, qwq, qwen3). Lascia OFF per i modelli non-reasoning (es. qwen2.5-coder)."
 				},
 				"mgcoding.ollama.nativeTools": {
 					"type": "boolean",

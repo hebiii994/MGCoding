@@ -11,6 +11,8 @@ const ANTHROPIC_VERSION = '2023-06-01';
 export interface ClaudeConfig {
 	model: string;
 	maxTokens: number;
+	thinking?: boolean;
+	thinkingBudget?: number;
 }
 
 export class ClaudeProvider implements LLMProvider {
@@ -108,13 +110,18 @@ export class ClaudeProvider implements LLMProvider {
 	/** Streaming agentico con tool-use NATIVO: emette gli eventi SSE grezzi. */
 	async *streamAgent(params: AgentStreamParams): AsyncIterable<AnthropicStreamEvent> {
 		const cfg = this.getConfig();
-		const body = {
+		const maxTokens = params.maxTokens ?? cfg.maxTokens;
+		const body: Record<string, unknown> = {
 			model: cfg.model,
-			max_tokens: params.maxTokens ?? cfg.maxTokens,
+			max_tokens: maxTokens,
 			system: params.system,
 			messages: params.messages,
 			tools: params.tools
 		};
+		if (cfg.thinking) {
+			const budget = Math.min(cfg.thinkingBudget ?? 2048, Math.max(1024, maxTokens - 1024));
+			body.thinking = { type: 'enabled', budget_tokens: budget };
+		}
 		yield* this.postStream(body, params.signal);
 	}
 }

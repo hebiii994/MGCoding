@@ -28,6 +28,7 @@ export interface AnthropicToolDef {
 
 export type AnthropicBlock =
 	| { type: 'text'; text: string }
+	| { type: 'thinking'; thinking: string; signature?: string }
 	| { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
 	| { type: 'tool_result'; tool_use_id: string; content: string };
 
@@ -49,7 +50,7 @@ export interface AnthropicStreamEvent {
 	type: string;
 	index?: number;
 	content_block?: { type: string; id?: string; name?: string };
-	delta?: { type?: string; text?: string; partial_json?: string; stop_reason?: string };
+	delta?: { type?: string; text?: string; partial_json?: string; stop_reason?: string; thinking?: string; signature?: string };
 }
 
 /**

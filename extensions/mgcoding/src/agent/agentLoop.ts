@@ -126,11 +126,12 @@ async function runJsonAgent(
 // --- Percorso tool-use NATIVO (Claude) ---
 
 interface AccBlock {
-	type: 'text' | 'tool_use';
+	type: 'text' | 'tool_use' | 'thinking';
 	text?: string;
 	id?: string;
 	name?: string;
 	json?: string;
+	sig?: string;
 }
 
 /**
@@ -166,17 +167,37 @@ async function runNativeAgent(
 		const blocks = new Map<number, AccBlock>();
 		let textAcc = '';
 		let stopReason: string | undefined;
+		let thinkingOpen = false;
 
 		for await (const evt of provider.streamAgent!({ system, messages, tools, signal })) {
 			if (evt.type === 'content_block_start' && evt.content_block && evt.index !== undefined) {
 				if (evt.content_block.type === 'tool_use') {
 					blocks.set(evt.index, { type: 'tool_use', id: evt.content_block.id, name: evt.content_block.name, json: '' });
+				} else if (evt.content_block.type === 'thinking') {
+					blocks.set(evt.index, { type: 'thinking', text: '', sig: '' });
 				} else if (evt.content_block.type === 'text') {
 					blocks.set(evt.index, { type: 'text', text: '' });
 				}
 			} else if (evt.type === 'content_block_delta' && evt.delta && evt.index !== undefined) {
 				const b = blocks.get(evt.index);
-				if (evt.delta.type === 'text_delta' && evt.delta.text) {
+				if (evt.delta.type === 'thinking_delta' && evt.delta.thinking) {
+					if (streaming && !thinkingOpen) {
+						cb.onStreamDelta!('<think>');
+						thinkingOpen = true;
+					}
+					if (streaming) {
+						cb.onStreamDelta!(evt.delta.thinking);
+					}
+					if (b && b.type === 'thinking') {
+						b.text = (b.text ?? '') + evt.delta.thinking;
+					}
+				} else if (evt.delta.type === 'signature_delta' && evt.delta.signature && b && b.type === 'thinking') {
+					b.sig = (b.sig ?? '') + evt.delta.signature;
+				} else if (evt.delta.type === 'text_delta' && evt.delta.text) {
+					if (streaming && thinkingOpen) {
+						cb.onStreamDelta!('</think>');
+						thinkingOpen = false;
+					}
 					textAcc += evt.delta.text;
 					if (streaming) {
 						cb.onStreamDelta!(evt.delta.text);
@@ -193,11 +214,17 @@ async function runNativeAgent(
 				throw new Error('Errore nello stream Anthropic.');
 			}
 		}
+		if (streaming && thinkingOpen) {
+			cb.onStreamDelta!('</think>');
+			thinkingOpen = false;
+		}
 
 		// Ricostruisce i blocchi della risposta in ordine di indice.
 		const assistantContent: AnthropicBlock[] = [];
 		for (const [, b] of [...blocks.entries()].sort((a, c) => a[0] - c[0])) {
-			if (b.type === 'text' && b.text) {
+			if (b.type === 'thinking' && b.text) {
+				assistantContent.push({ type: 'thinking', thinking: b.text, ...(b.sig ? { signature: b.sig } : {}) });
+			} else if (b.type === 'text' && b.text) {
 				assistantContent.push({ type: 'text', text: b.text });
 			} else if (b.type === 'tool_use' && b.id && b.name) {
 				let input: Record<string, unknown> = {};

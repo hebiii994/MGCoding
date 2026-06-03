@@ -9,6 +9,7 @@ import { AgentStreamParams, AnthropicMessage, AnthropicStreamEvent, LLMError, LL
 export interface OllamaConfig {
 	endpoint: string;
 	model: string;
+	think?: boolean;
 }
 
 interface OllamaMessage {
@@ -101,13 +102,30 @@ export class OllamaProvider implements LLMProvider {
 			...(req.system ? [{ role: 'system', content: req.system }] : []),
 			...req.messages.map(m => ({ role: m.role, content: m.content }))
 		];
-		for await (const evt of this.postNdjson({ model: cfg.model, messages }, req.signal)) {
-			if (evt.message?.content) {
-				yield evt.message.content as string;
-			}
+		let thinkOpen = false;
+		for await (const evt of this.postNdjson({ model: cfg.model, messages, ...(cfg.think ? { think: true } : {}) }, req.signal)) {
 			if (evt.error) {
 				throw new LLMError(`Ollama error: ${evt.error}`);
 			}
+			const thinking: string | undefined = evt.message?.thinking;
+			if (thinking) {
+				if (!thinkOpen) {
+					yield '<think>';
+					thinkOpen = true;
+				}
+				yield thinking;
+			}
+			const content: string | undefined = evt.message?.content;
+			if (content) {
+				if (thinkOpen) {
+					yield '</think>';
+					thinkOpen = false;
+				}
+				yield content;
+			}
+		}
+		if (thinkOpen) {
+			yield '</think>';
 		}
 	}
 

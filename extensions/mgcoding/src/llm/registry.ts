@@ -26,7 +26,9 @@ export class ProviderRegistry implements vscode.Disposable {
 				const c = vscode.workspace.getConfiguration('mgcoding');
 				return {
 					model: c.get<string>('claude.model', 'claude-opus-4-8'),
-					maxTokens: c.get<number>('claude.maxTokens', 8192)
+					maxTokens: c.get<number>('claude.maxTokens', 8192),
+					thinking: c.get<boolean>('claude.thinking', false),
+					thinkingBudget: c.get<number>('claude.thinkingBudget', 2048)
 				};
 			}
 		);
@@ -34,7 +36,8 @@ export class ProviderRegistry implements vscode.Disposable {
 			const c = vscode.workspace.getConfiguration('mgcoding');
 			return {
 				endpoint: c.get<string>('ollama.endpoint', 'http://localhost:11434'),
-				model: c.get<string>('ollama.model', 'qwen2.5-coder:14b')
+				model: c.get<string>('ollama.model', 'qwen2.5-coder:14b'),
+				think: c.get<boolean>('ollama.think', false)
 			};
 		});
 		this.openai = new OpenAIProvider(
