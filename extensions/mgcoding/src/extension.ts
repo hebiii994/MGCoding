@@ -15,6 +15,7 @@ import { McpTreeProvider, openMcpConfig } from './mcp/mcp';
 import { McpManager, setMcpManager } from './mcp/mcpClient';
 import { importFromKiro } from './migrate/importKiro';
 import { checkForUpdates } from './update/updater';
+import { registerAutocomplete } from './complete/autocomplete';
 import { RunViewProvider } from './run/runView';
 import { createSpec, runSpecTask, runSpecTasks, SpecsTreeProvider } from './specs/specs';
 import { initSteering, SteeringTreeProvider } from './steering/steering';
@@ -28,6 +29,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	// Controllo aggiornamenti silenzioso all'avvio
 	void checkForUpdates(context, false);
+
+	// Autocomplete inline (ghost text)
+	registerAutocomplete(context);
 
 	// Chat (barra laterale secondaria, a destra)
 	const chat = new ChatViewProvider(context.extensionUri, registry, context.workspaceState);

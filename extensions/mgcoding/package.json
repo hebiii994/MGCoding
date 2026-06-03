@@ -323,6 +323,16 @@
 					"default": "qwen2.5-coder:14b",
 					"description": "Modello Ollama da usare (es. qwen2.5-coder:14b, llama3.1:8b)."
 				},
+				"mgcoding.autocomplete.enabled": {
+					"type": "boolean",
+					"default": false,
+					"description": "Abilita l'autocomplete inline (ghost text) tramite Ollama FIM. Richiede un modello code locale."
+				},
+				"mgcoding.autocomplete.model": {
+					"type": "string",
+					"default": "qwen2.5-coder:7b",
+					"description": "Modello Ollama per l'autocomplete inline (consigliato un modello piccolo/veloce con FIM, es. qwen2.5-coder:7b)."
+				},
 				"mgcoding.ollama.think": {
 					"type": "boolean",
 					"default": false,
