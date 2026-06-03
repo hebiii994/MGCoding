@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 import { ProviderRegistry } from '../llm/registry';
 import { AnthropicBlock, AnthropicMessage, ChatMessage, LLMProvider } from '../llm/types';
 import { getMcpManager } from '../mcp/mcpClient';
+import { beginCheckpoint } from '../edit/checkpoint';
 import { parseToolCall, TOOL_RE } from '../util/parsing';
 import { buildSystemPrompt, complete, streamChat } from './agent';
 import { anthropicBuiltinTools, executeTool, ToolCall, TOOL_SPECS } from './tools';
@@ -54,6 +55,7 @@ export async function runAgent(
 	signal?: AbortSignal,
 	systemExtra?: string
 ): Promise<void> {
+	beginCheckpoint();
 	const hint = [...messages].reverse().find(m => m.role === 'user')?.content;
 	const provider = registry.pickProvider(hint);
 	// Percorso preferito: tool-use NATIVO se il provider lo supporta (Claude/OpenAI sempre; Ollama se abilitato).

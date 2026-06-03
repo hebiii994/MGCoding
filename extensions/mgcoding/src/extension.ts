@@ -6,6 +6,8 @@ import * as vscode from 'vscode';
 import { runAgent } from './agent/agentLoop';
 import { ChatViewProvider } from './chat/chatViewProvider';
 import { registerDiffApproval } from './edit/diffApproval';
+import { inlineEdit } from './edit/inlineEdit';
+import { hasCheckpoint, revertCheckpoint } from './edit/checkpoint';
 import { ChatMessage } from './llm/types';
 import { createSampleHook, Hook, HookManager, HooksTreeProvider, toggleHook } from './hooks/hooks';
 import { ProviderRegistry } from './llm/registry';
@@ -93,6 +95,18 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('mgcoding.setApiKey', () => registry.setApiKey()),
 		vscode.commands.registerCommand('mgcoding.setOpenAIKey', () => registry.setOpenAIKey()),
 		vscode.commands.registerCommand('mgcoding.openChat', () => vscode.commands.executeCommand('mgcoding.chat.focus')),
+		vscode.commands.registerCommand('mgcoding.inlineEdit', () => inlineEdit(registry)),
+		vscode.commands.registerCommand('mgcoding.revertChanges', async () => {
+			if (!hasCheckpoint()) {
+				vscode.window.showInformationMessage('Nessuna modifica dell\'agente da ripristinare.');
+				return;
+			}
+			const ok = await vscode.window.showWarningMessage('Ripristinare i file all\'ultimo checkpoint (annulla le modifiche dell\'agente)?', { modal: true }, 'Ripristina');
+			if (ok === 'Ripristina') {
+				const n = await revertCheckpoint();
+				vscode.window.showInformationMessage(`MGCoding: ripristinati ${n} file.`);
+			}
+		}),
 		vscode.commands.registerCommand('mgcoding.runAgentTask', async () => {
 			const task = await vscode.window.showInputBox({ prompt: 'Descrivi il task per l\'agente MGCoding', ignoreFocusOut: true });
 			if (!task) {

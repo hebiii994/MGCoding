@@ -8,6 +8,7 @@ import * as vscode from 'vscode';
 import { getMcpManager } from '../mcp/mcpClient';
 import { AnthropicToolDef } from '../llm/types';
 import { confirmWrite } from '../edit/diffApproval';
+import { recordOriginal } from '../edit/checkpoint';
 import { scopedGlob } from '../util/parsing';
 
 const execAsync = promisify(exec);
@@ -118,6 +119,7 @@ export async function executeTool(call: ToolCall): Promise<string> {
 						return `Modifica a ${rel} scartata dall'utente.`;
 					}
 				}
+				await recordOriginal(uri);
 				await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(uri, '..'));
 				await vscode.workspace.fs.writeFile(uri, ENC.encode(newContent));
 				return `OK: scritto ${rel}`;
@@ -181,6 +183,7 @@ export async function executeTool(call: ToolCall): Promise<string> {
 				if (needApproval && !(await confirmWrite(rel, content, updated))) {
 					return `Modifica a ${rel} scartata dall'utente.`;
 				}
+				await recordOriginal(uri);
 				await vscode.workspace.fs.writeFile(uri, ENC.encode(updated));
 				return `OK: applicata patch a ${rel} (${replaceAll ? occurrences : 1} sostituzione/i)`;
 			}

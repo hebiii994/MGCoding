@@ -110,6 +110,14 @@
 				"title": "MGCoding: Esegui task agente"
 			},
 			{
+				"command": "mgcoding.inlineEdit",
+				"title": "MGCoding: Modifica inline (selezione)"
+			},
+			{
+				"command": "mgcoding.revertChanges",
+				"title": "MGCoding: Ripristina modifiche agente (checkpoint)"
+			},
+			{
 				"command": "mgcoding.toggleAutopilot",
 				"title": "MGCoding: Autopilot on/off"
 			},
@@ -172,6 +180,14 @@
 				"command": "mgcoding.openMcpConfig",
 				"title": "Configura MCP",
 				"icon": "$(gear)"
+			}
+		],
+		"keybindings": [
+			{
+				"command": "mgcoding.inlineEdit",
+				"key": "ctrl+i",
+				"mac": "cmd+i",
+				"when": "editorTextFocus"
 			}
 		],
 		"menus": {
