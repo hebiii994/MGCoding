@@ -221,6 +221,7 @@ ${design || '(non disponibile)'}
 # Task da implementare ora
 ${task.text}
 
+NON modificare i file della spec (requirements.md, design.md, tasks.md): allo stato dei task (spunte) ci pensa MGCoding.
 Quando hai finito di implementare questo task, fornisci un breve riepilogo di cosa hai fatto.`;
 
 		const messages = [{ role: 'user' as const, content: prompt }];
@@ -236,8 +237,9 @@ Quando hai finito di implementare questo task, fornisci un breve riepilogo di co
 			reporter.log(`[errore] ${String(err)}`);
 		}
 
-		// spunta il task (rileggo per sicurezza e applico per indice)
-		tasksMd = markTaskDone(await readIfExists(tasksUri) || tasksMd, task.lineIdx);
+		// Spunta il task sulla NOSTRA copia autorevole (così non si perdono i task
+		// già completati anche se l'agente avesse modificato il file).
+		tasksMd = markTaskDone(tasksMd, task.lineIdx);
 		await vscode.workspace.fs.writeFile(tasksUri, ENC.encode(tasksMd));
 		refresh();
 	}
@@ -275,6 +277,7 @@ ${design || '(non disponibile)'}
 # Task
 ${task.text}
 
+NON modificare i file della spec (requirements.md, design.md, tasks.md): allo stato dei task ci pensa MGCoding.
 Al termine fornisci un breve riepilogo.`;
 	try {
 		await runAgent(registry, [{ role: 'user', content: prompt }], {
