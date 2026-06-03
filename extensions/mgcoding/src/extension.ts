@@ -174,13 +174,13 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('mgcoding.importFromKiro', () => importFromKiro()),
 		vscode.commands.registerCommand('mgcoding.runSpecTasks', (node?: { uri: vscode.Uri }) => {
 			if (node?.uri) {
-				return runSpecTasks(registry, node.uri, () => specsTree.refresh(), runView);
+				return runSpecTasks(registry, node.uri, () => specsTree.refresh(), runView, true, chat.beginRun());
 			}
 			return undefined;
 		}),
 		vscode.commands.registerCommand('mgcoding.runSpecTask', (node?: { specDir: vscode.Uri; lineIdx: number }) => {
 			if (node?.specDir && typeof node.lineIdx === 'number') {
-				return runSpecTask(registry, node.specDir, node.lineIdx, () => specsTree.refresh(), runView);
+				return runSpecTask(registry, node.specDir, node.lineIdx, () => specsTree.refresh(), runView, chat.beginRun());
 			}
 			return undefined;
 		}),
@@ -211,7 +211,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				return undefined;
 			}
 			// "Run all tasks": esegue i task richiesti, salta gli opzionali.
-			return runSpecTasks(registry, vscode.Uri.joinPath(u, '..'), () => specsTree.refresh(), runView, false);
+			return runSpecTasks(registry, vscode.Uri.joinPath(u, '..'), () => specsTree.refresh(), runView, false, chat.beginRun());
 		}),
 		vscode.commands.registerCommand('mgcoding.runSpecTasksHereOptional', (uri?: vscode.Uri) => {
 			const u = uri ?? vscode.window.activeTextEditor?.document.uri;
@@ -219,7 +219,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				return undefined;
 			}
 			// "Run all + optional": include anche i task opzionali.
-			return runSpecTasks(registry, vscode.Uri.joinPath(u, '..'), () => specsTree.refresh(), runView, true);
+			return runSpecTasks(registry, vscode.Uri.joinPath(u, '..'), () => specsTree.refresh(), runView, true, chat.beginRun());
 		})
 	);
 }

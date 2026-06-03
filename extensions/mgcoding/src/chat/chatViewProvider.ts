@@ -351,8 +351,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			if (session.title === 'Nuova sessione') {
 				session.title = (text || 'Spec').slice(0, 40);
 			}
-			await this.handleSpecMessage(text);
-			return;
+			const handled = await this.handleSpecMessage(text);
+			if (handled) {
+				return;
+			}
+			// Spec già completata e messaggio non legato ai task → prosegui come chat normale.
 		}
 		if (session.title === 'Nuova sessione') {
 			session.title = (text || 'Immagine').slice(0, 40);
@@ -388,23 +391,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 
 	// ---- Workflow Spec guidato (requirements → design → tasks → esecuzione) ----
 
-	private async handleSpecMessage(text: string): Promise<void> {
+	/** Gestisce un messaggio in modalità Spec. Ritorna false se va trattato come chat normale. */
+	private async handleSpecMessage(text: string): Promise<boolean> {
 		const session = this.active();
-		// Spec completata: se l'utente chiede di proseguire/eseguire i task, eseguili
-		// invece di iniziare una nuova spec.
-		if (session.spec && session.spec.phase === 'done' && /\b(continu|esegu|run|task|prosegu)/i.test(text)) {
-			this.post({ type: 'assistant', text: `▶ Eseguo i task di «${session.spec.name}»…` });
-			await this.runSpecTasksFromChat();
-			return;
+		if (session.spec && session.spec.phase === 'done') {
+			// Spec completata: "continua/esegui i task" → esegue; altrimenti è una
+			// domanda/azione normale → la gestisce l'agente (NON una nuova spec).
+			if (/\b(continu|esegu|run|task|prosegu)/i.test(text)) {
+				this.post({ type: 'assistant', text: `▶ Eseguo i task di «${session.spec.name}»…` });
+				await this.runSpecTasksFromChat();
+				return true;
+			}
+			return false;
 		}
-		if (!session.spec || session.spec.phase === 'done') {
+		if (!session.spec) {
 			const name = (text.trim().split('\n')[0] || 'Nuova funzionalità').slice(0, 60);
 			session.spec = { name, slug: slugify(name), idea: text.trim(), phase: 'requirements' };
 			await this.runSpecPhase('requirements');
-		} else {
-			// L'utente fornisce indicazioni: rigenero la fase corrente tenendone conto.
-			await this.runSpecPhase(session.spec.phase as Exclude<SpecPhase, 'done'>, text.trim());
+			return true;
 		}
+		// Fase in corso: l'utente fornisce indicazioni → rigenero la fase corrente.
+		await this.runSpecPhase(session.spec.phase as Exclude<SpecPhase, 'done'>, text.trim());
+		return true;
 	}
 
 	private async runSpecPhase(phase: Exclude<SpecPhase, 'done'>, feedback?: string): Promise<void> {
@@ -467,6 +475,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			this.post({ type: 'assistant', text: `✅ Spec «${spec.name}» completata in \`.mg/specs/${spec.slug}/\`. Puoi eseguire i task qui sotto.` });
 			this.post({ type: 'specActions', phase: 'done' });
 		}
+	}
+
+	/** Crea un nuovo AbortController per un'esecuzione e ne restituisce il signal (Stop della chat). */
+	beginRun(): AbortSignal {
+		this.abort = new AbortController();
+		return this.abort.signal;
 	}
 
 	/** Reporter che mostra l'avanzamento dell'esecuzione task DENTRO la chat (a destra). */

@@ -182,7 +182,7 @@ function markTaskDone(md: string, lineIdx: number): string {
  * Esegue (o riprende) tutti i task non completati di una spec, uno alla volta,
  * usando l'agente con il contesto di requirements e design. Spunta i task completati.
  */
-export async function runSpecTasks(registry: ProviderRegistry, specDir: vscode.Uri, refresh: () => void, reporter: RunReporter, includeOptional = true): Promise<void> {
+export async function runSpecTasks(registry: ProviderRegistry, specDir: vscode.Uri, refresh: () => void, reporter: RunReporter, includeOptional = true, signal?: AbortSignal): Promise<void> {
 	const tasksUri = vscode.Uri.joinPath(specDir, 'tasks.md');
 	let tasksMd = await readIfExists(tasksUri);
 	if (!tasksMd) {
@@ -201,21 +201,16 @@ export async function runSpecTasks(registry: ProviderRegistry, specDir: vscode.U
 
 	reporter.start(`Spec: ${specName}`, pending.map(t => t.text));
 
-	await vscode.window.withProgress(
-		{ location: vscode.ProgressLocation.Notification, title: `MGCoding: eseguo i task di ${specName}`, cancellable: true },
-		async (progress, token) => {
-			const ac = new AbortController();
-			token.onCancellationRequested(() => ac.abort());
-			for (let i = 0; i < pending.length; i++) {
-				if (token.isCancellationRequested) {
-					break;
-				}
-				const task = pending[i];
-				progress.report({ message: `(${i + 1}/${pending.length}) ${task.text.slice(0, 60)}`, increment: 100 / pending.length });
-				reporter.setStatus(i, 'running');
-				reporter.log(`▶ Task ${i + 1}/${pending.length}: ${task.text}`);
+	for (let i = 0; i < pending.length; i++) {
+		if (signal?.aborted) {
+			reporter.log('⏹ Esecuzione interrotta.');
+			break;
+		}
+		const task = pending[i];
+		reporter.setStatus(i, 'running');
+		reporter.log(`▶ Task ${i + 1}/${pending.length}: ${task.text}`);
 
-				const prompt = `Stai implementando la funzionalità "${specName}" in modo spec-driven. Implementa SOLO il task indicato, usando i tool per leggere e scrivere i file necessari nel workspace.
+		const prompt = `Stai implementando la funzionalità "${specName}" in modo spec-driven. Implementa SOLO il task indicato, usando i tool per leggere e scrivere i file necessari nel workspace.
 
 # Requisiti
 ${requirements || '(non disponibili)'}
@@ -228,33 +223,30 @@ ${task.text}
 
 Quando hai finito di implementare questo task, fornisci un breve riepilogo di cosa hai fatto.`;
 
-				const messages = [{ role: 'user' as const, content: prompt }];
-				try {
-					await runAgent(registry, messages, {
-						onAssistantText: t => reporter.log(`🤖 ${t.slice(0, 300)}`),
-						onToolStart: c => reporter.log(`🔧 ${c.tool} ${JSON.stringify(c.args).slice(0, 160)}`),
-						onToolResult: r => reporter.log(`↳ ${r.slice(0, 200)}`)
-					}, ac.signal);
-					reporter.setStatus(i, 'done');
-				} catch (err) {
-					reporter.setStatus(i, 'error');
-					reporter.log(`[errore] ${String(err)}`);
-				}
-
-				// spunta il task (rileggo per sicurezza e applico per indice)
-				tasksMd = markTaskDone(await readIfExists(tasksUri) || tasksMd, task.lineIdx);
-				await vscode.workspace.fs.writeFile(tasksUri, ENC.encode(tasksMd));
-				refresh();
-			}
+		const messages = [{ role: 'user' as const, content: prompt }];
+		try {
+			await runAgent(registry, messages, {
+				onAssistantText: t => reporter.log(`🤖 ${t.slice(0, 300)}`),
+				onToolStart: c => reporter.log(`🔧 ${c.tool} ${JSON.stringify(c.args).slice(0, 160)}`),
+				onToolResult: r => reporter.log(`↳ ${r.slice(0, 200)}`)
+			}, signal);
+			reporter.setStatus(i, 'done');
+		} catch (err) {
+			reporter.setStatus(i, 'error');
+			reporter.log(`[errore] ${String(err)}`);
 		}
-	);
+
+		// spunta il task (rileggo per sicurezza e applico per indice)
+		tasksMd = markTaskDone(await readIfExists(tasksUri) || tasksMd, task.lineIdx);
+		await vscode.workspace.fs.writeFile(tasksUri, ENC.encode(tasksMd));
+		refresh();
+	}
 
 	reporter.finish('=== Esecuzione task terminata ===');
-	vscode.window.showInformationMessage(`MGCoding: esecuzione task di "${specName}" terminata.`);
 }
 
 /** Esegue un singolo task (per lineIdx) di una spec con l'agente. */
-export async function runSpecTask(registry: ProviderRegistry, specDir: vscode.Uri, lineIdx: number, refresh: () => void, reporter: RunReporter): Promise<void> {
+export async function runSpecTask(registry: ProviderRegistry, specDir: vscode.Uri, lineIdx: number, refresh: () => void, reporter: RunReporter, signal?: AbortSignal): Promise<void> {
 	const tasksUri = vscode.Uri.joinPath(specDir, 'tasks.md');
 	let tasksMd = await readIfExists(tasksUri);
 	const task = parseTasks(tasksMd).find(t => t.lineIdx === lineIdx);
@@ -284,13 +276,12 @@ ${design || '(non disponibile)'}
 ${task.text}
 
 Al termine fornisci un breve riepilogo.`;
-	const ac = new AbortController();
 	try {
 		await runAgent(registry, [{ role: 'user', content: prompt }], {
 			onAssistantText: t => reporter.log(`🤖 ${t.slice(0, 300)}`),
 			onToolStart: c => reporter.log(`🔧 ${c.tool} ${JSON.stringify(c.args).slice(0, 160)}`),
 			onToolResult: r => reporter.log(`↳ ${r.slice(0, 200)}`)
-		}, ac.signal);
+		}, signal);
 		reporter.setStatus(0, 'done');
 	} catch (err) {
 		reporter.setStatus(0, 'error');
