@@ -51,6 +51,7 @@ Regole:
 - Ordina i task per dipendenza (prima le fondamenta).
 - Ogni task cita i requisiti che soddisfa, es: "(Req 1.2, 3.1)".
 - Includi task di test dove sensato.
+- Marca i task OPZIONALI (non essenziali per un MVP, es. CI/CD, documentazione extra) aggiungendo " (opzionale)" alla fine della riga del task.
 - Solo passi implementabili nel codice (niente deploy/manuali). Solo Markdown.`
 };
 
@@ -152,9 +153,11 @@ interface ParsedTask {
 	lineIdx: number;
 	text: string;
 	done: boolean;
+	optional: boolean;
 }
 
 const TASK_RE = /^(\s*[-*]\s*\[)( |x|X)(\]\s*)(.+)$/;
+const OPTIONAL_RE = /\((opzionale|optional)\)/i;
 
 function parseTasks(md: string): ParsedTask[] {
 	const lines = md.split('\n');
@@ -162,7 +165,8 @@ function parseTasks(md: string): ParsedTask[] {
 	lines.forEach((line, lineIdx) => {
 		const m = TASK_RE.exec(line);
 		if (m) {
-			tasks.push({ lineIdx, text: m[4].trim(), done: m[2].toLowerCase() === 'x' });
+			const text = m[4].trim();
+			tasks.push({ lineIdx, text, done: m[2].toLowerCase() === 'x', optional: OPTIONAL_RE.test(text) });
 		}
 	});
 	return tasks;
@@ -178,7 +182,7 @@ function markTaskDone(md: string, lineIdx: number): string {
  * Esegue (o riprende) tutti i task non completati di una spec, uno alla volta,
  * usando l'agente con il contesto di requirements e design. Spunta i task completati.
  */
-export async function runSpecTasks(registry: ProviderRegistry, specDir: vscode.Uri, refresh: () => void, reporter: RunReporter): Promise<void> {
+export async function runSpecTasks(registry: ProviderRegistry, specDir: vscode.Uri, refresh: () => void, reporter: RunReporter, includeOptional = true): Promise<void> {
 	const tasksUri = vscode.Uri.joinPath(specDir, 'tasks.md');
 	let tasksMd = await readIfExists(tasksUri);
 	if (!tasksMd) {
@@ -189,9 +193,9 @@ export async function runSpecTasks(registry: ProviderRegistry, specDir: vscode.U
 	const design = await readIfExists(vscode.Uri.joinPath(specDir, 'design.md'));
 	const specName = specDir.path.split('/').pop() ?? 'spec';
 
-	const pending = parseTasks(tasksMd).filter(t => !t.done);
+	const pending = parseTasks(tasksMd).filter(t => !t.done && (includeOptional || !t.optional));
 	if (pending.length === 0) {
-		vscode.window.showInformationMessage(`Tutti i task di "${specName}" sono già completati.`);
+		vscode.window.showInformationMessage(`Nessun task da eseguire per "${specName}"${includeOptional ? '' : ' (esclusi gli opzionali)'}.`);
 		return;
 	}
 

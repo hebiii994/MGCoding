@@ -113,6 +113,11 @@
 				"icon": "$(run-all)"
 			},
 			{
+				"command": "mgcoding.runSpecTasksHereOptional",
+				"title": "Run all + optional",
+				"icon": "$(play-circle)"
+			},
+			{
 				"command": "mgcoding.toggleAnalytics",
 				"title": "MGCoding: Statistiche d'uso (attiva/disattiva)"
 			},
@@ -243,6 +248,11 @@
 					"command": "mgcoding.runSpecTasksHere",
 					"when": "resourcePath =~ /specs/ && (resourceFilename == requirements.md || resourceFilename == design.md || resourceFilename == tasks.md)",
 					"group": "navigation@4"
+				},
+				{
+					"command": "mgcoding.runSpecTasksHereOptional",
+					"when": "resourcePath =~ /specs/ && (resourceFilename == requirements.md || resourceFilename == design.md || resourceFilename == tasks.md)",
+					"group": "navigation@5"
 				}
 			],
 			"view/title": [

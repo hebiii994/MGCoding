@@ -212,7 +212,16 @@ export function activate(context: vscode.ExtensionContext): void {
 			if (!u) {
 				return undefined;
 			}
-			return runSpecTasks(registry, vscode.Uri.joinPath(u, '..'), () => specsTree.refresh(), runView);
+			// "Run all tasks": esegue i task richiesti, salta gli opzionali.
+			return runSpecTasks(registry, vscode.Uri.joinPath(u, '..'), () => specsTree.refresh(), runView, false);
+		}),
+		vscode.commands.registerCommand('mgcoding.runSpecTasksHereOptional', (uri?: vscode.Uri) => {
+			const u = uri ?? vscode.window.activeTextEditor?.document.uri;
+			if (!u) {
+				return undefined;
+			}
+			// "Run all + optional": include anche i task opzionali.
+			return runSpecTasks(registry, vscode.Uri.joinPath(u, '..'), () => specsTree.refresh(), runView, true);
 		})
 	);
 }
