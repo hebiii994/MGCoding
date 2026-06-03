@@ -1,7 +1,11 @@
 /*---------------------------------------------------------------------------------------------
- *  MGCoding - controllo aggiornamenti via GitHub Releases
+ *  MGCoding - controllo aggiornamenti via GitHub Releases (con download + install in-app)
  *--------------------------------------------------------------------------------------------*/
 
+import { spawn } from 'child_process';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import * as vscode from 'vscode';
 
 const REPO = 'hebiii994/MGCoding';
@@ -49,25 +53,101 @@ function ensureUpdateUi(context: vscode.ExtensionContext): void {
 	if (!commandRegistered) {
 		commandRegistered = true;
 		context.subscriptions.push(
-			vscode.commands.registerCommand('mgcoding.showUpdate', () => promptDownload())
+			vscode.commands.registerCommand('mgcoding.showUpdate', () => promptUpdate())
 		);
 	}
 }
 
-/** Mostra il messaggio con i pulsanti Scarica / Note di rilascio. */
-async function promptDownload(): Promise<void> {
+/** Mostra il messaggio con le opzioni di aggiornamento (in-app su Windows). */
+async function promptUpdate(): Promise<void> {
 	if (!pendingRelease) {
 		return;
 	}
+	const canInApp = process.platform === 'win32' && !!pendingRelease.downloadUrl;
+	const primary = canInApp ? 'Aggiorna ora' : 'Scarica dal browser';
 	const choice = await vscode.window.showInformationMessage(
 		`È disponibile MGCoding ${pendingRelease.tag} (hai v${pendingRelease.current}).`,
-		'Scarica installer',
+		primary,
 		'Note di rilascio'
 	);
-	if (choice === 'Scarica installer' && pendingRelease.downloadUrl) {
-		await vscode.env.openExternal(vscode.Uri.parse(pendingRelease.downloadUrl));
+	if (choice === 'Aggiorna ora') {
+		await downloadAndInstall();
+	} else if (choice === 'Scarica dal browser') {
+		await vscode.env.openExternal(vscode.Uri.parse(pendingRelease.downloadUrl ?? pendingRelease.htmlUrl));
 	} else if (choice === 'Note di rilascio') {
 		await vscode.env.openExternal(vscode.Uri.parse(pendingRelease.htmlUrl));
+	}
+}
+
+/** Scarica l'installer dentro l'app (con avanzamento) e lo avvia, poi chiude MGCoding. */
+async function downloadAndInstall(): Promise<void> {
+	if (!pendingRelease?.downloadUrl) {
+		return;
+	}
+	const url = pendingRelease.downloadUrl;
+	const tag = pendingRelease.tag;
+	const dest = path.join(os.tmpdir(), `MGCodingSetup-${tag}.exe`);
+
+	try {
+		await vscode.window.withProgress(
+			{ location: vscode.ProgressLocation.Notification, title: `Scaricamento MGCoding ${tag}`, cancellable: false },
+			async progress => {
+				const res = await fetch(url, { headers: { 'user-agent': 'MGCoding' } });
+				if (!res.ok || !res.body) {
+					throw new Error(`HTTP ${res.status}`);
+				}
+				const total = Number(res.headers.get('content-length') ?? 0);
+				const reader = res.body.getReader();
+				const out = fs.createWriteStream(dest);
+				let received = 0;
+				let lastPct = 0;
+				for (; ;) {
+					const { done, value } = await reader.read();
+					if (done) {
+						break;
+					}
+					out.write(Buffer.from(value));
+					received += value.length;
+					if (total > 0) {
+						const pct = Math.floor((received / total) * 100);
+						if (pct > lastPct) {
+							progress.report({ increment: pct - lastPct, message: `${pct}%` });
+							lastPct = pct;
+						}
+					}
+				}
+				await new Promise<void>((resolve, reject) => out.end((err?: Error | null) => (err ? reject(err) : resolve())));
+			}
+		);
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		const fallback = await vscode.window.showErrorMessage(`Download non riuscito (${msg}).`, 'Apri pagina release');
+		if (fallback) {
+			await vscode.env.openExternal(vscode.Uri.parse(pendingRelease.htmlUrl));
+		}
+		return;
+	}
+
+	const go = await vscode.window.showInformationMessage(
+		`MGCoding ${tag} è stato scaricato. Installa ora? L'app si chiuderà e si riaprirà aggiornata.`,
+		{ modal: true },
+		'Installa e riavvia'
+	);
+	if (go !== 'Installa e riavvia') {
+		return;
+	}
+
+	// Avvia l'installer in modo indipendente: attende che l'app si chiuda, poi installa in silenzio e riapre.
+	try {
+		const child = spawn(
+			'cmd.exe',
+			['/c', `timeout /t 2 /nobreak >nul & "${dest}" /SILENT /NORESTART`],
+			{ detached: true, stdio: 'ignore', windowsHide: true }
+		);
+		child.unref();
+		setTimeout(() => void vscode.commands.executeCommand('workbench.action.quit'), 700);
+	} catch (err) {
+		vscode.window.showErrorMessage(`Impossibile avviare l'installer: ${err instanceof Error ? err.message : String(err)}`);
 	}
 }
 
@@ -104,29 +184,15 @@ export async function checkForUpdates(context: vscode.ExtensionContext, manual: 
 		return;
 	}
 
-	// Aggiornamento disponibile: memorizza, mostra il badge persistente e (se manuale) il prompt.
+	// Aggiornamento disponibile: memorizza, mostra il badge persistente e proponi l'aggiornamento.
 	const asset = release.assets.find(a => /Setup.*\.exe$/i.test(a.name)) ?? release.assets[0];
 	pendingRelease = { tag: release.tag_name, current, downloadUrl: asset?.browser_download_url, htmlUrl: release.html_url };
 
 	if (updateBar) {
 		updateBar.text = `$(cloud-download) MGCoding ${release.tag_name}`;
-		updateBar.tooltip = `È disponibile l'aggiornamento ${release.tag_name} (hai v${current}). Clicca per scaricarlo.`;
+		updateBar.tooltip = `È disponibile l'aggiornamento ${release.tag_name} (hai v${current}). Clicca per aggiornare.`;
 		updateBar.show();
 	}
 
-	if (manual) {
-		await promptDownload();
-	} else {
-		// Avviso non invasivo all'avvio (il badge resta comunque visibile).
-		const choice = await vscode.window.showInformationMessage(
-			`È disponibile MGCoding ${release.tag_name} (hai v${current}).`,
-			'Scarica installer',
-			'Note di rilascio'
-		);
-		if (choice === 'Scarica installer' && asset) {
-			await vscode.env.openExternal(vscode.Uri.parse(asset.browser_download_url));
-		} else if (choice === 'Note di rilascio') {
-			await vscode.env.openExternal(vscode.Uri.parse(release.html_url));
-		}
-	}
+	await promptUpdate();
 }
