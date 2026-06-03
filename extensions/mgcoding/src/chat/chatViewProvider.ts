@@ -156,6 +156,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 						} else if (msg.id.startsWith('openai:')) {
 							await cfg.update('openai.model', msg.id.slice('openai:'.length), vscode.ConfigurationTarget.Global);
 							await cfg.update('provider', 'openai', vscode.ConfigurationTarget.Global);
+							// Se manca la chiave per questo endpoint, chiedila subito.
+							if (!(await this.registry.hasOpenAIKey())) {
+								await this.registry.setOpenAIKey();
+							}
 						} else {
 							await cfg.update('provider', 'claude', vscode.ConfigurationTarget.Global);
 						}

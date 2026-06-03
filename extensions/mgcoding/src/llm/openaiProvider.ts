@@ -103,6 +103,9 @@ export class OpenAIProvider implements LLMProvider {
 		}
 		if (!res.ok || !res.body) {
 			const text = await res.text().catch(() => '');
+			if (res.status === 401 || res.status === 403 || (res.status === 400 && /authorization|api key|api_key|unauthenticated/i.test(text))) {
+				throw new LLMError('Chiave API mancante o non valida per questo servizio. Reimpostala con "MGCoding: Configurazione guidata" (scegli il servizio e incolla la chiave).');
+			}
 			throw new LLMError(`Endpoint ha risposto ${res.status}: ${text}`);
 		}
 		const reader = res.body.getReader();

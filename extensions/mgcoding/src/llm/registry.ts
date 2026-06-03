@@ -125,6 +125,13 @@ export class ProviderRegistry implements vscode.Disposable {
 		return this.openai.listModels();
 	}
 
+	/** True se esiste una API key salvata per l'endpoint OpenAI-compatibile attuale. */
+	async hasOpenAIKey(): Promise<boolean> {
+		const endpoint = vscode.workspace.getConfiguration('mgcoding').get<string>('openai.endpoint', 'http://localhost:1234/v1');
+		const key = await this.context.secrets.get(openAiSecretKeyFor(endpoint));
+		return !!(key && key.trim());
+	}
+
 	async setOpenAIKey(): Promise<void> {
 		const endpoint = vscode.workspace.getConfiguration('mgcoding').get<string>('openai.endpoint', 'http://localhost:1234/v1');
 		const key = await vscode.window.showInputBox({
