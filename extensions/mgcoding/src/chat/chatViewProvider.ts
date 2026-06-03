@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  MGCoding - vista chat (webview): agente con tool, Markdown, reasoning, selettore modello
+ *  MGCoding - vista chat: sessioni multiple, modalità Vibe/Spec, Markdown, reasoning, tool
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
@@ -12,16 +12,26 @@ interface ProviderOption {
 	label: string;
 }
 
-interface ChatState {
-	current: string;
-	options: ProviderOption[];
+type ChatMode = 'vibe' | 'spec';
+
+interface Session {
+	id: string;
+	title: string;
+	mode: ChatMode;
+	messages: ChatMessage[];
 }
+
+const SPEC_MODE_PROMPT = `MODALITÀ SPEC (spec-driven): pianifica prima di implementare.
+Se non esiste già una spec adatta in .mg/specs/, proponi e crea con write_file: prima requirements.md (user story + criteri EARS), poi design.md, poi tasks.md in .mg/specs/<feature>/, chiedendo conferma tra una fase e l'altra. Se la spec esiste, aggiornala. Non scrivere codice finché i task non sono approvati.`;
+
+const VIBE_MODE_PROMPT = `MODALITÀ VIBE: esplora e implementa rapidamente, iterando. Puoi modificare il codice direttamente con i tool quando opportuno.`;
 
 export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
 	static readonly viewType = 'mgcoding.chat';
 
 	private view?: vscode.WebviewView;
-	private history: ChatMessage[] = [];
+	private sessions: Session[] = [];
+	private activeId = '';
 	private abort?: AbortController;
 	private readonly disposables: vscode.Disposable[] = [];
 
@@ -30,7 +40,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		private readonly registry: ProviderRegistry,
 		private readonly memento: vscode.Memento
 	) {
-		this.history = this.memento.get<ChatMessage[]>('mgcoding.chatHistory', []);
+		this.sessions = this.memento.get<Session[]>('mgcoding.sessions', []);
+		this.activeId = this.memento.get<string>('mgcoding.activeSession', '');
+		if (this.sessions.length === 0) {
+			this.sessions.push(this.makeSession());
+		}
+		if (!this.sessions.find(s => s.id === this.activeId)) {
+			this.activeId = this.sessions[0].id;
+		}
 		this.disposables.push(vscode.workspace.onDidChangeConfiguration(e => {
 			if (e.affectsConfiguration('mgcoding')) {
 				void this.sendState();
@@ -38,23 +55,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		}));
 	}
 
+	private makeSession(): Session {
+		return { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), title: 'Nuova sessione', mode: 'vibe', messages: [] };
+	}
+
+	private active(): Session {
+		return this.sessions.find(s => s.id === this.activeId) ?? this.sessions[0];
+	}
+
+	private async save(): Promise<void> {
+		await this.memento.update('mgcoding.sessions', this.sessions.slice(-30));
+		await this.memento.update('mgcoding.activeSession', this.activeId);
+	}
+
 	resolveWebviewView(webviewView: vscode.WebviewView): void {
 		this.view = webviewView;
 		webviewView.webview.options = { enableScripts: true, localResourceRoots: [this.extensionUri] };
 		webviewView.webview.html = this.getHtml();
 
-		webviewView.webview.onDidReceiveMessage(async (msg: { type: string; text?: string; id?: string }) => {
+		webviewView.webview.onDidReceiveMessage(async (msg: { type: string; text?: string; id?: string; mode?: ChatMode }) => {
 			switch (msg.type) {
 				case 'ready':
 					await this.sendState();
-					if (this.history.length) {
-						this.post({ type: 'restore', messages: this.history });
-					}
-					break;
-				case 'newChat':
-					this.history = [];
-					await this.memento.update('mgcoding.chatHistory', []);
-					this.post({ type: 'cleared' });
+					this.post({ type: 'restore', messages: this.active().messages });
 					break;
 				case 'send':
 					if (msg.text) {
@@ -76,11 +99,33 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 						await this.sendState();
 					}
 					break;
+				case 'setMode':
+					if (msg.mode) {
+						this.active().mode = msg.mode;
+						await this.save();
+						await this.sendState();
+					}
+					break;
+				case 'newChat':
+					{
+						const s = this.makeSession();
+						this.sessions.push(s);
+						this.activeId = s.id;
+						await this.save();
+						await this.sendState();
+						this.post({ type: 'restore', messages: [] });
+					}
+					break;
+				case 'switchSession':
+					if (msg.id && this.sessions.find(s => s.id === msg.id)) {
+						this.activeId = msg.id;
+						await this.save();
+						await this.sendState();
+						this.post({ type: 'restore', messages: this.active().messages });
+					}
+					break;
 				case 'stop':
 					this.abort?.abort();
-					break;
-				case 'clear':
-					this.history = [];
 					break;
 				case 'insertCode':
 					if (msg.text) {
@@ -96,13 +141,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		});
 	}
 
-	private async buildState(): Promise<ChatState> {
+	private async buildState(): Promise<{ current: string; options: ProviderOption[]; sessions: { id: string; title: string }[]; activeId: string; mode: ChatMode }> {
 		const c = vscode.workspace.getConfiguration('mgcoding');
 		const claudeModel = c.get<string>('claude.model', 'claude-opus-4-8');
 		const ollamaModel = c.get<string>('ollama.model', 'qwen2.5-coder:14b');
-		const provider = c.get<string>('provider', 'ollama');
-
 		const openaiModel = c.get<string>('openai.model', 'local-model');
+		const provider = c.get<string>('provider', 'ollama');
 
 		const options: ProviderOption[] = [{ id: 'claude', label: `Claude (API) · ${claudeModel}` }];
 		const installed = await this.registry.listOllamaModels();
@@ -122,10 +166,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			options.push({ id: `openai:${m}`, label: `OpenAI-compat · ${m}` });
 		}
 
-		const current = provider === 'claude' ? 'claude'
-			: provider === 'openai' ? `openai:${openaiModel}`
-				: `ollama:${ollamaModel}`;
-		return { current, options };
+		const current = provider === 'claude' ? 'claude' : provider === 'openai' ? `openai:${openaiModel}` : `ollama:${ollamaModel}`;
+		return {
+			current,
+			options,
+			sessions: this.sessions.map(s => ({ id: s.id, title: s.title })),
+			activeId: this.activeId,
+			mode: this.active().mode
+		};
 	}
 
 	private async sendState(): Promise<void> {
@@ -136,7 +184,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		this.view?.webview.postMessage(message);
 	}
 
-	/** Risolve i riferimenti @percorso allegando il contenuto dei file citati. */
+	/** Allega il contenuto dei file citati con @percorso. */
 	private async augmentWithMentions(text: string): Promise<string> {
 		const mentions = text.match(/@([^\s]+)/g);
 		if (!mentions) {
@@ -176,11 +224,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	}
 
 	private async handleSend(text: string): Promise<void> {
-		this.history.push({ role: 'user', content: await this.augmentWithMentions(text) });
+		const session = this.active();
+		if (session.title === 'Nuova sessione') {
+			session.title = text.slice(0, 40);
+		}
+		session.messages.push({ role: 'user', content: await this.augmentWithMentions(text) });
 		this.post({ type: 'busy', value: true });
 		this.abort = new AbortController();
+		const systemExtra = session.mode === 'spec' ? SPEC_MODE_PROMPT : VIBE_MODE_PROMPT;
 		try {
-			await runAgent(this.registry, this.history, {
+			await runAgent(this.registry, session.messages, {
 				onStreamStart: () => this.post({ type: 'streamStart' }),
 				onStreamDelta: t => this.post({ type: 'streamDelta', text: t }),
 				onStreamEnd: () => this.post({ type: 'streamEnd' }),
@@ -188,13 +241,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 				onAssistantText: t => this.post({ type: 'assistant', text: t }),
 				onToolStart: call => this.post({ type: 'tool', name: call.tool, args: JSON.stringify(call.args) }),
 				onToolResult: r => this.post({ type: 'toolResult', text: r })
-			}, this.abort.signal);
+			}, this.abort.signal, systemExtra);
 		} catch (err) {
 			this.post({ type: 'error', text: err instanceof Error ? err.message : String(err) });
 		} finally {
 			this.abort = undefined;
 			this.post({ type: 'busy', value: false });
-			await this.memento.update('mgcoding.chatHistory', this.history.slice(-100));
+			await this.save();
+			await this.sendState();
 		}
 	}
 
@@ -213,6 +267,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 <style>
 	html, body { height: 100%; }
 	body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); margin: 0; display: flex; flex-direction: column; }
+	#topbar { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--vscode-panel-border); }
+	#session { flex: 1 1 auto; min-width: 0; background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); border: 1px solid var(--vscode-dropdown-border); border-radius: 6px; padding: 3px 6px; font-size: 12px; }
+	.modebtn { flex: 0 0 auto; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; border-radius: 6px; padding: 3px 8px; font-size: 12px; cursor: pointer; }
+	.modebtn.active { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+	#newbtn { flex: 0 0 auto; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; border-radius: 6px; padding: 3px 9px; cursor: pointer; }
 	#log { flex: 1 1 auto; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
 	.empty { margin: auto; text-align: center; opacity: 0.6; line-height: 1.7; padding: 16px; }
 	.msg { padding: 8px 10px; border-radius: 8px; word-wrap: break-word; overflow-wrap: anywhere; max-width: 100%; box-sizing: border-box; }
@@ -247,12 +306,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 </style>
 </head>
 <body>
-	<div id="log"><div class="empty">💬 Chiedi qualcosa o descrivi un task.<br/>L'agente può leggere e scrivere file ed eseguire comandi.</div></div>
+	<div id="topbar">
+		<select id="session" title="Sessione"></select>
+		<button id="newbtn" title="Nuova sessione">＋</button>
+		<button class="modebtn" id="mode-vibe" title="Chat-first">Vibe</button>
+		<button class="modebtn" id="mode-spec" title="Spec-driven">Spec</button>
+	</div>
+	<div id="log"><div class="empty">💬 Chiedi qualcosa o descrivi un task.</div></div>
 	<div id="composer">
-		<textarea id="input" rows="2" placeholder="Scrivi un messaggio…  (Invio = invia · Shift+Invio = a capo)"></textarea>
+		<textarea id="input" rows="2" placeholder="Scrivi un messaggio…  (Invio = invia · Shift+Invio = a capo · @file per allegare)"></textarea>
 		<div id="row">
 			<select id="model" title="Modello / provider"></select>
-			<button id="newchat" title="Nuova conversazione">＋</button>
 			<button id="stop" title="Interrompi">⊘ Stop</button>
 			<button id="send">Invia</button>
 		</div>
@@ -264,16 +328,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	var sendBtn = document.getElementById('send');
 	var model = document.getElementById('model');
 	var stopBtn = document.getElementById('stop');
-	var newchatBtn = document.getElementById('newchat');
-	var emptied = false;
-	var current = null;        // bolla assistant in streaming
+	var sessionSel = document.getElementById('session');
+	var newBtn = document.getElementById('newbtn');
+	var modeVibe = document.getElementById('mode-vibe');
+	var modeSpec = document.getElementById('mode-spec');
+	var current = null;
 	var lastToolResult = null;
 	var BT = String.fromCharCode(96);
 	var fenceRe = new RegExp(BT + BT + BT + '(\\\\w*)\\\\n?([\\\\s\\\\S]*?)' + BT + BT + BT, 'g');
 	var inlineRe = new RegExp(BT + '([^' + BT + ']+)' + BT, 'g');
 
 	function esc(t) { return t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
-
 	function mdToHtml(src) {
 		var blocks = [];
 		var s = src.replace(fenceRe, function (m, lang, code) { blocks.push(code.replace(/\\n$/, '')); return '\\u0000' + (blocks.length - 1) + '\\u0000'; });
@@ -289,14 +354,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		s = s.replace(/\\u0000(\\d+)\\u0000/g, function (m, i) { return '<pre class="code"><code>' + esc(blocks[i]) + '</code></pre>'; });
 		return s;
 	}
-
 	function attachCodeTools(container) {
 		var pres = container.querySelectorAll('pre.code');
 		for (var i = 0; i < pres.length; i++) {
 			(function (pre) {
 				var codeText = pre.querySelector('code').textContent;
-				var tools = document.createElement('div');
-				tools.className = 'code-tools';
+				var tools = document.createElement('div'); tools.className = 'code-tools';
 				var copy = document.createElement('button'); copy.textContent = 'Copia';
 				copy.addEventListener('click', function () { try { navigator.clipboard.writeText(codeText); copy.textContent = 'Copiato'; setTimeout(function () { copy.textContent = 'Copia'; }, 1200); } catch (e) {} });
 				var ins = document.createElement('button'); ins.textContent = 'Inserisci';
@@ -306,7 +369,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			})(pres[i]);
 		}
 	}
-
 	function splitThink(raw) {
 		var open = raw.indexOf('<think>');
 		if (open < 0) { return { think: '', answer: raw, thinking: false }; }
@@ -314,11 +376,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		if (close < 0) { return { think: raw.slice(open + 7), answer: raw.slice(0, open), thinking: true }; }
 		return { think: raw.slice(open + 7, close), answer: raw.slice(0, open) + raw.slice(close + 8), thinking: false };
 	}
-
-	function clearEmpty() { if (!emptied) { log.innerHTML = ''; emptied = true; } }
-
+	function showEmpty(txt) { log.innerHTML = '<div class="empty">' + txt + '</div>'; }
+	function ensureCleared() { var e = log.querySelector('.empty'); if (e) { log.innerHTML = ''; } }
 	function makeAssistant() {
-		clearEmpty();
+		ensureCleared();
 		var el = document.createElement('div'); el.className = 'msg assistant';
 		var reason = document.createElement('details'); reason.className = 'reason'; reason.style.display = 'none';
 		var sum = document.createElement('summary'); sum.textContent = '💭 Ragionamento'; reason.appendChild(sum);
@@ -328,32 +389,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		log.appendChild(el); log.scrollTop = log.scrollHeight;
 		return { el: el, reason: reason, rbody: rbody, ans: ans, raw: '' };
 	}
-
 	function renderAssistant(obj) {
 		var parts = splitThink(obj.raw);
-		if (parts.think) {
-			obj.reason.style.display = 'block';
-			obj.rbody.textContent = parts.think;
-			obj.reason.open = parts.thinking;
-		} else {
-			obj.reason.style.display = 'none';
-		}
+		if (parts.think) { obj.reason.style.display = 'block'; obj.rbody.textContent = parts.think; obj.reason.open = parts.thinking; }
+		else { obj.reason.style.display = 'none'; }
 		obj.ans.innerHTML = mdToHtml(parts.answer);
 		attachCodeTools(obj.ans);
 		log.scrollTop = log.scrollHeight;
 	}
-
 	function addStatic(cls, text) {
-		clearEmpty();
+		ensureCleared();
 		var el = document.createElement('div'); el.className = 'msg ' + cls;
 		if (cls === 'assistant') { var a = document.createElement('div'); a.className = 'answer'; a.innerHTML = mdToHtml(text); el.appendChild(a); attachCodeTools(a); }
 		else { el.textContent = text; }
 		log.appendChild(el); log.scrollTop = log.scrollHeight;
 		return el;
 	}
-
 	function addTool(name, args) {
-		clearEmpty();
+		ensureCleared();
 		var el = document.createElement('div'); el.className = 'msg tool';
 		var head = document.createElement('div'); head.className = 'head';
 		head.textContent = '🔧 ' + name + ' ' + (args && args.length < 120 ? args : '');
@@ -363,7 +416,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		log.appendChild(el); log.scrollTop = log.scrollHeight;
 		return res;
 	}
-
 	function send() {
 		var text = input.value.trim();
 		if (!text) { return; }
@@ -373,9 +425,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	}
 	sendBtn.addEventListener('click', send);
 	stopBtn.addEventListener('click', function () { vscode.postMessage({ type: 'stop' }); });
-	newchatBtn.addEventListener('click', function () { vscode.postMessage({ type: 'newChat' }); });
+	newBtn.addEventListener('click', function () { vscode.postMessage({ type: 'newChat' }); });
+	modeVibe.addEventListener('click', function () { vscode.postMessage({ type: 'setMode', mode: 'vibe' }); });
+	modeSpec.addEventListener('click', function () { vscode.postMessage({ type: 'setMode', mode: 'spec' }); });
 	input.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
 	model.addEventListener('change', function () { vscode.postMessage({ type: 'setProvider', id: model.value }); });
+	sessionSel.addEventListener('change', function () { vscode.postMessage({ type: 'switchSession', id: sessionSel.value }); });
 
 	window.addEventListener('message', function (event) {
 		var m = event.data;
@@ -388,6 +443,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 				if (o.id === m.state.current) { opt.selected = true; }
 				model.appendChild(opt);
 			}
+			sessionSel.innerHTML = '';
+			for (var j = 0; j < m.state.sessions.length; j++) {
+				var s = m.state.sessions[j];
+				var so = document.createElement('option');
+				so.value = s.id; so.textContent = s.title || 'Sessione';
+				if (s.id === m.state.activeId) { so.selected = true; }
+				sessionSel.appendChild(so);
+			}
+			modeVibe.className = 'modebtn' + (m.state.mode === 'vibe' ? ' active' : '');
+			modeSpec.className = 'modebtn' + (m.state.mode === 'spec' ? ' active' : '');
+		}
+		else if (m.type === 'restore') {
+			log.innerHTML = '';
+			if (!m.messages || m.messages.length === 0) { showEmpty('💬 Chiedi qualcosa o descrivi un task.'); }
+			else { for (var k = 0; k < m.messages.length; k++) { addStatic(m.messages[k].role === 'assistant' ? 'assistant' : 'user', m.messages[k].content); } }
 		}
 		else if (m.type === 'streamStart') { current = makeAssistant(); }
 		else if (m.type === 'streamDelta') { if (current) { current.raw += m.text; renderAssistant(current); } }
@@ -398,16 +468,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		else if (m.type === 'toolResult') { if (lastToolResult) { lastToolResult.textContent = m.text; log.scrollTop = log.scrollHeight; } }
 		else if (m.type === 'error') { addStatic('error', '⚠ ' + m.text); }
 		else if (m.type === 'busy') { document.body.classList.toggle('busy', m.value); }
-		else if (m.type === 'restore') {
-			for (var k = 0; k < m.messages.length; k++) {
-				var msg = m.messages[k];
-				addStatic(msg.role === 'assistant' ? 'assistant' : 'user', msg.content);
-			}
-		}
-		else if (m.type === 'cleared') {
-			log.innerHTML = '<div class="empty">💬 Nuova conversazione. Chiedi qualcosa o descrivi un task.</div>';
-			emptied = false;
-		}
 	});
 
 	vscode.postMessage({ type: 'ready' });

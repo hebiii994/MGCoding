@@ -51,7 +51,8 @@ export async function runAgent(
 	registry: ProviderRegistry,
 	messages: ChatMessage[],
 	cb: AgentCallbacks,
-	signal?: AbortSignal
+	signal?: AbortSignal,
+	systemExtra?: string
 ): Promise<void> {
 	const hint = [...messages].reverse().find(m => m.role === 'user')?.content;
 	const provider = registry.pickProvider(hint);
@@ -59,9 +60,9 @@ export async function runAgent(
 	const ollamaNative = provider.id !== 'ollama'
 		|| vscode.workspace.getConfiguration('mgcoding').get<boolean>('ollama.nativeTools', true);
 	if (typeof provider.streamAgent === 'function' && ollamaNative) {
-		return runNativeAgent(provider, messages, cb, signal);
+		return runNativeAgent(provider, messages, cb, signal, systemExtra);
 	}
-	return runJsonAgent(registry, provider, messages, cb, signal);
+	return runJsonAgent(registry, provider, messages, cb, signal, systemExtra);
 }
 
 /**
@@ -73,9 +74,10 @@ async function runJsonAgent(
 	provider: LLMProvider,
 	messages: ChatMessage[],
 	cb: AgentCallbacks,
-	signal?: AbortSignal
+	signal?: AbortSignal,
+	systemExtra?: string
 ): Promise<void> {
-	const sys = toolSystemPrompt();
+	const sys = systemExtra ? `${toolSystemPrompt()}\n\n${systemExtra}` : toolSystemPrompt();
 	const streaming = typeof cb.onStreamDelta === 'function';
 
 	for (let i = 0; i < MAX_ITERATIONS; i++) {
@@ -143,9 +145,10 @@ async function runNativeAgent(
 	provider: LLMProvider,
 	history: ChatMessage[],
 	cb: AgentCallbacks,
-	signal?: AbortSignal
+	signal?: AbortSignal,
+	systemExtra?: string
 ): Promise<void> {
-	const system = await buildSystemPrompt();
+	const system = await buildSystemPrompt(systemExtra);
 	const tools = [...anthropicBuiltinTools(), ...(getMcpManager()?.anthropicTools() ?? [])];
 	const streaming = typeof cb.onStreamDelta === 'function';
 
