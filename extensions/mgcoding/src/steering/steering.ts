@@ -167,6 +167,8 @@ export class SteeringTreeProvider implements vscode.TreeDataProvider<SteeringNod
 		const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.None);
 		item.description = node.inclusion;
 		item.iconPath = new vscode.ThemeIcon('compass');
+		item.resourceUri = node.uri;
+		item.contextValue = 'mgcoding.steering';
 		item.command = { command: 'vscode.open', title: 'Apri', arguments: [node.uri] };
 		return item;
 	}

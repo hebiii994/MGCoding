@@ -212,6 +212,48 @@
 				"command": "mgcoding.openMcpConfig",
 				"title": "Configura MCP",
 				"icon": "$(gear)"
+			},
+			{
+				"command": "mgcoding.addMcpServer",
+				"title": "Aggiungi server MCP",
+				"icon": "$(add)"
+			},
+			{
+				"command": "mgcoding.removeMcpServer",
+				"title": "Rimuovi server MCP",
+				"icon": "$(trash)"
+			},
+			{
+				"command": "mgcoding.toggleMcpServer",
+				"title": "Abilita/Disabilita server MCP",
+				"icon": "$(circle-slash)"
+			},
+			{
+				"command": "mgcoding.revealSpec",
+				"title": "Mostra nel File Explorer"
+			},
+			{
+				"command": "mgcoding.deleteSpec",
+				"title": "Elimina Spec",
+				"icon": "$(trash)"
+			},
+			{
+				"command": "mgcoding.revealHook",
+				"title": "Mostra nel File Explorer"
+			},
+			{
+				"command": "mgcoding.deleteHook",
+				"title": "Elimina Hook",
+				"icon": "$(trash)"
+			},
+			{
+				"command": "mgcoding.revealSteering",
+				"title": "Mostra nel File Explorer"
+			},
+			{
+				"command": "mgcoding.deleteSteering",
+				"title": "Elimina Steering",
+				"icon": "$(trash)"
 			}
 		],
 		"keybindings": [
@@ -223,6 +265,16 @@
 			}
 		],
 		"menus": {
+			"commandPalette": [
+				{ "command": "mgcoding.revealSpec", "when": "false" },
+				{ "command": "mgcoding.deleteSpec", "when": "false" },
+				{ "command": "mgcoding.revealHook", "when": "false" },
+				{ "command": "mgcoding.deleteHook", "when": "false" },
+				{ "command": "mgcoding.revealSteering", "when": "false" },
+				{ "command": "mgcoding.deleteSteering", "when": "false" },
+				{ "command": "mgcoding.removeMcpServer", "when": "false" },
+				{ "command": "mgcoding.toggleMcpServer", "when": "false" }
+			],
 			"editor/title": [
 				{
 					"command": "mgcoding.specOpenRequirements",
@@ -287,6 +339,11 @@
 					"group": "navigation@2"
 				},
 				{
+					"command": "mgcoding.addMcpServer",
+					"when": "view == mgcoding.mcp",
+					"group": "navigation@0"
+				},
+				{
 					"command": "mgcoding.openMcpConfig",
 					"when": "view == mgcoding.mcp",
 					"group": "navigation@1"
@@ -317,6 +374,46 @@
 					"command": "mgcoding.toggleHook",
 					"when": "view == mgcoding.hooks && viewItem =~ /mgcoding.hook/",
 					"group": "inline@2"
+				},
+				{
+					"command": "mgcoding.revealSpec",
+					"when": "view == mgcoding.specs && viewItem == mgcoding.spec",
+					"group": "9_files@1"
+				},
+				{
+					"command": "mgcoding.deleteSpec",
+					"when": "view == mgcoding.specs && viewItem == mgcoding.spec",
+					"group": "9_files@2"
+				},
+				{
+					"command": "mgcoding.revealHook",
+					"when": "view == mgcoding.hooks && viewItem =~ /mgcoding.hook/",
+					"group": "9_files@1"
+				},
+				{
+					"command": "mgcoding.deleteHook",
+					"when": "view == mgcoding.hooks && viewItem =~ /mgcoding.hook/",
+					"group": "9_files@2"
+				},
+				{
+					"command": "mgcoding.revealSteering",
+					"when": "view == mgcoding.steering && viewItem == mgcoding.steering",
+					"group": "9_files@1"
+				},
+				{
+					"command": "mgcoding.deleteSteering",
+					"when": "view == mgcoding.steering && viewItem == mgcoding.steering",
+					"group": "9_files@2"
+				},
+				{
+					"command": "mgcoding.toggleMcpServer",
+					"when": "view == mgcoding.mcp && viewItem == mgcoding.mcpServer",
+					"group": "inline@1"
+				},
+				{
+					"command": "mgcoding.removeMcpServer",
+					"when": "view == mgcoding.mcp && viewItem == mgcoding.mcpServer",
+					"group": "9_files@1"
 				}
 			]
 		},

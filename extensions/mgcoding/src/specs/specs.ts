@@ -534,6 +534,7 @@ export class SpecsTreeProvider implements vscode.TreeDataProvider<SpecNode> {
 		if (node.kind === 'spec') {
 			const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.Collapsed);
 			item.iconPath = new vscode.ThemeIcon('checklist');
+			item.resourceUri = node.uri;
 			item.contextValue = 'mgcoding.spec';
 			return item;
 		}

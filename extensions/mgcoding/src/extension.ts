@@ -11,7 +11,7 @@ import { hasCheckpoint, revertCheckpoint, registerCheckpointDiff, openCheckpoint
 import { ChatMessage } from './llm/types';
 import { createSampleHook, Hook, HookManager, HooksTreeProvider, toggleHook } from './hooks/hooks';
 import { ProviderRegistry } from './llm/registry';
-import { McpTreeProvider, openMcpConfig } from './mcp/mcp';
+import { McpTreeProvider, openMcpConfig, addMcpServer, removeMcpServer, toggleMcpServer } from './mcp/mcp';
 import { McpManager, setMcpManager } from './mcp/mcpClient';
 import { importFromKiro } from './migrate/importKiro';
 import { checkForUpdates } from './update/updater';
@@ -205,6 +205,15 @@ export function activate(context: vscode.ExtensionContext): void {
 
 		vscode.commands.registerCommand('mgcoding.openMcpConfig', () => openMcpConfig()),
 		vscode.commands.registerCommand('mgcoding.refreshMcp', () => restartMcp()),
+		vscode.commands.registerCommand('mgcoding.addMcpServer', async () => { if (await addMcpServer()) { restartMcp(); } }),
+		vscode.commands.registerCommand('mgcoding.removeMcpServer', async (node?: { status?: { name?: string } }) => { if (await removeMcpServer(node?.status?.name)) { restartMcp(); } }),
+		vscode.commands.registerCommand('mgcoding.toggleMcpServer', async (node?: { status?: { name?: string } }) => { if (await toggleMcpServer(node?.status?.name)) { restartMcp(); } }),
+		vscode.commands.registerCommand('mgcoding.revealSpec', (node?: { uri?: vscode.Uri }) => revealNode(node?.uri)),
+		vscode.commands.registerCommand('mgcoding.deleteSpec', async (node?: { uri?: vscode.Uri; label?: string }) => { if (await deleteUri(node?.uri, `Eliminare la spec "${node?.label ?? ''}"?`)) { specsTree.refresh(); } }),
+		vscode.commands.registerCommand('mgcoding.revealHook', (node?: { hook?: Hook }) => revealNode(node?.hook?.uri)),
+		vscode.commands.registerCommand('mgcoding.deleteHook', async (node?: { hook?: Hook }) => { if (await deleteUri(node?.hook?.uri, `Eliminare l'hook "${node?.hook?.name ?? ''}"?`)) { hooksTree.refresh(); } }),
+		vscode.commands.registerCommand('mgcoding.revealSteering', (node?: { uri?: vscode.Uri }) => revealNode(node?.uri)),
+		vscode.commands.registerCommand('mgcoding.deleteSteering', async (node?: { uri?: vscode.Uri; label?: string }) => { if (await deleteUri(node?.uri, `Eliminare lo steering "${node?.label ?? ''}"?`)) { steeringTree.refresh(); } }),
 
 		// Barra spec (pulsanti nella title bar dell'editor per i file di una spec)
 		vscode.commands.registerCommand('mgcoding.specOpenRequirements', (uri?: vscode.Uri) => openSpecSibling(uri, 'requirements.md')),
@@ -247,6 +256,31 @@ export function activate(context: vscode.ExtensionContext): void {
 			return runSpecTasks(registry, vscode.Uri.joinPath(u, '..'), () => specsTree.refresh(), runView, true, chat.beginRun());
 		})
 	);
+}
+
+/** Mostra il file/cartella nel file manager del sistema operativo. */
+async function revealNode(uri?: vscode.Uri): Promise<void> {
+	if (uri) {
+		await vscode.commands.executeCommand('revealFileInOS', uri);
+	}
+}
+
+/** Elimina (Cestino) un file o cartella previa conferma. Ritorna true se eliminato. */
+async function deleteUri(uri: vscode.Uri | undefined, prompt: string): Promise<boolean> {
+	if (!uri) {
+		return false;
+	}
+	const ok = await vscode.window.showWarningMessage(prompt, { modal: true, detail: 'L\'elemento verrà spostato nel Cestino.' }, 'Elimina');
+	if (ok !== 'Elimina') {
+		return false;
+	}
+	try {
+		await vscode.workspace.fs.delete(uri, { recursive: true, useTrash: true });
+		return true;
+	} catch (e) {
+		vscode.window.showErrorMessage(`Eliminazione non riuscita: ${e instanceof Error ? e.message : String(e)}`);
+		return false;
+	}
 }
 
 /** Apre un documento fratello (requirements/design/tasks) nella stessa cartella spec. */
