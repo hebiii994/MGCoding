@@ -2,7 +2,7 @@
  *  MGCoding - controllo aggiornamenti via GitHub Releases (con download + install in-app)
  *--------------------------------------------------------------------------------------------*/
 
-import { execFileSync } from 'child_process';
+import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -137,30 +137,32 @@ async function downloadAndInstall(): Promise<void> {
 		return;
 	}
 
-	// Aggiornamento automatico. Lo script gira sotto il Task Scheduler di Windows
-	// (processo INDIPENDENTE da MGCoding → sopravvive alla chiusura dell'app):
-	// attende la chiusura, installa in silenzio e riapre l'app aggiornata.
+	// Aggiornamento automatico tramite uno script .bat lanciato in modo DETACHED
+	// (processo indipendente: sopravvive alla chiusura di MGCoding). Lo script
+	// attende la chiusura dell'app, installa in silenzio e la riapre aggiornata.
 	const exePath = process.execPath;
 	const exeName = exePath.split(/[\\/]/).pop() ?? 'MGCoding.exe';
 	const batPath = path.join(os.tmpdir(), `mgcoding-update-${tag}.bat`);
-	const taskName = 'MGCodingUpdate';
 	const bat = [
 		'@echo off',
+		'timeout /t 2 /nobreak >NUL',
 		':wait',
 		`tasklist /FI "IMAGENAME eq ${exeName}" 2>NUL | find /I "${exeName}" >NUL && (timeout /t 1 /nobreak >NUL & goto wait)`,
 		`"${dest}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`,
 		`start "" "${exePath}"`,
-		`schtasks /Delete /F /TN ${taskName} >NUL 2>&1`,
 		'del "%~f0"'
 	].join('\r\n');
 
 	let launchError = '';
 	try {
 		fs.writeFileSync(batPath, bat, 'utf8');
-		// Crea un task una-tantum e lo esegue subito: gira sotto il servizio
-		// Utilità di pianificazione, fuori dal job di MGCoding.
-		execFileSync('schtasks', ['/Create', '/F', '/TN', taskName, '/SC', 'ONCE', '/ST', '00:00', '/TR', `cmd /c "${batPath}"`], { stdio: 'ignore', windowsHide: true });
-		execFileSync('schtasks', ['/Run', '/TN', taskName], { stdio: 'ignore', windowsHide: true });
+		// Lancia il .bat staccato dal processo di MGCoding così continua dopo il quit.
+		const child = spawn(process.env.ComSpec || 'cmd.exe', ['/c', batPath], {
+			detached: true,
+			stdio: 'ignore',
+			windowsHide: true
+		});
+		child.unref();
 	} catch (err) {
 		launchError = err instanceof Error ? err.message : String(err);
 	}
