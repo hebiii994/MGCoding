@@ -93,6 +93,16 @@ function resolve(p: string): vscode.Uri {
 	return vscode.Uri.joinPath(workspaceRoot(), p);
 }
 
+/** Durante l'esecuzione dei task, blocca le scritture dell'agente sui file della spec. */
+let blockSpecWrites = false;
+export function setSpecWriteGuard(on: boolean): void {
+	blockSpecWrites = on;
+}
+const SPEC_FILE_GUARD = /(^|\/)(\.mg|\.kiro)\/specs\/[^/]+\/(requirements|design|tasks)\.md$/i;
+function isProtectedSpecFile(rel: string): boolean {
+	return blockSpecWrites && SPEC_FILE_GUARD.test(rel.replace(/\\/g, '/'));
+}
+
 export async function executeTool(call: ToolCall): Promise<string> {
 	try {
 		switch (call.tool) {
@@ -103,6 +113,9 @@ export async function executeTool(call: ToolCall): Promise<string> {
 			}
 			case 'write_file': {
 				const rel = String(call.args.path);
+				if (isProtectedSpecFile(rel)) {
+					return `Bloccato: i file della spec (requirements/design/tasks.md) non si modificano durante l'esecuzione — ci pensa MGCoding. Implementa il codice negli altri file del workspace.`;
+				}
 				const uri = resolve(rel);
 				const newContent = String(call.args.content ?? '');
 				let oldContent = '';
@@ -157,6 +170,9 @@ export async function executeTool(call: ToolCall): Promise<string> {
 			}
 			case 'apply_patch': {
 				const rel = String(call.args.path);
+				if (isProtectedSpecFile(rel)) {
+					return `Bloccato: i file della spec (requirements/design/tasks.md) non si modificano durante l'esecuzione — ci pensa MGCoding. Implementa il codice negli altri file del workspace.`;
+				}
 				const uri = resolve(rel);
 				const oldStr = String(call.args.old_string ?? '');
 				const newStr = String(call.args.new_string ?? '');

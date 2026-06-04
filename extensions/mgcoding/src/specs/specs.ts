@@ -6,6 +6,7 @@
 import * as vscode from 'vscode';
 import { complete } from '../agent/agent';
 import { runAgent } from '../agent/agentLoop';
+import { setSpecWriteGuard } from '../agent/tools';
 import { ProviderRegistry } from '../llm/registry';
 import { RunReporter } from '../run/runView';
 import { resolveFeatureDirs } from '../util/paths';
@@ -221,6 +222,8 @@ export async function runSpecTasks(registry: ProviderRegistry, specDir: vscode.U
 
 	reporter.start(`Spec: ${specName}`, pending.map(t => t.text));
 
+	setSpecWriteGuard(true);
+	try {
 	for (let i = 0; i < pending.length; i++) {
 		if (signal?.aborted) {
 			reporter.log('⏹ Esecuzione interrotta.');
@@ -269,6 +272,9 @@ Quando hai finito di implementare questo task, fornisci un breve riepilogo di co
 		tasksMd = setTaskMark(tasksMd, task.lineIdx, ok ? 'x' : ' ');
 		await vscode.workspace.fs.writeFile(tasksUri, ENC.encode(tasksMd));
 		refresh();
+	}
+	} finally {
+		setSpecWriteGuard(false);
 	}
 
 	reporter.finish('=== Esecuzione task terminata ===');
@@ -404,6 +410,8 @@ NON modificare i file della spec (requirements/design/tasks.md). Al termine un b
 		await setMark(task.lineIdx, ok ? 'x' : ' ');
 	};
 
+	setSpecWriteGuard(true);
+	try {
 	for (let w = 0; w < waves.length; w++) {
 		if (signal?.aborted) {
 			reporter.log('⏹ Interrotto.');
@@ -419,6 +427,9 @@ NON modificare i file della spec (requirements/design/tasks.md). Al termine un b
 			const slice = wave.slice(s, s + Math.max(1, concurrency));
 			await Promise.all(slice.map(i => runOne(i, w + 1)));
 		}
+	}
+	} finally {
+		setSpecWriteGuard(false);
 	}
 
 	await writeLock;
@@ -462,6 +473,7 @@ ${task.text}
 NON modificare i file della spec (requirements.md, design.md, tasks.md): allo stato dei task ci pensa MGCoding.
 Al termine fornisci un breve riepilogo.`;
 	let ok = false;
+	setSpecWriteGuard(true);
 	try {
 		await runAgent(registry, [{ role: 'user', content: prompt }], {
 			onAssistantText: t => reporter.log(`🤖 ${t.slice(0, 300)}`),
@@ -473,6 +485,8 @@ Al termine fornisci un breve riepilogo.`;
 	} catch (err) {
 		reporter.setStatus(0, 'error');
 		reporter.log(`[errore] ${String(err)}`);
+	} finally {
+		setSpecWriteGuard(false);
 	}
 	tasksMd = setTaskMark(await readIfExists(tasksUri) || tasksMd, lineIdx, ok ? 'x' : ' ');
 	await vscode.workspace.fs.writeFile(tasksUri, ENC.encode(tasksMd));
@@ -601,16 +615,14 @@ export class SpecsTreeProvider implements vscode.TreeDataProvider<SpecNode> {
 			return out;
 		}
 		if (node.kind === 'spec') {
+			// Solo i documenti della spec (i singoli task si vedono in tasks.md/chat,
+			// non come nodi dell'albero).
 			const out: SpecNode[] = [];
 			for (const fname of ['requirements.md', 'design.md', 'tasks.md']) {
 				const uri = vscode.Uri.joinPath(node.uri, fname);
 				if (await readIfExists(uri)) {
 					out.push({ kind: 'file', uri, label: fname });
 				}
-			}
-			const tasksMd = await readIfExists(vscode.Uri.joinPath(node.uri, 'tasks.md'));
-			for (const t of parseTasks(tasksMd)) {
-				out.push({ kind: 'task', specDir: node.uri, lineIdx: t.lineIdx, label: t.text, done: t.done, inProgress: t.inProgress });
 			}
 			return out;
 		}
