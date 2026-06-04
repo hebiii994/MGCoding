@@ -298,8 +298,34 @@ Al termine fornisci un breve riepilogo.`;
 
 // ---- CodeLens su tasks.md: "Start task" per riga + Run all in cima (stile Kiro) ----
 
+/** Inverte lo stato (fatto/da fare) di un task nel tasks.md. */
+export async function toggleSpecTask(specDir: vscode.Uri, lineIdx: number): Promise<void> {
+	const tasksUri = vscode.Uri.joinPath(specDir, 'tasks.md');
+	const md = await readIfExists(tasksUri);
+	if (!md) {
+		return;
+	}
+	const lines = md.split('\n');
+	const line = lines[lineIdx] ?? '';
+	if (/\[ \]/.test(line)) {
+		lines[lineIdx] = line.replace('[ ]', '[x]');
+	} else if (/\[[xX]\]/.test(line)) {
+		lines[lineIdx] = line.replace(/\[[xX]\]/, '[ ]');
+	} else {
+		return;
+	}
+	await vscode.workspace.fs.writeFile(tasksUri, ENC.encode(lines.join('\n')));
+}
+
 /** Mostra azioni eseguibili direttamente nel tasks.md di una spec. */
 export class SpecTasksCodeLensProvider implements vscode.CodeLensProvider {
+	private readonly _onDidChange = new vscode.EventEmitter<void>();
+	readonly onDidChangeCodeLenses = this._onDidChange.event;
+
+	refresh(): void {
+		this._onDidChange.fire();
+	}
+
 	provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
 		const p = document.uri.path;
 		if (!/tasks\.md$/i.test(p) || !/specs/i.test(p)) {
@@ -309,15 +335,20 @@ export class SpecTasksCodeLensProvider implements vscode.CodeLensProvider {
 		const top = new vscode.Range(0, 0, 0, 0);
 		const lenses: vscode.CodeLens[] = [
 			new vscode.CodeLens(top, { title: '$(run-all) Run all tasks', command: 'mgcoding.runSpecTasksHere', arguments: [document.uri] }),
-			new vscode.CodeLens(top, { title: '$(play-circle) Run all + optional', command: 'mgcoding.runSpecTasksHereOptional', arguments: [document.uri] })
+			new vscode.CodeLens(top, { title: '$(play-circle) Run all + optional', command: 'mgcoding.runSpecTasksHereOptional', arguments: [document.uri] }),
+			new vscode.CodeLens(top, { title: '$(sync) Sync', command: 'mgcoding.specSync', arguments: [document.uri] })
 		];
 		for (const t of parseTasks(document.getText())) {
-			if (t.done) {
-				continue;
-			}
 			const range = new vscode.Range(t.lineIdx, 0, t.lineIdx, 0);
-			const title = t.optional ? '$(play) Start task (opzionale)' : '$(play) Start task';
-			lenses.push(new vscode.CodeLens(range, { title, command: 'mgcoding.runSpecTask', arguments: [{ specDir, lineIdx: t.lineIdx }] }));
+			if (!t.done) {
+				const title = t.optional ? '$(play) Start task (opzionale)' : '$(play) Start task';
+				lenses.push(new vscode.CodeLens(range, { title, command: 'mgcoding.runSpecTask', arguments: [{ specDir, lineIdx: t.lineIdx }] }));
+			}
+			lenses.push(new vscode.CodeLens(range, {
+				title: t.done ? '$(check) Fatto (segna da fare)' : '$(circle-large-outline) Segna fatto',
+				command: 'mgcoding.toggleSpecTask',
+				arguments: [{ specDir, lineIdx: t.lineIdx }]
+			}));
 		}
 		return lenses;
 	}

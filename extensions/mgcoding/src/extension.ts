@@ -17,7 +17,7 @@ import { importFromKiro } from './migrate/importKiro';
 import { checkForUpdates } from './update/updater';
 import { initAnalytics, track, toggleAnalytics } from './analytics/analytics';
 import { registerAutocomplete } from './complete/autocomplete';
-import { createSpec, runSpecTask, runSpecTasks, SpecsTreeProvider, SpecTasksCodeLensProvider } from './specs/specs';
+import { createSpec, runSpecTask, runSpecTasks, SpecsTreeProvider, SpecTasksCodeLensProvider, toggleSpecTask } from './specs/specs';
 import { initSteering, SteeringTreeProvider } from './steering/steering';
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -28,9 +28,10 @@ export function activate(context: vscode.ExtensionContext): void {
 	registerDiffApproval(context);
 	registerCheckpointDiff(context);
 
-	// CodeLens "Start task / Run all" nei tasks.md delle spec
+	// CodeLens "Start task / Run all / Sync / Segna fatto" nei tasks.md delle spec
+	const specCodeLens = new SpecTasksCodeLensProvider();
 	context.subscriptions.push(
-		vscode.languages.registerCodeLensProvider({ pattern: '**/specs/**/tasks.md' }, new SpecTasksCodeLensProvider())
+		vscode.languages.registerCodeLensProvider({ pattern: '**/specs/**/tasks.md' }, specCodeLens)
 	);
 
 	// Controllo aggiornamenti silenzioso all'avvio
@@ -64,8 +65,12 @@ export function activate(context: vscode.ExtensionContext): void {
 			webviewOptions: { retainContextWhenHidden: true }
 		})
 	);
-	// Rivela la chat all'avvio così è già pronta (non una vista vuota da cliccare).
-	void vscode.commands.executeCommand('mgcoding.chat.focus');
+	// Rivela la chat SOLO al primo avvio: dopo, si rispetta il layout salvato
+	// dall'utente (larghezza/visibilità della barra laterale chat).
+	if (!context.globalState.get<boolean>('mgcoding.chatRevealed', false)) {
+		void context.globalState.update('mgcoding.chatRevealed', true);
+		void vscode.commands.executeCommand('mgcoding.chat.focus');
+	}
 
 	// L'avanzamento dell'esecuzione dei task viene mostrato DENTRO la chat (a destra).
 	const runView = chat.runReporter();
@@ -212,6 +217,18 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 			// "Run all tasks": esegue i task richiesti, salta gli opzionali.
 			return runSpecTasks(registry, vscode.Uri.joinPath(u, '..'), () => specsTree.refresh(), runView, false, chat.beginRun());
+		}),
+		vscode.commands.registerCommand('mgcoding.toggleSpecTask', async (node?: { specDir: vscode.Uri; lineIdx: number }) => {
+			if (node?.specDir && typeof node.lineIdx === 'number') {
+				await toggleSpecTask(node.specDir, node.lineIdx);
+				specsTree.refresh();
+				specCodeLens.refresh();
+			}
+		}),
+		vscode.commands.registerCommand('mgcoding.specSync', () => {
+			specsTree.refresh();
+			specCodeLens.refresh();
+			vscode.window.showInformationMessage('MGCoding: spec sincronizzata.');
 		}),
 		vscode.commands.registerCommand('mgcoding.runSpecTasksHereOptional', (uri?: vscode.Uri) => {
 			const u = uri ?? vscode.window.activeTextEditor?.document.uri;
