@@ -22,6 +22,9 @@ export function specsRoot(): vscode.Uri | undefined {
 	return f && f.length ? vscode.Uri.joinPath(f[0].uri, '.mg', 'specs') : undefined;
 }
 
+/** Regola trasversale: gli identificatori di codice sono SEMPRE in inglese. */
+export const CODE_IN_ENGLISH = ' REGOLA CODICE: tutti gli identificatori di codice (nomi di funzioni/metodi, variabili, classi, tipi, file, route/URL ed endpoint API) devono essere SEMPRE in inglese (es. validateEmail, calculateDiscount, isPremium, "/user-access"). La prosa descrittiva può restare in italiano, ma gli identificatori di codice no.';
+
 /** System prompt per ciascuna fase del workflow spec-driven. */
 export const SPEC_SYS = {
 	requirements: `Genera un documento requirements.md spec-driven. Struttura:
@@ -35,7 +38,7 @@ Per ogni requisito numerato:
 1. WHEN <evento> THE SYSTEM SHALL <comportamento>
 2. IF <condizione> THEN THE SYSTEM SHALL <comportamento>
 3. WHILE <stato> THE SYSTEM SHALL <comportamento>
-Copri casi felici, errori e casi limite. Solo Markdown, nessun preambolo.`,
+Copri casi felici, errori e casi limite. Solo Markdown, nessun preambolo.${CODE_IN_ENGLISH}`,
 	design: `Genera un documento design.md (architettura tecnica) coerente con i requisiti dati. Sezioni:
 # Design: <nome>
 ## Panoramica
@@ -44,7 +47,7 @@ Copri casi felici, errori e casi limite. Solo Markdown, nessun preambolo.`,
 ## Modello dati (tipi/strutture)
 ## Gestione degli errori
 ## Strategia di test
-Mappa esplicitamente le scelte ai requisiti. Solo Markdown.`,
+Mappa esplicitamente le scelte ai requisiti. Solo Markdown.${CODE_IN_ENGLISH}`,
 	bugfix: `Genera un documento di ANALISI BUG (in requirements.md) per un difetto da correggere. Struttura:
 # Bugfix: <titolo>
 ## Sintomo
@@ -56,7 +59,7 @@ Cosa non funziona / comportamento osservato.
 Possibili cause radice, file/componenti coinvolti.
 ## Criteri di accettazione (EARS)
 1. WHEN <evento> THE SYSTEM SHALL <comportamento corretto>
-Solo Markdown, nessun preambolo.`,
+Solo Markdown, nessun preambolo.${CODE_IN_ENGLISH}`,
 	tasks: `Genera un documento tasks.md: piano di implementazione come checklist Markdown ("- [ ] ...").
 Regole:
 - Ogni task è piccolo, concreto e verificabile (idealmente una singola unità di lavoro).
@@ -64,7 +67,7 @@ Regole:
 - Ogni task cita i requisiti che soddisfa, es: "(Req 1.2, 3.1)".
 - Includi task di test dove sensato.
 - Marca i task OPZIONALI (non essenziali per un MVP, es. CI/CD, documentazione extra) aggiungendo " (opzionale)" alla fine della riga del task.
-- Solo passi implementabili nel codice (niente deploy/manuali). Solo Markdown.`
+- Solo passi implementabili nel codice (niente deploy/manuali). Solo Markdown.${CODE_IN_ENGLISH}`
 };
 
 export async function writeAndOpen(uri: vscode.Uri, content: string): Promise<void> {
@@ -165,10 +168,11 @@ interface ParsedTask {
 	lineIdx: number;
 	text: string;
 	done: boolean;
+	inProgress: boolean;
 	optional: boolean;
 }
 
-const TASK_RE = /^(\s*[-*]\s*\[)( |x|X)(\]\s*)(.+)$/;
+const TASK_RE = /^(\s*[-*]\s*\[)( |x|X|~)(\]\s*)(.+)$/;
 const OPTIONAL_RE = /\((opzionale|optional)\)/i;
 
 function parseTasks(md: string): ParsedTask[] {
@@ -178,15 +182,19 @@ function parseTasks(md: string): ParsedTask[] {
 		const m = TASK_RE.exec(line);
 		if (m) {
 			const text = m[4].trim();
-			tasks.push({ lineIdx, text, done: m[2].toLowerCase() === 'x', optional: OPTIONAL_RE.test(text) });
+			tasks.push({ lineIdx, text, done: m[2].toLowerCase() === 'x', inProgress: m[2] === '~', optional: OPTIONAL_RE.test(text) });
 		}
 	});
 	return tasks;
 }
 
-function markTaskDone(md: string, lineIdx: number): string {
+/** Imposta lo stato del checkbox di un task: ' ' (da fare), '~' (in corso), 'x' (fatto). */
+function setTaskMark(md: string, lineIdx: number, mark: ' ' | '~' | 'x'): string {
 	const lines = md.split('\n');
-	lines[lineIdx] = lines[lineIdx].replace(/\[ \]/, '[x]');
+	const line = lines[lineIdx];
+	if (line !== undefined) {
+		lines[lineIdx] = line.replace(/\[[ xX~]\]/, `[${mark}]`);
+	}
 	return lines.join('\n');
 }
 
@@ -222,6 +230,11 @@ export async function runSpecTasks(registry: ProviderRegistry, specDir: vscode.U
 		reporter.setStatus(i, 'running');
 		reporter.log(`▶ Task ${i + 1}/${pending.length}: ${task.text}`);
 
+		// Segna il task come "in corso" ([~]) nel file, così è visibile ovunque.
+		tasksMd = setTaskMark(tasksMd, task.lineIdx, '~');
+		await vscode.workspace.fs.writeFile(tasksUri, ENC.encode(tasksMd));
+		refresh();
+
 		const prompt = `Stai implementando la funzionalità "${specName}" in modo spec-driven. Implementa SOLO il task indicato, usando i tool per leggere e scrivere i file necessari nel workspace.
 
 # Requisiti
@@ -237,6 +250,7 @@ NON modificare i file della spec (requirements.md, design.md, tasks.md): allo st
 Quando hai finito di implementare questo task, fornisci un breve riepilogo di cosa hai fatto.`;
 
 		const messages = [{ role: 'user' as const, content: prompt }];
+		let ok = false;
 		try {
 			await runAgent(registry, messages, {
 				onAssistantText: t => reporter.log(`🤖 ${t.slice(0, 300)}`),
@@ -244,14 +258,15 @@ Quando hai finito di implementare questo task, fornisci un breve riepilogo di co
 				onToolResult: r => reporter.log(`↳ ${r.slice(0, 200)}`)
 			}, signal);
 			reporter.setStatus(i, 'done');
+			ok = true;
 		} catch (err) {
 			reporter.setStatus(i, 'error');
 			reporter.log(`[errore] ${String(err)}`);
 		}
 
-		// Spunta il task sulla NOSTRA copia autorevole (così non si perdono i task
-		// già completati anche se l'agente avesse modificato il file).
-		tasksMd = markTaskDone(tasksMd, task.lineIdx);
+		// Aggiorna lo stato sulla NOSTRA copia autorevole: fatto ([x]) se riuscito,
+		// altrimenti torna da fare ([ ]) così è ritentabile.
+		tasksMd = setTaskMark(tasksMd, task.lineIdx, ok ? 'x' : ' ');
 		await vscode.workspace.fs.writeFile(tasksUri, ENC.encode(tasksMd));
 		refresh();
 	}
@@ -348,9 +363,9 @@ export async function runSpecTasksParallel(
 
 	// Lock per serializzare le scritture su tasks.md.
 	let writeLock: Promise<void> = Promise.resolve();
-	const markDone = (lineIdx: number): Promise<void> => {
+	const setMark = (lineIdx: number, mark: ' ' | '~' | 'x'): Promise<void> => {
 		writeLock = writeLock.then(async () => {
-			tasksMd = markTaskDone(tasksMd, lineIdx);
+			tasksMd = setTaskMark(tasksMd, lineIdx, mark);
 			await vscode.workspace.fs.writeFile(tasksUri, ENC.encode(tasksMd));
 			refresh();
 		});
@@ -361,6 +376,7 @@ export async function runSpecTasksParallel(
 		const task = pending[i];
 		const tag = `[W${waveNo}·${i + 1}]`;
 		reporter.log(`▶ ${tag} ${task.text}`);
+		await setMark(task.lineIdx, '~');
 		const prompt = `Stai implementando la funzionalità "${specName}" in modo spec-driven, come uno di più subagent in parallelo nella stessa wave. Implementa SOLO questo task usando i tool. Tocca solo i file necessari a QUESTO task per non confliggere con gli altri subagent.
 
 # Requisiti
@@ -373,6 +389,7 @@ ${design || '(non disponibile)'}
 ${task.text}
 
 NON modificare i file della spec (requirements/design/tasks.md). Al termine un breve riepilogo.`;
+		let ok = false;
 		try {
 			await runAgent(registry, [{ role: 'user', content: prompt }], {
 				onAssistantText: t => reporter.log(`🤖 ${tag} ${t.slice(0, 180)}`),
@@ -380,10 +397,11 @@ NON modificare i file della spec (requirements/design/tasks.md). Al termine un b
 				onToolResult: r => reporter.log(`↳ ${tag} ${r.slice(0, 140)}`)
 			}, signal);
 			reporter.log(`✓ ${tag} completato`);
+			ok = true;
 		} catch (err) {
 			reporter.log(`✗ ${tag} ${String(err)}`);
 		}
-		await markDone(task.lineIdx);
+		await setMark(task.lineIdx, ok ? 'x' : ' ');
 	};
 
 	for (let w = 0; w < waves.length; w++) {
@@ -426,6 +444,10 @@ export async function runSpecTask(registry: ProviderRegistry, specDir: vscode.Ur
 
 	reporter.start(`Task · ${specName}`, [task.text]);
 	reporter.setStatus(0, 'running');
+	// Segna "in corso" ([~]) prima di iniziare.
+	tasksMd = setTaskMark(tasksMd, lineIdx, '~');
+	await vscode.workspace.fs.writeFile(tasksUri, ENC.encode(tasksMd));
+	refresh();
 	const prompt = `Stai implementando la funzionalità "${specName}" in modo spec-driven. Implementa SOLO questo task usando i tool.
 
 # Requisiti
@@ -439,6 +461,7 @@ ${task.text}
 
 NON modificare i file della spec (requirements.md, design.md, tasks.md): allo stato dei task ci pensa MGCoding.
 Al termine fornisci un breve riepilogo.`;
+	let ok = false;
 	try {
 		await runAgent(registry, [{ role: 'user', content: prompt }], {
 			onAssistantText: t => reporter.log(`🤖 ${t.slice(0, 300)}`),
@@ -446,11 +469,12 @@ Al termine fornisci un breve riepilogo.`;
 			onToolResult: r => reporter.log(`↳ ${r.slice(0, 200)}`)
 		}, signal);
 		reporter.setStatus(0, 'done');
+		ok = true;
 	} catch (err) {
 		reporter.setStatus(0, 'error');
 		reporter.log(`[errore] ${String(err)}`);
 	}
-	tasksMd = markTaskDone(await readIfExists(tasksUri) || tasksMd, lineIdx);
+	tasksMd = setTaskMark(await readIfExists(tasksUri) || tasksMd, lineIdx, ok ? 'x' : ' ');
 	await vscode.workspace.fs.writeFile(tasksUri, ENC.encode(tasksMd));
 	refresh();
 	reporter.finish('=== Task terminato ===');
@@ -467,10 +491,11 @@ export async function toggleSpecTask(specDir: vscode.Uri, lineIdx: number): Prom
 	}
 	const lines = md.split('\n');
 	const line = lines[lineIdx] ?? '';
-	if (/\[ \]/.test(line)) {
-		lines[lineIdx] = line.replace('[ ]', '[x]');
-	} else if (/\[[xX]\]/.test(line)) {
+	// Fatto → da fare; da fare o in corso ([~]) → fatto.
+	if (/\[[xX]\]/.test(line)) {
 		lines[lineIdx] = line.replace(/\[[xX]\]/, '[ ]');
+	} else if (/\[[ ~]\]/.test(line)) {
+		lines[lineIdx] = line.replace(/\[[ ~]\]/, '[x]');
 	} else {
 		return;
 	}
@@ -501,7 +526,9 @@ export class SpecTasksCodeLensProvider implements vscode.CodeLensProvider {
 		];
 		for (const t of parseTasks(document.getText())) {
 			const range = new vscode.Range(t.lineIdx, 0, t.lineIdx, 0);
-			if (!t.done) {
+			if (t.inProgress) {
+				lenses.push(new vscode.CodeLens(range, { title: '$(sync~spin) In corso…', command: 'mgcoding.runSpecTask', arguments: [{ specDir, lineIdx: t.lineIdx }] }));
+			} else if (!t.done) {
 				const title = t.optional ? '$(play) Start task (opzionale)' : '$(play) Start task';
 				lenses.push(new vscode.CodeLens(range, { title, command: 'mgcoding.runSpecTask', arguments: [{ specDir, lineIdx: t.lineIdx }] }));
 			}
@@ -520,7 +547,7 @@ export class SpecTasksCodeLensProvider implements vscode.CodeLensProvider {
 type SpecNode =
 	| { kind: 'spec'; uri: vscode.Uri; label: string }
 	| { kind: 'file'; uri: vscode.Uri; label: string }
-	| { kind: 'task'; specDir: vscode.Uri; lineIdx: number; label: string; done: boolean };
+	| { kind: 'task'; specDir: vscode.Uri; lineIdx: number; label: string; done: boolean; inProgress: boolean };
 
 export class SpecsTreeProvider implements vscode.TreeDataProvider<SpecNode> {
 	private readonly _onDidChange = new vscode.EventEmitter<void>();
@@ -540,9 +567,10 @@ export class SpecsTreeProvider implements vscode.TreeDataProvider<SpecNode> {
 		}
 		if (node.kind === 'task') {
 			const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.None);
-			item.iconPath = new vscode.ThemeIcon(node.done ? 'pass-filled' : 'circle-large-outline');
+			const icon = node.done ? 'pass-filled' : node.inProgress ? 'sync~spin' : 'circle-large-outline';
+			item.iconPath = new vscode.ThemeIcon(icon);
 			item.contextValue = 'mgcoding.task';
-			item.tooltip = node.done ? 'Completato' : 'Da fare — esegui con ▶';
+			item.tooltip = node.done ? 'Completato' : node.inProgress ? 'In corso…' : 'Da fare — esegui con ▶';
 			return item;
 		}
 		const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.None);
@@ -582,7 +610,7 @@ export class SpecsTreeProvider implements vscode.TreeDataProvider<SpecNode> {
 			}
 			const tasksMd = await readIfExists(vscode.Uri.joinPath(node.uri, 'tasks.md'));
 			for (const t of parseTasks(tasksMd)) {
-				out.push({ kind: 'task', specDir: node.uri, lineIdx: t.lineIdx, label: t.text, done: t.done });
+				out.push({ kind: 'task', specDir: node.uri, lineIdx: t.lineIdx, label: t.text, done: t.done, inProgress: t.inProgress });
 			}
 			return out;
 		}
