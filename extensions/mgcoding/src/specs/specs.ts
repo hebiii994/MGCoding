@@ -248,10 +248,61 @@ Quando hai finito di implementare questo task, fornisci un breve riepilogo di co
 }
 
 /**
- * Esegue i task in PARALLELO con più subagent (pool di worker a concorrenza limitata).
- * Ogni task è un'esecuzione agentica indipendente. La marcatura su tasks.md è
- * serializzata per non perdere aggiornamenti. ATTENZIONE: subagent che modificano
- * gli stessi file possono confliggere — adatto a task su file distinti.
+ * Pianifica le "wave": raggruppa i task in ondate dove i task della stessa wave
+ * sono indipendenti (eseguibili in parallelo) e le wave successive dipendono dalle
+ * precedenti. Usa l'LLM; in caso di fallback esegue tutto in sequenza.
+ * Ritorna array di wave, ciascuna con gli indici (0-based) in `tasks`.
+ */
+async function planWaves(registry: ProviderRegistry, tasks: ParsedTask[]): Promise<number[][]> {
+	if (tasks.length <= 1) {
+		return tasks.map((_, i) => [i]);
+	}
+	const list = tasks.map((t, i) => `${i + 1}. ${t.text}`).join('\n');
+	const sys = `Sei un pianificatore di esecuzione. Dati dei task di implementazione, raggruppali in "wave".
+Regole:
+- I task nella STESSA wave devono essere INDIPENDENTI: file/aree di codice diversi, nessuna dipendenza reciproca, eseguibili in parallelo senza conflitti.
+- Una wave può dipendere dai risultati delle wave precedenti.
+- Metti nella stessa wave solo task realmente sicuri da eseguire insieme; nel dubbio, separali in wave diverse.
+Rispondi SOLO con JSON valido nella forma {"waves":[[1,2],[3],[4,5]]} usando i NUMERI dei task elencati. Nessun altro testo.`;
+	try {
+		const raw = await complete(registry, [{ role: 'user', content: `Task:\n${list}` }], sys, undefined, undefined, true);
+		const m = raw.match(/\{[\s\S]*\}/);
+		if (m) {
+			const obj = JSON.parse(m[0]) as { waves?: unknown };
+			if (Array.isArray(obj.waves)) {
+				const seen = new Set<number>();
+				const clean: number[][] = [];
+				for (const w of obj.waves) {
+					if (!Array.isArray(w)) {
+						continue;
+					}
+					const ww = w.map(x => Number(x) - 1).filter(i => Number.isInteger(i) && i >= 0 && i < tasks.length && !seen.has(i));
+					ww.forEach(i => seen.add(i));
+					if (ww.length) {
+						clean.push(ww);
+					}
+				}
+				// Task non assegnati → ognuno come wave finale sequenziale.
+				for (let i = 0; i < tasks.length; i++) {
+					if (!seen.has(i)) {
+						clean.push([i]);
+					}
+				}
+				if (clean.length) {
+					return clean;
+				}
+			}
+		}
+	} catch {
+		// fallback sotto
+	}
+	return tasks.map((_, i) => [i]);
+}
+
+/**
+ * Esegue i task per WAVE (come Kiro): all'interno di una wave i task girano in
+ * parallelo come subagent indipendenti (cap di concorrenza), le wave sono
+ * sequenziali. La marcatura su tasks.md è serializzata.
  */
 export async function runSpecTasksParallel(
 	registry: ProviderRegistry,
@@ -278,10 +329,12 @@ export async function runSpecTasksParallel(
 		return;
 	}
 
-	const n = Math.max(1, Math.min(concurrency, pending.length));
-	reporter.start(`Spec (paralleli ×${n}): ${specName}`, pending.map(t => t.text));
+	reporter.start(`Spec (wave): ${specName}`, pending.map(t => t.text));
+	reporter.log('🔎 Analizzo le dipendenze e pianifico le wave…');
+	const waves = await planWaves(registry, pending);
+	reporter.log(`📋 ${waves.length} wave pianificate (concorrenza max ×${concurrency}).`);
 
-	// Lock per serializzare le scritture su tasks.md (evita aggiornamenti persi).
+	// Lock per serializzare le scritture su tasks.md.
 	let writeLock: Promise<void> = Promise.resolve();
 	const markDone = (lineIdx: number): Promise<void> => {
 		writeLock = writeLock.then(async () => {
@@ -292,20 +345,11 @@ export async function runSpecTasksParallel(
 		return writeLock;
 	};
 
-	let next = 0;
-	const worker = async (): Promise<void> => {
-		for (;;) {
-			if (signal?.aborted) {
-				return;
-			}
-			const i = next++;
-			if (i >= pending.length) {
-				return;
-			}
-			const task = pending[i];
-			const tag = `[${i + 1}/${pending.length}]`;
-			reporter.log(`▶ ${tag} ${task.text}`);
-			const prompt = `Stai implementando la funzionalità "${specName}" in modo spec-driven, come uno di più subagent in parallelo. Implementa SOLO questo task usando i tool. Tocca solo i file necessari a QUESTO task per non confliggere con gli altri subagent.
+	const runOne = async (i: number, waveNo: number): Promise<void> => {
+		const task = pending[i];
+		const tag = `[W${waveNo}·${i + 1}]`;
+		reporter.log(`▶ ${tag} ${task.text}`);
+		const prompt = `Stai implementando la funzionalità "${specName}" in modo spec-driven, come uno di più subagent in parallelo nella stessa wave. Implementa SOLO questo task usando i tool. Tocca solo i file necessari a QUESTO task per non confliggere con gli altri subagent.
 
 # Requisiti
 ${requirements || '(non disponibili)'}
@@ -317,23 +361,38 @@ ${design || '(non disponibile)'}
 ${task.text}
 
 NON modificare i file della spec (requirements/design/tasks.md). Al termine un breve riepilogo.`;
-			try {
-				await runAgent(registry, [{ role: 'user', content: prompt }], {
-					onAssistantText: t => reporter.log(`🤖 ${tag} ${t.slice(0, 200)}`),
-					onToolStart: c => reporter.log(`🔧 ${tag} ${c.tool} ${JSON.stringify(c.args).slice(0, 120)}`),
-					onToolResult: r => reporter.log(`↳ ${tag} ${r.slice(0, 160)}`)
-				}, signal);
-				reporter.log(`✓ ${tag} completato`);
-			} catch (err) {
-				reporter.log(`✗ ${tag} ${String(err)}`);
-			}
-			await markDone(task.lineIdx);
+		try {
+			await runAgent(registry, [{ role: 'user', content: prompt }], {
+				onAssistantText: t => reporter.log(`🤖 ${tag} ${t.slice(0, 180)}`),
+				onToolStart: c => reporter.log(`🔧 ${tag} ${c.tool} ${JSON.stringify(c.args).slice(0, 110)}`),
+				onToolResult: r => reporter.log(`↳ ${tag} ${r.slice(0, 140)}`)
+			}, signal);
+			reporter.log(`✓ ${tag} completato`);
+		} catch (err) {
+			reporter.log(`✗ ${tag} ${String(err)}`);
 		}
+		await markDone(task.lineIdx);
 	};
 
-	await Promise.all(Array.from({ length: n }, () => worker()));
+	for (let w = 0; w < waves.length; w++) {
+		if (signal?.aborted) {
+			reporter.log('⏹ Interrotto.');
+			break;
+		}
+		const wave = waves[w];
+		reporter.log(`\n── Wave ${w + 1}/${waves.length} · ${wave.length} task in parallelo ──`);
+		// Esegue la wave a gruppi di `concurrency` per non sovraccaricare.
+		for (let s = 0; s < wave.length; s += Math.max(1, concurrency)) {
+			if (signal?.aborted) {
+				break;
+			}
+			const slice = wave.slice(s, s + Math.max(1, concurrency));
+			await Promise.all(slice.map(i => runOne(i, w + 1)));
+		}
+	}
+
 	await writeLock;
-	reporter.finish(`=== Esecuzione parallela terminata (${specName}) ===`);
+	reporter.finish(`=== Esecuzione a wave terminata (${specName}) ===`);
 }
 
 /** Esegue un singolo task (per lineIdx) di una spec con l'agente. */
@@ -424,7 +483,7 @@ export class SpecTasksCodeLensProvider implements vscode.CodeLensProvider {
 		const top = new vscode.Range(0, 0, 0, 0);
 		const lenses: vscode.CodeLens[] = [
 			new vscode.CodeLens(top, { title: '$(run-all) Run all tasks', command: 'mgcoding.runSpecTasksHere', arguments: [document.uri] }),
-			new vscode.CodeLens(top, { title: '$(rocket) Run parallel (subagent)', command: 'mgcoding.runSpecTasksParallel', arguments: [document.uri] }),
+			new vscode.CodeLens(top, { title: '$(rocket) Run waves (subagent)', command: 'mgcoding.runSpecTasksParallel', arguments: [document.uri] }),
 			new vscode.CodeLens(top, { title: '$(play-circle) Run all + optional', command: 'mgcoding.runSpecTasksHereOptional', arguments: [document.uri] }),
 			new vscode.CodeLens(top, { title: '$(sync) Sync', command: 'mgcoding.specSync', arguments: [document.uri] })
 		];
