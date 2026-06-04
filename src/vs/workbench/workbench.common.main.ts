@@ -214,6 +214,9 @@ import './contrib/preferences/browser/preferencesSearch.js';
 // Performance
 import './contrib/performance/browser/performance.contribution.js';
 
+// MGCoding - barra Spec in alto (Requirements/Design/Task list · Sync · Continue)
+import './contrib/mgcoding/browser/specBanner.contribution.js';
+
 // Notebook
 import './contrib/notebook/browser/notebook.contribution.js';
 
