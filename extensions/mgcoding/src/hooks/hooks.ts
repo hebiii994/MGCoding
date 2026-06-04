@@ -5,7 +5,9 @@
 
 import * as vscode from 'vscode';
 import { complete } from '../agent/agent';
+import { runAgent } from '../agent/agentLoop';
 import { ProviderRegistry } from '../llm/registry';
+import { RunReporter } from '../run/runView';
 import { resolveFeatureDirs } from '../util/paths';
 import { kiroHookToInternal } from '../util/parsing';
 
@@ -169,7 +171,14 @@ export class HookManager implements vscode.Disposable {
 	private readonly disposables: vscode.Disposable[] = [];
 	private readonly output: vscode.OutputChannel;
 
-	constructor(private readonly registry: ProviderRegistry, private readonly onChanged: () => void) {
+	constructor(
+		private readonly registry: ProviderRegistry,
+		private readonly onChanged: () => void,
+		/** Reporter per mostrare il lavoro dell'agente nella chat (opzionale). */
+		private readonly getReporter?: () => RunReporter,
+		/** Crea un AbortSignal collegato allo Stop della chat (opzionale). */
+		private readonly newSignal?: () => AbortSignal
+	) {
 		this.output = vscode.window.createOutputChannel('MGCoding Hooks');
 		this.disposables.push(this.output);
 
@@ -228,18 +237,36 @@ export class HookManager implements vscode.Disposable {
 		}
 
 		if (hook.action === 'ask' && hook.prompt) {
-			let fileContent = '';
-			try {
-				fileContent = DEC.decode(await vscode.workspace.fs.readFile(uri));
-			} catch {
-				// es. file cancellato o cartella
-			}
-			const userPrompt = `${hook.prompt}\n\nFile: ${rel}\n\n\`\`\`\n${fileContent}\n\`\`\``;
-			try {
-				const reply = await complete(this.registry, [{ role: 'user', content: userPrompt }]);
-				this.output.appendLine(reply);
-			} catch (err) {
-				this.output.appendLine(`[errore] ${String(err)}`);
+			const userPrompt = `Sei attivato da un Agent Hook ("${hook.name}") sull'evento ${hook.event}, file coinvolto: ${rel}.
+
+Azione richiesta:
+${hook.prompt}
+
+Usa i tool (read_file/write_file/apply_patch/run_command/…) per eseguire davvero l'azione sul progetto. Al termine fornisci un breve riepilogo di cosa hai fatto.`;
+
+			const reporter = this.getReporter?.();
+			const signal = this.newSignal?.();
+			if (reporter) {
+				// Esecuzione agentica con tool, mostrata nella chat.
+				reporter.start(`Hook: ${hook.name}`, [hook.prompt]);
+				try {
+					await runAgent(this.registry, [{ role: 'user', content: userPrompt }], {
+						onAssistantText: t => reporter.log(`🤖 ${t.slice(0, 300)}`),
+						onToolStart: c => reporter.log(`🔧 ${c.tool} ${JSON.stringify(c.args).slice(0, 160)}`),
+						onToolResult: r => reporter.log(`↳ ${r.slice(0, 200)}`)
+					}, signal);
+				} catch (err) {
+					reporter.log(`[errore] ${String(err)}`);
+				}
+				reporter.finish(`=== Hook "${hook.name}" terminato ===`);
+			} else {
+				// Fallback: completamento semplice nel pannello Output.
+				try {
+					const reply = await complete(this.registry, [{ role: 'user', content: userPrompt }]);
+					this.output.appendLine(reply);
+				} catch (err) {
+					this.output.appendLine(`[errore] ${String(err)}`);
+				}
 			}
 		}
 	}

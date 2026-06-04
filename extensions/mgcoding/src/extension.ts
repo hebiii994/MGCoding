@@ -110,7 +110,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	);
 
 	// Hooks runtime
-	const hookManager = new HookManager(registry, () => hooksTree.refresh());
+	const hookManager = new HookManager(registry, () => hooksTree.refresh(), () => chat.runReporter(), () => chat.beginRun());
 	context.subscriptions.push(hookManager);
 
 	const restartMcp = async () => { await mcpManager.start(); mcpTree.refresh(); };
