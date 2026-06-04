@@ -77,6 +77,20 @@ function globToRegExp(glob: string): RegExp {
 }
 
 /**
+ * Elenca i nomi dei documenti di steering attivi (per mostrarli in chat, stile Kiro).
+ */
+export async function listSteeringNames(): Promise<string[]> {
+	const dirs = await resolveFeatureDirs('steering');
+	const seen = new Set<string>();
+	for (const dir of dirs) {
+		for (const f of await readSteeringDir(dir)) {
+			seen.add(f.name);
+		}
+	}
+	return [...seen];
+}
+
+/**
  * Costruisce la sezione "steering" del system prompt in base alla modalità di inclusione
  * e al file attivo.
  */

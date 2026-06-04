@@ -9,6 +9,7 @@ import { track } from '../analytics/analytics';
 import { changedCount } from '../edit/checkpoint';
 import { SPEC_SYS, slugify, specsRoot, writeAndOpen } from '../specs/specs';
 import { splitThink } from '../util/parsing';
+import { listSteeringNames } from '../steering/steering';
 import { RunReporter } from '../run/runView';
 import { WhisperEngine } from '../stt/whisperEngine';
 import { ProviderRegistry } from '../llm/registry';
@@ -543,6 +544,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		}
 		session.messages.push(userMsg);
 		this.post({ type: 'busy', value: true });
+		// Intestazione di turno con avatar + steering inclusi (trasparenza stile Kiro).
+		const steering = await listSteeringNames();
+		this.post({ type: 'steeringChips', names: steering });
 		this.abort = new AbortController();
 		const systemExtra = VIBE_MODE_PROMPT;
 		try {
@@ -775,6 +779,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			return;
 		}
 		this.post({ type: 'busy', value: true });
+		// Mostra gli steering inclusi (stile Kiro): trasparenza su cosa "legge".
+		const steering = await listSteeringNames();
+		if (steering.length) {
+			this.post({ type: 'steeringChips', names: steering });
+		}
 		this.post({ type: 'assistant', text: `${SPEC_PHASE_TITLE[phase]} — sto generando per «${spec.name}»…` });
 		try {
 			let userPrompt: string;
@@ -932,6 +941,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	.msg { padding: 8px 10px; border-radius: 8px; word-wrap: break-word; overflow-wrap: anywhere; max-width: 100%; box-sizing: border-box; }
 	.user { background: var(--vscode-input-background); align-self: flex-end; max-width: 92%; white-space: pre-wrap; }
 	.assistant { background: var(--vscode-editor-inactiveSelectionBackground); align-self: flex-start; max-width: 100%; }
+	.steering-card { align-self: flex-start; max-width: 100%; margin: 2px 0; }
+	.steering-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+	.mg-avatar { width: 22px; height: 22px; flex: 0 0 auto; display: inline-flex; }
+	.mg-avatar svg { width: 22px; height: 22px; display: block; }
+	.steering-title { font-weight: 600; opacity: 0.9; font-size: 0.92em; }
+	.steering-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+	.steering-chip { font-size: 11px; padding: 2px 8px; border-radius: 10px; white-space: nowrap; background: color-mix(in srgb, var(--mg-accent) 14%, transparent); border: 1px solid color-mix(in srgb, var(--mg-accent) 32%, transparent); }
+	body.busy .mg-avatar { animation: mgavatar 1.2s ease-in-out infinite; }
+	@keyframes mgavatar { 0%,100% { transform: scale(1); } 50% { transform: scale(1.15); } }
 	.run-block { align-self: stretch; background: var(--vscode-textBlockQuote-background); border-left: 3px solid var(--mg-accent); border-radius: 6px; }
 	.run-block .run-head { font-weight: 600; padding: 7px 9px; }
 	.run-block .run-body { padding: 0 9px 7px; font-family: var(--vscode-editor-font-family); font-size: 0.85em; opacity: 0.9; max-height: 320px; overflow: auto; }
@@ -1337,6 +1355,33 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		log.appendChild(el); log.scrollTop = log.scrollHeight;
 		return el;
 	}
+	function mgAvatarSvg() {
+		return '<svg viewBox="0 0 24 24">' +
+			'<circle cx="12" cy="12" r="10" fill="none" stroke="var(--mg-accent)" stroke-width="2"/>' +
+			'<circle cx="9" cy="11" r="1.5" fill="var(--mg-accent)"/>' +
+			'<circle cx="15" cy="11" r="1.5" fill="var(--mg-accent)"/>' +
+			'<path d="M8.5 14.5 Q12 17 15.5 14.5" fill="none" stroke="var(--mg-accent)" stroke-width="1.6" stroke-linecap="round"/>' +
+			'</svg>';
+	}
+	// Intestazione di turno stile Kiro: avatar animato + nome + chip degli steering inclusi.
+	function renderSteeringChips(names) {
+		ensureCleared();
+		var card = document.createElement('div'); card.className = 'steering-card';
+		var head = document.createElement('div'); head.className = 'steering-head';
+		var av = document.createElement('span'); av.className = 'mg-avatar'; av.innerHTML = mgAvatarSvg();
+		var lbl = document.createElement('span'); lbl.className = 'steering-title';
+		lbl.textContent = names && names.length ? 'MGCoding · includo gli Steering' : 'MGCoding';
+		head.appendChild(av); head.appendChild(lbl); card.appendChild(head);
+		if (names && names.length) {
+			var chips = document.createElement('div'); chips.className = 'steering-chips';
+			for (var i = 0; i < names.length; i++) {
+				var c = document.createElement('span'); c.className = 'steering-chip'; c.textContent = '\\uD83D\\uDCC4 ' + names[i] + '.md';
+				chips.appendChild(c);
+			}
+			card.appendChild(chips);
+		}
+		log.appendChild(card); log.scrollTop = log.scrollHeight;
+	}
 	function addTool(name, args) {
 		ensureCleared();
 		var el = document.createElement('div'); el.className = 'msg tool';
@@ -1559,6 +1604,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		else if (m.type === 'changes') { renderChanges(m.count || 0); }
 		else if (m.type === 'sttResult') { if (m.text) { input.value = (input.value ? input.value + ' ' : '') + m.text; autoGrow(); input.focus(); if (m.autoSend || mgHandsFree) { send(); } } else if (mgHandsFree) { restartListen(); } }
 		else if (m.type === 'sttBusy') { micBtn.classList.toggle('stt-busy', !!m.value); }
+		else if (m.type === 'steeringChips') { renderSteeringChips(m.names); }
 		else if (m.type === 'specActions') { renderSpecActions(m.phase); }
 		else if (m.type === 'specModeChoose') { renderSpecModeChoose(); }
 		else if (m.type === 'specOffer') { renderSpecOffer(); }
