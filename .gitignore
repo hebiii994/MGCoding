@@ -47,3 +47,6 @@ dist
 .github/prompts/*.local.prompt.md
 .agents/skills/.local/
 .github/skills/.local/
+
+# MGCoding: motore STT scaricato in build (non versionare)
+extensions/mgcoding/bin/
