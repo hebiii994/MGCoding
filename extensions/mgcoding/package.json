@@ -326,6 +326,13 @@
 		"configuration": {
 			"title": "MGCoding",
 			"properties": {
+				"mgcoding.tasks.parallel": {
+					"type": "number",
+					"default": 2,
+					"minimum": 1,
+					"maximum": 6,
+					"description": "Numero di subagent in parallelo per \"Run parallel\" sui task di una spec. 1 = sequenziale."
+				},
 				"mgcoding.analytics.asked": {
 					"type": "boolean",
 					"default": false,

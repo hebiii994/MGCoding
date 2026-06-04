@@ -247,6 +247,95 @@ Quando hai finito di implementare questo task, fornisci un breve riepilogo di co
 	reporter.finish('=== Esecuzione task terminata ===');
 }
 
+/**
+ * Esegue i task in PARALLELO con più subagent (pool di worker a concorrenza limitata).
+ * Ogni task è un'esecuzione agentica indipendente. La marcatura su tasks.md è
+ * serializzata per non perdere aggiornamenti. ATTENZIONE: subagent che modificano
+ * gli stessi file possono confliggere — adatto a task su file distinti.
+ */
+export async function runSpecTasksParallel(
+	registry: ProviderRegistry,
+	specDir: vscode.Uri,
+	refresh: () => void,
+	reporter: RunReporter,
+	includeOptional = true,
+	signal?: AbortSignal,
+	concurrency = 2
+): Promise<void> {
+	const tasksUri = vscode.Uri.joinPath(specDir, 'tasks.md');
+	let tasksMd = await readIfExists(tasksUri);
+	if (!tasksMd) {
+		vscode.window.showWarningMessage('Nessun tasks.md in questa spec. Genera prima la spec.');
+		return;
+	}
+	const requirements = await readIfExists(vscode.Uri.joinPath(specDir, 'requirements.md'));
+	const design = await readIfExists(vscode.Uri.joinPath(specDir, 'design.md'));
+	const specName = specDir.path.split('/').pop() ?? 'spec';
+
+	const pending = parseTasks(tasksMd).filter(t => !t.done && (includeOptional || !t.optional));
+	if (pending.length === 0) {
+		vscode.window.showInformationMessage(`Nessun task da eseguire per "${specName}".`);
+		return;
+	}
+
+	const n = Math.max(1, Math.min(concurrency, pending.length));
+	reporter.start(`Spec (paralleli ×${n}): ${specName}`, pending.map(t => t.text));
+
+	// Lock per serializzare le scritture su tasks.md (evita aggiornamenti persi).
+	let writeLock: Promise<void> = Promise.resolve();
+	const markDone = (lineIdx: number): Promise<void> => {
+		writeLock = writeLock.then(async () => {
+			tasksMd = markTaskDone(tasksMd, lineIdx);
+			await vscode.workspace.fs.writeFile(tasksUri, ENC.encode(tasksMd));
+			refresh();
+		});
+		return writeLock;
+	};
+
+	let next = 0;
+	const worker = async (): Promise<void> => {
+		for (;;) {
+			if (signal?.aborted) {
+				return;
+			}
+			const i = next++;
+			if (i >= pending.length) {
+				return;
+			}
+			const task = pending[i];
+			const tag = `[${i + 1}/${pending.length}]`;
+			reporter.log(`▶ ${tag} ${task.text}`);
+			const prompt = `Stai implementando la funzionalità "${specName}" in modo spec-driven, come uno di più subagent in parallelo. Implementa SOLO questo task usando i tool. Tocca solo i file necessari a QUESTO task per non confliggere con gli altri subagent.
+
+# Requisiti
+${requirements || '(non disponibili)'}
+
+# Design
+${design || '(non disponibile)'}
+
+# Task da implementare ora
+${task.text}
+
+NON modificare i file della spec (requirements/design/tasks.md). Al termine un breve riepilogo.`;
+			try {
+				await runAgent(registry, [{ role: 'user', content: prompt }], {
+					onAssistantText: t => reporter.log(`🤖 ${tag} ${t.slice(0, 200)}`),
+					onToolStart: c => reporter.log(`🔧 ${tag} ${c.tool} ${JSON.stringify(c.args).slice(0, 120)}`),
+					onToolResult: r => reporter.log(`↳ ${tag} ${r.slice(0, 160)}`)
+				}, signal);
+				reporter.log(`✓ ${tag} completato`);
+			} catch (err) {
+				reporter.log(`✗ ${tag} ${String(err)}`);
+			}
+			await markDone(task.lineIdx);
+		}
+	};
+
+	await Promise.all(Array.from({ length: n }, () => worker()));
+	await writeLock;
+	reporter.finish(`=== Esecuzione parallela terminata (${specName}) ===`);
+}
+
 /** Esegue un singolo task (per lineIdx) di una spec con l'agente. */
 export async function runSpecTask(registry: ProviderRegistry, specDir: vscode.Uri, lineIdx: number, refresh: () => void, reporter: RunReporter, signal?: AbortSignal): Promise<void> {
 	const tasksUri = vscode.Uri.joinPath(specDir, 'tasks.md');
@@ -335,6 +424,7 @@ export class SpecTasksCodeLensProvider implements vscode.CodeLensProvider {
 		const top = new vscode.Range(0, 0, 0, 0);
 		const lenses: vscode.CodeLens[] = [
 			new vscode.CodeLens(top, { title: '$(run-all) Run all tasks', command: 'mgcoding.runSpecTasksHere', arguments: [document.uri] }),
+			new vscode.CodeLens(top, { title: '$(rocket) Run parallel (subagent)', command: 'mgcoding.runSpecTasksParallel', arguments: [document.uri] }),
 			new vscode.CodeLens(top, { title: '$(play-circle) Run all + optional', command: 'mgcoding.runSpecTasksHereOptional', arguments: [document.uri] }),
 			new vscode.CodeLens(top, { title: '$(sync) Sync', command: 'mgcoding.specSync', arguments: [document.uri] })
 		];

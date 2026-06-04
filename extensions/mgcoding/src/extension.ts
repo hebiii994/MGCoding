@@ -17,7 +17,7 @@ import { importFromKiro } from './migrate/importKiro';
 import { checkForUpdates } from './update/updater';
 import { initAnalytics, track, toggleAnalytics } from './analytics/analytics';
 import { registerAutocomplete } from './complete/autocomplete';
-import { createSpec, runSpecTask, runSpecTasks, SpecsTreeProvider, SpecTasksCodeLensProvider, toggleSpecTask } from './specs/specs';
+import { createSpec, runSpecTask, runSpecTasks, runSpecTasksParallel, SpecsTreeProvider, SpecTasksCodeLensProvider, toggleSpecTask } from './specs/specs';
 import { initSteering, SteeringTreeProvider } from './steering/steering';
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -229,6 +229,14 @@ export function activate(context: vscode.ExtensionContext): void {
 			specsTree.refresh();
 			specCodeLens.refresh();
 			vscode.window.showInformationMessage('MGCoding: spec sincronizzata.');
+		}),
+		vscode.commands.registerCommand('mgcoding.runSpecTasksParallel', (uri?: vscode.Uri) => {
+			const u = uri ?? vscode.window.activeTextEditor?.document.uri;
+			if (!u) {
+				return undefined;
+			}
+			const concurrency = vscode.workspace.getConfiguration('mgcoding').get<number>('tasks.parallel', 2);
+			return runSpecTasksParallel(registry, vscode.Uri.joinPath(u, '..'), () => specsTree.refresh(), runView, true, chat.beginRun(), concurrency);
 		}),
 		vscode.commands.registerCommand('mgcoding.runSpecTasksHereOptional', (uri?: vscode.Uri) => {
 			const u = uri ?? vscode.window.activeTextEditor?.document.uri;
