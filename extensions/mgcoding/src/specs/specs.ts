@@ -45,6 +45,18 @@ Copri casi felici, errori e casi limite. Solo Markdown, nessun preambolo.`,
 ## Gestione degli errori
 ## Strategia di test
 Mappa esplicitamente le scelte ai requisiti. Solo Markdown.`,
+	bugfix: `Genera un documento di ANALISI BUG (in requirements.md) per un difetto da correggere. Struttura:
+# Bugfix: <titolo>
+## Sintomo
+Cosa non funziona / comportamento osservato.
+## Passi per riprodurre
+1. …
+## Comportamento atteso
+## Analisi della causa (ipotesi)
+Possibili cause radice, file/componenti coinvolti.
+## Criteri di accettazione (EARS)
+1. WHEN <evento> THE SYSTEM SHALL <comportamento corretto>
+Solo Markdown, nessun preambolo.`,
 	tasks: `Genera un documento tasks.md: piano di implementazione come checklist Markdown ("- [ ] ...").
 Regole:
 - Ogni task è piccolo, concreto e verificabile (idealmente una singola unità di lavoro).

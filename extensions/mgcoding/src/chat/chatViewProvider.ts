@@ -4,7 +4,7 @@
 
 import * as vscode from 'vscode';
 import { runAgent } from '../agent/agentLoop';
-import { complete } from '../agent/agent';
+import { complete, buildGroundingContext } from '../agent/agent';
 import { track } from '../analytics/analytics';
 import { changedCount } from '../edit/checkpoint';
 import { SPEC_SYS, slugify, specsRoot, writeAndOpen } from '../specs/specs';
@@ -27,6 +27,7 @@ interface SpecState {
 	slug: string;
 	idea: string;
 	phase: SpecPhase;
+	kind?: 'feature' | 'bugfix';
 	requirements?: string;
 	design?: string;
 	tasks?: string;
@@ -644,6 +645,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		if (!spec) {
 			return;
 		}
+		if (mode === 'bugfix') {
+			spec.kind = 'bugfix';
+			await this.runSpecPhase('requirements');
+			return;
+		}
+		spec.kind = 'feature';
 		if (mode === 'step') {
 			await this.runSpecPhase('requirements');
 			return;
@@ -696,8 +703,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			if (feedback) {
 				userPrompt += `\n\nIndicazioni di revisione dall'utente: ${feedback}\nRigenera il documento tenendone conto.`;
 			}
-			// pureSystem=true: niente prompt agentico, solo le istruzioni del documento.
-			const raw = await complete(this.registry, [{ role: 'user', content: userPrompt }], SPEC_SYS[phase], undefined, undefined, true);
+			// Istruzioni del documento (bugfix per la fase requirements se kind=bugfix)
+			// + contesto del progetto (struttura + steering) per ancorare la spec al codice reale.
+			let docSys: string = SPEC_SYS[phase];
+			if (phase === 'requirements' && spec.kind === 'bugfix') {
+				docSys = SPEC_SYS.bugfix;
+			}
+			const grounding = await buildGroundingContext();
+			const sys = grounding
+				? `${docSys}\n\n# Contesto del progetto — rispetta SEMPRE le regole di steering qui sotto e i pattern esistenti:\n${grounding}`
+				: docSys;
+			// pureSystem=true: niente prompt agentico generico, solo doc + contesto mirato.
+			const raw = await complete(this.registry, [{ role: 'user', content: userPrompt }], sys, undefined, undefined, true);
 			// Rimuove l'eventuale ragionamento dei modelli "thinking" dal documento.
 			const content = splitThink(raw).answer.trim() || raw.trim();
 			const dir = vscode.Uri.joinPath(root, spec.slug);
@@ -1190,11 +1207,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			b.addEventListener('click', function () { vscode.postMessage({ type: 'specMode', specMode: mode }); card.remove(); });
 			card.appendChild(b);
 		}
-		mb('Passo-passo', 'step', true);
-		mb('Veloce (tutto)', 'fast', false);
-		mb('Solo requirements', 'single:requirements', false);
-		mb('Solo design', 'single:design', false);
-		mb('Solo tasks', 'single:tasks', false);
+		mb('🛠 Funzionalità (passo-passo)', 'step', true);
+		mb('🐞 Bugfix', 'bugfix', false);
+		mb('⚡ Quick Plan (veloce)', 'fast', false);
+		mb('📄 Solo requirements', 'single:requirements', false);
+		mb('📄 Solo design', 'single:design', false);
+		mb('📄 Solo tasks', 'single:tasks', false);
 		log.appendChild(card); log.scrollTop = log.scrollHeight;
 	}
 	function renderSpecOffer() {

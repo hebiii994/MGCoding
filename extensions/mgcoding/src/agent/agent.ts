@@ -106,6 +106,12 @@ async function buildActiveContext(): Promise<string> {
 	return parts.join('\n\n');
 }
 
+/** Contesto di "ancoraggio" per la generazione spec: struttura progetto + steering (senza prompt agentico). */
+export async function buildGroundingContext(): Promise<string> {
+	const [project, steering] = await Promise.all([buildProjectContext(), buildSteeringContext()]);
+	return [project, steering].filter(Boolean).join('\n\n');
+}
+
 export async function buildSystemPrompt(extra?: string): Promise<string> {
 	const [project, steering, active] = await Promise.all([buildProjectContext(), buildSteeringContext(), buildActiveContext()]);
 	return [BASE_SYSTEM, project, steering, active, extra].filter(Boolean).join('\n\n');
