@@ -81,6 +81,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	private pendingSpecText = '';
 	/** Spec estratte da un messaggio multi-spec, in attesa di scelta. */
 	private pendingSpecs: { title: string; desc: string }[] = [];
+	/** Spec rimanenti da generare dopo la prima (quando se ne chiedono più di una). */
+	private specQueue: { title: string; desc: string }[] = [];
 	/** Motore Whisper incluso (auto-avviato) per lo STT senza server esterno. */
 	private readonly whisper: WhisperEngine;
 	private readonly disposables: vscode.Disposable[] = [];
@@ -562,37 +564,63 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		return long || (kw && multiSentence);
 	}
 
+	/** Estrae spec definite con blocchi espliciti "=== SPEC_START: Titolo === ... === SPEC_END ===". */
+	private parseExplicitSpecs(text: string): { title: string; desc: string }[] {
+		const out: { title: string; desc: string }[] = [];
+		const re = /===\s*SPEC_START\s*:?\s*(.+?)\s*===([\s\S]*?)===\s*SPEC_END\s*===/gi;
+		let m: RegExpExecArray | null;
+		while ((m = re.exec(text))) {
+			const title = m[1].trim();
+			const desc = m[2].trim();
+			if (title) {
+				out.push({ title, desc });
+			}
+		}
+		return out;
+	}
+
 	/** Euristica: il messaggio descrive PIÙ spec distinte? */
 	private isMultiSpec(text: string): boolean {
+		if (this.parseExplicitSpecs(text).length >= 2) {
+			return true;
+		}
 		const t = text.toLowerCase();
+		// "spec" come parola e i delimitatori di blocco (SPEC_START contiene underscore,
+		// quindi non è una parola intera: lo cerco a parte).
 		const count = (t.match(/\bspec\b/g) || []).length;
-		const enumWords = /(una per|l['e ]altra|un['a ]altra|la seconda|la terza|inoltre|prima.*pois?|\b1\)|\b2\)|\b3\))/.test(t);
-		return count >= 2 || (enumWords && this.shouldOfferSpec(text));
+		const blocks = (t.match(/spec_start/g) || []).length;
+		const enumWords = /(due|tre|quattro)\s+(cose|funzional|spec|feature)|una per|l['e ]altra|un['a ]altra|la seconda|la terza|inoltre|\b[123][.)]\s/.test(t);
+		return count >= 2 || blocks >= 2 || (enumWords && this.shouldOfferSpec(text));
 	}
 
 	/** Estrae l'elenco delle spec da un messaggio multi-spec e propone la prioritizzazione. */
 	private async offerMultiSpec(text: string): Promise<void> {
-		this.post({ type: 'busy', value: true });
-		let specs: { title: string; desc: string }[] = [];
-		try {
-			const sys = `Dall'idea dell'utente estrai le SINGOLE funzionalità/spec distinte. Rispondi SOLO con JSON: {"specs":[{"title":"...","desc":"breve"}]} (2-5 voci). Nessun altro testo.`;
-			const raw = await complete(this.registry, [{ role: 'user', content: text }], sys, undefined, undefined, true);
-			const m = raw.match(/\{[\s\S]*\}/);
-			if (m) {
-				const obj = JSON.parse(m[0]) as { specs?: { title?: string; desc?: string }[] };
-				specs = (obj.specs ?? []).filter(s => s.title).map(s => ({ title: String(s.title), desc: String(s.desc ?? '') })).slice(0, 5);
+		// 1) Blocchi espliciti (=== SPEC_START: ... ===): parse diretto, niente LLM.
+		let specs: { title: string; desc: string }[] = this.parseExplicitSpecs(text);
+		// 2) Altrimenti chiedo al modello di separarle.
+		if (specs.length < 2) {
+			this.post({ type: 'busy', value: true });
+			try {
+				const sys = `Dall'idea dell'utente estrai le SINGOLE funzionalità/spec distinte. Rispondi SOLO con JSON: {"specs":[{"title":"...","desc":"breve"}]} (2-5 voci). Nessun altro testo.`;
+				const raw = await complete(this.registry, [{ role: 'user', content: text }], sys, undefined, undefined, true);
+				const m = raw.match(/\{[\s\S]*\}/);
+				if (m) {
+					const obj = JSON.parse(m[0]) as { specs?: { title?: string; desc?: string }[] };
+					specs = (obj.specs ?? []).filter(s => s.title).map(s => ({ title: String(s.title), desc: String(s.desc ?? '') }));
+				}
+			} catch {
+				// fallback sotto
 			}
-		} catch {
-			// fallback sotto
+			this.post({ type: 'busy', value: false });
 		}
-		this.post({ type: 'busy', value: false });
+		specs = specs.slice(0, 5);
 		if (specs.length < 2) {
 			// Non sono riuscito a separarle: ripiego sull'offerta singola.
 			this.post({ type: 'specOffer' });
 			return;
 		}
 		this.pendingSpecs = specs;
-		this.post({ type: 'assistant', text: `Ho individuato ${specs.length} spec distinte. Quale vuoi creare per prima?` });
+		this.post({ type: 'assistant', text: `Ho individuato ${specs.length} spec distinte. Le creo tutte: quale vuoi per prima?` });
 		this.post({ type: 'specPrioritize', specs });
 	}
 
@@ -623,11 +651,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		if (!spec) {
 			return;
 		}
+		// Le altre spec restano in coda: verranno generate dopo, con la stessa modalità.
+		this.specQueue = this.pendingSpecs.filter((_, i) => i !== index);
+		this.pendingSpecs = [];
 		session.mode = 'spec';
 		session.spec = { name: spec.title.slice(0, 60), slug: slugify(spec.title), idea: `${spec.title}: ${spec.desc}`, phase: 'requirements' };
 		await this.save();
 		await this.sendState();
-		this.post({ type: 'assistant', text: `📋 Spec «${spec.title}». Come vuoi procedere?` });
+		const queued = this.specQueue.length ? ` (poi le altre ${this.specQueue.length})` : '';
+		this.post({ type: 'assistant', text: `📋 Spec «${spec.title}»${queued}. Come vuoi procedere?` });
 		this.post({ type: 'specModeChoose' });
 	}
 
@@ -683,7 +715,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			spec.phase = 'done';
 			await this.save();
 			this.post({ type: 'assistant', text: `✅ Spec «${spec.name}» generata (requirements + design + tasks) in \`.mg/specs/${spec.slug}/\`.` });
-			this.post({ type: 'specActions', phase: 'done' });
+			if (!this.specQueue.length) {
+				this.post({ type: 'specActions', phase: 'done' });
+			}
+			await this.advanceSpecQueue('fast');
 			return;
 		}
 		if (mode.startsWith('single:')) {
@@ -691,11 +726,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			await this.runSpecPhase(file, undefined, false);
 			spec.phase = 'done';
 			await this.save();
-			this.post({ type: 'assistant', text: `Documento ${file}.md generato. Puoi chiedere gli altri quando vuoi.` });
-			if (file === 'tasks') {
+			this.post({ type: 'assistant', text: `Documento ${file}.md generato per «${spec.name}».` });
+			if (file === 'tasks' && !this.specQueue.length) {
 				this.post({ type: 'specActions', phase: 'done' });
 			}
+			await this.advanceSpecQueue(mode);
 		}
+	}
+
+	/** Passa alla prossima spec in coda (se presente) usando la stessa modalità. */
+	private async advanceSpecQueue(mode: string): Promise<boolean> {
+		const next = this.specQueue.shift();
+		if (!next) {
+			return false;
+		}
+		const session = this.active();
+		session.mode = 'spec';
+		session.spec = { name: next.title.slice(0, 60), slug: slugify(next.title), idea: `${next.title}: ${next.desc}`, phase: 'requirements' };
+		await this.save();
+		await this.sendState();
+		this.post({ type: 'assistant', text: `➡️ Passo alla prossima spec «${next.title}»…` });
+		await this.startSpecMode(mode);
+		return true;
 	}
 
 	private async runSpecPhase(phase: Exclude<SpecPhase, 'done'>, feedback?: string, showActions = true): Promise<void> {
@@ -768,7 +820,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			spec.phase = 'done';
 			await this.save();
 			this.post({ type: 'assistant', text: `✅ Spec «${spec.name}» completata in \`.mg/specs/${spec.slug}/\`. Puoi eseguire i task qui sotto.` });
-			this.post({ type: 'specActions', phase: 'done' });
+			if (!this.specQueue.length) {
+				this.post({ type: 'specActions', phase: 'done' });
+			}
+			// Se c'erano più spec, prosegui con la prossima (sempre passo-passo).
+			await this.advanceSpecQueue('step');
 		}
 	}
 

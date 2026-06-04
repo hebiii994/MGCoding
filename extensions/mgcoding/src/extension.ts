@@ -121,6 +121,15 @@ export function activate(context: vscode.ExtensionContext): void {
 	mcpWatcher.onDidDelete(() => void restartMcp());
 	context.subscriptions.push(mcpWatcher);
 
+	// Aggiorna le viste laterali quando i file di spec/steering/hooks cambiano
+	// (anche quando li crea la chat), così il pannello si popola subito.
+	const treeWatcher = vscode.workspace.createFileSystemWatcher('**/{.mg,.kiro}/{specs,steering,hooks}/**');
+	const refreshTrees = () => { specsTree.refresh(); steeringTree.refresh(); hooksTree.refresh(); };
+	treeWatcher.onDidChange(refreshTrees);
+	treeWatcher.onDidCreate(refreshTrees);
+	treeWatcher.onDidDelete(refreshTrees);
+	context.subscriptions.push(treeWatcher);
+
 	// Comandi
 	context.subscriptions.push(
 		vscode.commands.registerCommand('mgcoding.switchProvider', () => registry.switchProvider()),
