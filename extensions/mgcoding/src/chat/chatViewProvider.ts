@@ -694,6 +694,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	.code-tools { display: flex; gap: 4px; justify-content: flex-end; margin-bottom: 4px; }
 	.code-tools button { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; }
 	.reason { margin-bottom: 6px; font-size: 0.85em; opacity: 0.85; }
+	.speak-btn { display: inline-block; margin-top: 4px; background: transparent; border: none; color: var(--vscode-foreground); opacity: 0.45; cursor: pointer; font-size: 12px; padding: 0 2px; }
+	.speak-btn:hover { opacity: 1; }
 	.reason summary { cursor: pointer; opacity: 0.8; }
 	.reason-body { margin-top: 4px; padding: 6px 8px; border-left: 2px solid var(--vscode-panel-border); white-space: pre-wrap; font-family: var(--vscode-editor-font-family); opacity: 0.8; max-height: 240px; overflow: auto; }
 	#changes { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; margin: 0 8px 6px; padding: 7px 10px; border: 1px solid var(--mg-accent); border-radius: 10px; background: color-mix(in srgb, var(--mg-accent) 12%, transparent); font-size: 12px; }
@@ -816,6 +818,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	var fenceRe = new RegExp(BT + BT + BT + '(\\\\w*)\\\\n?([\\\\s\\\\S]*?)' + BT + BT + BT, 'g');
 	var inlineRe = new RegExp(BT + '([^' + BT + ']+)' + BT, 'g');
 
+	function speak(text) {
+		try {
+			var s = window.speechSynthesis;
+			if (!s || !text) { return; }
+			s.cancel();
+			var u = new SpeechSynthesisUtterance(String(text).slice(0, 4000));
+			u.lang = 'it-IT';
+			s.speak(u);
+		} catch (e) { /* TTS non disponibile */ }
+	}
+	function addSpeakBtn(msgEl, getText) {
+		var b = document.createElement('button'); b.className = 'speak-btn'; b.title = 'Leggi ad alta voce'; b.textContent = '\\uD83D\\uDD0A';
+		b.addEventListener('click', function () { speak(getText()); });
+		msgEl.appendChild(b);
+	}
 	function esc(t) { return t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 	function mdToHtml(src) {
 		var blocks = [];
@@ -893,6 +910,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		var rbody = document.createElement('div'); rbody.className = 'reason-body'; reason.appendChild(rbody);
 		var ans = document.createElement('div'); ans.className = 'answer';
 		el.appendChild(reason); el.appendChild(ans);
+		addSpeakBtn(el, function () { return ans.textContent; });
 		log.appendChild(el); log.scrollTop = log.scrollHeight;
 		return { el: el, reason: reason, rbody: rbody, ans: ans, raw: '' };
 	}
@@ -907,7 +925,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	function addStatic(cls, text) {
 		ensureCleared();
 		var el = document.createElement('div'); el.className = 'msg ' + cls;
-		if (cls === 'assistant') { var a = document.createElement('div'); a.className = 'answer'; a.innerHTML = mdToHtml(text); el.appendChild(a); attachCodeTools(a); }
+		if (cls === 'assistant') { var a = document.createElement('div'); a.className = 'answer'; a.innerHTML = mdToHtml(text); el.appendChild(a); attachCodeTools(a); addSpeakBtn(el, function () { return a.textContent; }); }
 		else { el.textContent = text; }
 		log.appendChild(el); log.scrollTop = log.scrollHeight;
 		return el;
