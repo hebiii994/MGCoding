@@ -38,6 +38,8 @@ interface Session {
 	mode: ChatMode;
 	messages: ChatMessage[];
 	spec?: SpecState;
+	/** true se l'utente ha già rifiutato l'offerta di sessione Spec in questa chat. */
+	specOfferDismissed?: boolean;
 }
 
 /** Nome leggibile del servizio in base all'endpoint OpenAI-compatibile. */
@@ -73,6 +75,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	private sessions: Session[] = [];
 	private activeId = '';
 	private abort?: AbortController;
+	/** Testo in attesa di scelta (offerta sessione Spec / prioritizzazione). */
+	private pendingSpecText = '';
+	/** Spec estratte da un messaggio multi-spec, in attesa di scelta. */
+	private pendingSpecs: { title: string; desc: string }[] = [];
 	private readonly disposables: vscode.Disposable[] = [];
 
 	constructor(
@@ -203,6 +209,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 					if (msg.specMode) {
 						await this.startSpecMode(msg.specMode);
 					}
+					break;
+				case 'specOfferChoice':
+					await this.handleSpecOffer((msg as { choice?: string }).choice ?? '');
+					break;
+				case 'specPick':
+					await this.pickSpec(Number((msg as { index?: number }).index ?? -1));
 					break;
 				case 'specApprove':
 					await this.approveSpec();
@@ -475,6 +487,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 				return;
 			}
 			// Spec già completata e messaggio non legato ai task → prosegui come chat normale.
+		} else if (!session.specOfferDismissed && this.shouldOfferSpec(text)) {
+			// Vibe: il messaggio sembra "da Spec" → offri una sessione Spec.
+			this.pendingSpecText = text;
+			if (this.isMultiSpec(text)) {
+				await this.offerMultiSpec(text);
+			} else {
+				this.post({ type: 'specOffer' });
+			}
+			return;
 		}
 		if (session.title === 'Nuova sessione') {
 			session.title = (text || 'Immagine').slice(0, 40);
@@ -507,6 +528,86 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			await this.save();
 			await this.sendState();
 		}
+	}
+
+	// ---- Rilevamento intento: offerta/prioritizzazione Spec ----
+
+	/** Euristica: il messaggio descrive una funzionalità adatta a una Spec? */
+	private shouldOfferSpec(text: string): boolean {
+		const t = text.toLowerCase();
+		const long = text.length > 160;
+		const kw = /(spec|funzional|implement|vorrei|servirebb|men[uù]|sistema|opzion|feature|gestione|workflow|crea(re)?\s+(un|una)\b)/.test(t);
+		const multiSentence = (text.match(/[.!?]/g) || []).length >= 2 || text.split('\n').length >= 2;
+		return long || (kw && multiSentence);
+	}
+
+	/** Euristica: il messaggio descrive PIÙ spec distinte? */
+	private isMultiSpec(text: string): boolean {
+		const t = text.toLowerCase();
+		const count = (t.match(/\bspec\b/g) || []).length;
+		const enumWords = /(una per|l['e ]altra|un['a ]altra|la seconda|la terza|inoltre|prima.*pois?|\b1\)|\b2\)|\b3\))/.test(t);
+		return count >= 2 || (enumWords && this.shouldOfferSpec(text));
+	}
+
+	/** Estrae l'elenco delle spec da un messaggio multi-spec e propone la prioritizzazione. */
+	private async offerMultiSpec(text: string): Promise<void> {
+		this.post({ type: 'busy', value: true });
+		let specs: { title: string; desc: string }[] = [];
+		try {
+			const sys = `Dall'idea dell'utente estrai le SINGOLE funzionalità/spec distinte. Rispondi SOLO con JSON: {"specs":[{"title":"...","desc":"breve"}]} (2-5 voci). Nessun altro testo.`;
+			const raw = await complete(this.registry, [{ role: 'user', content: text }], sys, undefined, undefined, true);
+			const m = raw.match(/\{[\s\S]*\}/);
+			if (m) {
+				const obj = JSON.parse(m[0]) as { specs?: { title?: string; desc?: string }[] };
+				specs = (obj.specs ?? []).filter(s => s.title).map(s => ({ title: String(s.title), desc: String(s.desc ?? '') })).slice(0, 5);
+			}
+		} catch {
+			// fallback sotto
+		}
+		this.post({ type: 'busy', value: false });
+		if (specs.length < 2) {
+			// Non sono riuscito a separarle: ripiego sull'offerta singola.
+			this.post({ type: 'specOffer' });
+			return;
+		}
+		this.pendingSpecs = specs;
+		this.post({ type: 'assistant', text: `Ho individuato ${specs.length} spec distinte. Quale vuoi creare per prima?` });
+		this.post({ type: 'specPrioritize', specs });
+	}
+
+	/** Risposta all'offerta di sessione Spec (singola). */
+	private async handleSpecOffer(choice: string): Promise<void> {
+		const session = this.active();
+		const text = this.pendingSpecText;
+		this.pendingSpecText = '';
+		if (choice === 'yes' && text) {
+			const name = (text.split('\n')[0] || 'Nuova funzionalità').slice(0, 60);
+			session.mode = 'spec';
+			session.spec = { name, slug: slugify(name), idea: text, phase: 'requirements' };
+			await this.save();
+			await this.sendState();
+			this.post({ type: 'assistant', text: `📋 Spec «${name}». Come vuoi procedere?` });
+			this.post({ type: 'specModeChoose' });
+		} else if (choice === 'no' && text) {
+			session.specOfferDismissed = true;
+			await this.handleSend(text);
+		}
+		// cancel → nulla
+	}
+
+	/** Sceglie quale spec (tra quelle multiple) creare per prima. */
+	private async pickSpec(index: number): Promise<void> {
+		const session = this.active();
+		const spec = this.pendingSpecs[index];
+		if (!spec) {
+			return;
+		}
+		session.mode = 'spec';
+		session.spec = { name: spec.title.slice(0, 60), slug: slugify(spec.title), idea: `${spec.title}: ${spec.desc}`, phase: 'requirements' };
+		await this.save();
+		await this.sendState();
+		this.post({ type: 'assistant', text: `📋 Spec «${spec.title}». Come vuoi procedere?` });
+		this.post({ type: 'specModeChoose' });
 	}
 
 	// ---- Workflow Spec guidato (requirements → design → tasks → esecuzione) ----
@@ -1096,6 +1197,33 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		mb('Solo tasks', 'single:tasks', false);
 		log.appendChild(card); log.scrollTop = log.scrollHeight;
 	}
+	function renderSpecOffer() {
+		ensureCleared();
+		var card = document.createElement('div'); card.className = 'spec-actions';
+		var lbl = document.createElement('span'); lbl.className = 'sa-label'; lbl.textContent = 'Sembra un lavoro adatto a una Spec. Avviare una sessione Spec dedicata?';
+		card.appendChild(lbl);
+		function ob(label, choice, primary) {
+			var b = document.createElement('button'); b.textContent = label; if (primary) { b.className = 'primary'; }
+			b.addEventListener('click', function () { vscode.postMessage({ type: 'specOfferChoice', choice: choice }); card.remove(); });
+			card.appendChild(b);
+		}
+		ob('Sì', 'yes', true); ob('No', 'no', false); ob('Annulla', 'cancel', false);
+		log.appendChild(card); log.scrollTop = log.scrollHeight;
+	}
+	function renderSpecPrioritize(specs) {
+		ensureCleared();
+		var card = document.createElement('div'); card.className = 'spec-actions';
+		var lbl = document.createElement('span'); lbl.className = 'sa-label'; lbl.style.width = '100%'; lbl.textContent = 'Quale spec creare per prima?';
+		card.appendChild(lbl);
+		(specs || []).forEach(function (s, i) {
+			var b = document.createElement('button'); if (i === 0) { b.className = 'primary'; }
+			b.textContent = (i === 0 ? '\\u2605 ' : '') + s.title + (i === 0 ? ' (consigliata)' : '');
+			b.title = s.desc || '';
+			b.addEventListener('click', function () { vscode.postMessage({ type: 'specPick', index: i }); card.remove(); });
+			card.appendChild(b);
+		});
+		log.appendChild(card); log.scrollTop = log.scrollHeight;
+	}
 	function renderSpecActions(phase) {
 		ensureCleared();
 		var card = document.createElement('div'); card.className = 'spec-actions';
@@ -1173,6 +1301,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		else if (m.type === 'sttBusy') { micBtn.classList.toggle('stt-busy', !!m.value); }
 		else if (m.type === 'specActions') { renderSpecActions(m.phase); }
 		else if (m.type === 'specModeChoose') { renderSpecModeChoose(); }
+		else if (m.type === 'specOffer') { renderSpecOffer(); }
+		else if (m.type === 'specPrioritize') { renderSpecPrioritize(m.specs); }
 		else if (m.type === 'run') {
 			if (m.phase === 'start') {
 				ensureCleared();
