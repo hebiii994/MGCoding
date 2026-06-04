@@ -4,7 +4,7 @@
 
 import * as vscode from 'vscode';
 import { runAgent } from '../agent/agentLoop';
-import { complete, buildGroundingContext } from '../agent/agent';
+import { complete, streamPure, buildGroundingContext } from '../agent/agent';
 import { track } from '../analytics/analytics';
 import { changedCount } from '../edit/checkpoint';
 import { SPEC_SYS, slugify, specsRoot, writeAndOpen } from '../specs/specs';
@@ -281,7 +281,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		});
 	}
 
-	private async buildState(): Promise<{ current: string; options: ProviderOption[]; sessions: { id: string; title: string }[]; activeId: string; mode: ChatMode; autopilot: boolean; tokens: number; nativeTools: boolean }> {
+	private async buildState(): Promise<{ current: string; options: ProviderOption[]; sessions: { id: string; title: string }[]; activeId: string; mode: ChatMode; autopilot: boolean; tokens: number; nativeTools: boolean; voiceLang: string }> {
 		const c = vscode.workspace.getConfiguration('mgcoding');
 		const claudeModel = c.get<string>('claude.model', 'claude-opus-4-8');
 		const ollamaModel = c.get<string>('ollama.model', 'qwen2.5-coder:14b');
@@ -324,7 +324,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			mode: this.active().mode,
 			autopilot: c.get<boolean>('autoApprove', false),
 			tokens: Math.round(chars / 4),
-			nativeTools: c.get<boolean>('ollama.nativeTools', false)
+			nativeTools: c.get<boolean>('ollama.nativeTools', false),
+			voiceLang: c.get<string>('voice.lang', 'it-IT')
 		};
 	}
 
@@ -797,15 +798,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			const sys = grounding
 				? `${docSys}\n\n# Contesto del progetto — rispetta SEMPRE le regole di steering qui sotto e i pattern esistenti:\n${grounding}`
 				: docSys;
-			// pureSystem=true: niente prompt agentico generico, solo doc + contesto mirato.
-			const raw = await complete(this.registry, [{ role: 'user', content: userPrompt }], sys, undefined, undefined, true);
-			// Rimuove l'eventuale ragionamento dei modelli "thinking" dal documento.
+			// Streaming "puro" (solo doc + contesto, niente prompt agentico): il documento
+			// compare in chat man mano che viene generato, invece di apparire tutto alla fine.
+			this.post({ type: 'streamStart' });
+			this.abort = new AbortController();
+			let raw = '';
+			try {
+				raw = await streamPure(this.registry, [{ role: 'user', content: userPrompt }], sys, d => this.post({ type: 'streamDelta', text: d }), this.abort.signal);
+			} finally {
+				this.post({ type: 'streamEnd' });
+			}
+			// Rimuove l'eventuale ragionamento dei modelli "thinking" dal documento salvato.
 			const content = splitThink(raw).answer.trim() || raw.trim();
 			const dir = vscode.Uri.joinPath(root, spec.slug);
 			await vscode.workspace.fs.createDirectory(dir);
 			await writeAndOpen(vscode.Uri.joinPath(dir, `${phase}.md`), content);
 			spec[phase] = content;
-			this.post({ type: 'assistant', text: content });
 			if (showActions) {
 				this.post({ type: 'specActions', phase });
 			}
@@ -1180,14 +1188,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	}
 	// Voci disponibili per la sintesi vocale (caricate in modo asincrono dal browser).
 	var mgVoices = [];
+	var mgVoiceLang = 'it-IT';
 	function loadVoices() { try { mgVoices = window.speechSynthesis.getVoices() || []; } catch (e) {} }
 	try { loadVoices(); if (window.speechSynthesis) { window.speechSynthesis.onvoiceschanged = loadVoices; } } catch (e) {}
-	// Rileva in modo euristico se il testo è italiano o inglese (default: italiano).
+	// Rileva in modo euristico se il testo è italiano o inglese, con forte preferenza
+	// per l'italiano (i documenti spec contengono molte parole inglesi EARS come
+	// "WHEN / THE SYSTEM SHALL / IF / THEN" che non devono far scattare l'inglese).
 	function detectLang(t) {
 		var s = ' ' + String(t).toLowerCase() + ' ';
-		var it = (s.match(/[àèéìòù]| (il|lo|la|le|gli|di|che|con|per|non|una|uno|sono|questo|come|anche|perché|cosa|fare|puoi|ciao|grazie|qui|del|della|dei|nel|alla) /g) || []).length;
-		var en = (s.match(/ (the|and|is|are|to|of|you|for|with|this|that|have|will|can|your|here|please|thanks|file|code) /g) || []).length;
-		return en > it ? 'en' : 'it';
+		var it = (s.match(/[àèéìòù]| (il|lo|la|le|gli|di|che|con|per|non|una|uno|sono|questo|come|anche|perché|cosa|fare|puoi|ciao|grazie|qui|del|della|dei|nel|alla|voglio|così|utente|nuova) /g) || []).length;
+		var en = (s.match(/ (and|are|you|for|with|have|will|your|here|please|thanks|file|code|the|this|that) /g) || []).length;
+		return en > it * 1.6 ? 'en' : 'it';
+	}
+	// Sceglie la lingua secondo l'impostazione (auto/it-IT/en-US).
+	function chosenLang(text) {
+		if (mgVoiceLang === 'it-IT') { return 'it'; }
+		if (mgVoiceLang === 'en-US') { return 'en'; }
+		return detectLang(text);
 	}
 	// Sceglie una voce installata che corrisponda alla lingua rilevata.
 	function pickVoice(lang) {
@@ -1201,7 +1218,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			var clean = ttsClean(text);
 			if (!s || !clean) { if (onDone) { onDone(); } return; }
 			s.cancel();
-			var lang = detectLang(clean);
+			var lang = chosenLang(clean);
 			var v = pickVoice(lang);
 			var u = new SpeechSynthesisUtterance(clean.slice(0, 4000));
 			u.lang = v ? v.lang : (lang === 'en' ? 'en-US' : 'it-IT');
@@ -1495,6 +1512,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	window.addEventListener('message', function (event) {
 		var m = event.data;
 		if (m.type === 'state') {
+			mgVoiceLang = m.state.voiceLang || 'it-IT';
 			renderModelMenu(m.state.options, m.state.current, m.state.nativeTools);
 			sessionSel.innerHTML = '';
 			for (var j = 0; j < m.state.sessions.length; j++) {

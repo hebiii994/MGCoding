@@ -447,6 +447,21 @@
 					"default": false,
 					"description": "Invia automaticamente il messaggio dopo la trascrizione vocale."
 				},
+				"mgcoding.voice.lang": {
+					"type": "string",
+					"enum": [
+						"auto",
+						"it-IT",
+						"en-US"
+					],
+					"enumDescriptions": [
+						"Rileva automaticamente la lingua dal testo (con preferenza per l'italiano)",
+						"Leggi sempre in italiano",
+						"Leggi sempre in inglese"
+					],
+					"default": "it-IT",
+					"description": "Lingua della lettura vocale (TTS) delle risposte. \"auto\" prova a indovinare dal testo; imposta una lingua fissa se preferisci."
+				},
 				"mgcoding.tasks.parallel": {
 					"type": "number",
 					"default": 2,

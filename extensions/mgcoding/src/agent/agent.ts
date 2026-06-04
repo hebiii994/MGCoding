@@ -142,6 +142,27 @@ export async function streamChat(
 }
 
 /**
+ * Streaming con system prompt "puro" (solo quello passato, senza prompt agentico):
+ * emette i token man mano. Utile per generare documenti spec mostrandoli in tempo reale.
+ */
+export async function streamPure(
+	registry: ProviderRegistry,
+	messages: ChatMessage[],
+	system: string,
+	onDelta: (text: string) => void,
+	signal?: AbortSignal,
+	providerOverride?: LLMProvider
+): Promise<string> {
+	const provider = providerOverride ?? registry.current();
+	let full = '';
+	for await (const delta of provider.stream({ system, messages, signal })) {
+		full += delta;
+		onDelta(delta);
+	}
+	return full;
+}
+
+/**
  * Completamento non-streaming: ritorna l'intera risposta.
  * Con `pureSystem` usa SOLO `systemExtra` come system prompt (senza il prompt
  * agentico di base): utile per generare documenti puliti (es. spec).
