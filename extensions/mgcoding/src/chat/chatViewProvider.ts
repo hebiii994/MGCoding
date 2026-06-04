@@ -10,6 +10,7 @@ import { changedCount } from '../edit/checkpoint';
 import { SPEC_SYS, slugify, specsRoot, writeAndOpen } from '../specs/specs';
 import { splitThink } from '../util/parsing';
 import { RunReporter } from '../run/runView';
+import { WhisperEngine } from '../stt/whisperEngine';
 import { ProviderRegistry } from '../llm/registry';
 import { ChatMessage } from '../llm/types';
 
@@ -80,6 +81,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	private pendingSpecText = '';
 	/** Spec estratte da un messaggio multi-spec, in attesa di scelta. */
 	private pendingSpecs: { title: string; desc: string }[] = [];
+	/** Motore Whisper incluso (auto-avviato) per lo STT senza server esterno. */
+	private readonly whisper: WhisperEngine;
 	private readonly disposables: vscode.Disposable[] = [];
 
 	constructor(
@@ -87,6 +90,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		private readonly registry: ProviderRegistry,
 		private readonly memento: vscode.Memento
 	) {
+		this.whisper = new WhisperEngine(vscode.Uri.joinPath(extensionUri, 'bin').fsPath);
 		this.sessions = this.memento.get<Session[]>('mgcoding.sessions', []);
 		this.activeId = this.memento.get<string>('mgcoding.activeSession', '');
 		if (this.sessions.length === 0) {
@@ -347,17 +351,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	/** Trascrive l'audio registrato (base64) via endpoint STT OpenAI-compatibile. */
 	private async transcribeAudio(audioB64: string, mime?: string): Promise<void> {
 		const c = vscode.workspace.getConfiguration('mgcoding');
-		const endpoint = c.get<string>('stt.endpoint', '').trim();
+		let endpoint = c.get<string>('stt.endpoint', '').trim();
+		this.post({ type: 'sttBusy', value: true });
+		// Se non c'è un endpoint configurato, usa il motore Whisper incluso (auto-avviato).
+		if (!endpoint && this.whisper.isAvailable()) {
+			endpoint = (await this.whisper.ensureRunning()) ?? '';
+		}
 		if (!endpoint) {
-			this.post({ type: 'error', text: 'STT non configurato: imposta "mgcoding.stt.endpoint" (es. server whisper locale).' });
+			this.post({ type: 'sttBusy', value: false });
+			this.post({ type: 'error', text: 'STT non disponibile: motore vocale non installato e nessun "mgcoding.stt.endpoint" configurato.' });
 			return;
 		}
-		this.post({ type: 'sttBusy', value: true });
 		try {
 			const buf = Buffer.from(audioB64, 'base64');
 			const form = new FormData();
 			form.append('file', new Blob([buf], { type: mime || 'audio/webm' }), 'audio.webm');
 			form.append('model', c.get<string>('stt.model', 'whisper-1'));
+			form.append('response_format', 'json');
 			const headers: Record<string, string> = {};
 			const key = c.get<string>('stt.apiKey', '').trim();
 			if (key) {
@@ -367,8 +377,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			if (!res.ok) {
 				throw new Error(`HTTP ${res.status}`);
 			}
-			const data = await res.json() as { text?: string };
-			const text = (data.text ?? '').trim();
+			// La risposta può essere JSON ({text}) o testo semplice (whisper.cpp).
+			const body = (await res.text()).trim();
+			let text = body;
+			try {
+				const j = JSON.parse(body) as { text?: string };
+				if (typeof j.text === 'string') {
+					text = j.text;
+				}
+			} catch {
+				// non-JSON: usa il testo grezzo
+			}
+			text = text.trim();
 			this.post({ type: 'sttResult', text, autoSend: c.get<boolean>('stt.autoSend', false) });
 		} catch (err) {
 			this.post({ type: 'error', text: `Trascrizione non riuscita: ${err instanceof Error ? err.message : String(err)}` });
@@ -789,6 +809,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	}
 
 	dispose(): void {
+		this.whisper.dispose();
 		this.disposables.forEach(d => d.dispose());
 	}
 
@@ -958,23 +979,40 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	var hashBtn = document.getElementById('hash');
 	var attachBtn = document.getElementById('attach');
 	var micBtn = document.getElementById('mic');
-	var mgRecording = false, mgRecorder = null, mgChunks = [];
+	var mgRecording = false, mgCtx = null, mgSrc = null, mgProc = null, mgStream = null, mgPcm = [], mgRate = 16000;
+	function encodeWav(chunks, sampleRate) {
+		var len = 0; for (var i = 0; i < chunks.length; i++) { len += chunks[i].length; }
+		var data = new Float32Array(len); var off = 0;
+		for (var j = 0; j < chunks.length; j++) { data.set(chunks[j], off); off += chunks[j].length; }
+		var buf = new ArrayBuffer(44 + data.length * 2); var view = new DataView(buf);
+		function ws(o, s) { for (var k = 0; k < s.length; k++) { view.setUint8(o + k, s.charCodeAt(k)); } }
+		ws(0, 'RIFF'); view.setUint32(4, 36 + data.length * 2, true); ws(8, 'WAVE'); ws(12, 'fmt ');
+		view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+		view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true);
+		view.setUint16(32, 2, true); view.setUint16(34, 16, true); ws(36, 'data'); view.setUint32(40, data.length * 2, true);
+		var p = 44; for (var n = 0; n < data.length; n++) { var v = Math.max(-1, Math.min(1, data[n])); view.setInt16(p, v < 0 ? v * 0x8000 : v * 0x7fff, true); p += 2; }
+		return new Blob([view], { type: 'audio/wav' });
+	}
+	function stopRec() {
+		try { if (mgProc) { mgProc.disconnect(); } if (mgSrc) { mgSrc.disconnect(); } } catch (e) {}
+		try { if (mgStream) { mgStream.getTracks().forEach(function (t) { t.stop(); }); } } catch (e) {}
+		try { if (mgCtx) { mgCtx.close(); } } catch (e) {}
+		var blob = encodeWav(mgPcm, mgRate);
+		var r = new FileReader();
+		r.onloadend = function () { var b64 = String(r.result).split(',')[1] || ''; if (b64) { vscode.postMessage({ type: 'transcribe', text: b64, mime: 'audio/wav' }); } };
+		r.readAsDataURL(blob);
+		mgRecording = false; micBtn.classList.remove('rec'); mgPcm = [];
+	}
 	micBtn.addEventListener('click', async function () {
-		if (mgRecording && mgRecorder) { mgRecorder.stop(); return; }
+		if (mgRecording) { stopRec(); return; }
 		try {
-			var stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-			mgChunks = [];
-			mgRecorder = new MediaRecorder(stream);
-			mgRecorder.ondataavailable = function (e) { if (e.data && e.data.size) { mgChunks.push(e.data); } };
-			mgRecorder.onstop = function () {
-				try { stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
-				var blob = new Blob(mgChunks, { type: (mgRecorder && mgRecorder.mimeType) || 'audio/webm' });
-				var r = new FileReader();
-				r.onloadend = function () { var b64 = String(r.result).split(',')[1] || ''; if (b64) { vscode.postMessage({ type: 'transcribe', text: b64, mime: blob.type }); } };
-				r.readAsDataURL(blob);
-				mgRecording = false; micBtn.classList.remove('rec');
-			};
-			mgRecorder.start();
+			mgStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+			mgCtx = new (window.AudioContext || window.webkitAudioContext)();
+			mgRate = mgCtx.sampleRate; mgPcm = [];
+			mgSrc = mgCtx.createMediaStreamSource(mgStream);
+			mgProc = mgCtx.createScriptProcessor(4096, 1, 1);
+			mgProc.onaudioprocess = function (e) { mgPcm.push(new Float32Array(e.inputBuffer.getChannelData(0))); };
+			mgSrc.connect(mgProc); mgProc.connect(mgCtx.destination);
 			mgRecording = true; micBtn.classList.add('rec');
 		} catch (e) {
 			vscode.postMessage({ type: 'sttError', text: (e && e.message) ? e.message : String(e) });

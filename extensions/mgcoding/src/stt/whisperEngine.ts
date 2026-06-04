@@ -5,7 +5,7 @@
  *  NB: i binari/modello vengono scaricati in fase di build da build/mgcoding/fetch-stt.mjs.
  *--------------------------------------------------------------------------------------------*/
 
-import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
+import { ChildProcess, spawn } from 'child_process';
 import * as fs from 'fs';
 import * as net from 'net';
 import * as path from 'path';
@@ -46,7 +46,7 @@ function waitForPort(port: number, timeoutMs: number): Promise<boolean> {
 
 /** Gestisce il server whisper.cpp incluso: lo avvia su richiesta e fornisce l'endpoint. */
 export class WhisperEngine {
-	private proc?: ChildProcessWithoutNullStreams;
+	private proc?: ChildProcess;
 	private port = 0;
 	private starting?: Promise<string | undefined>;
 
@@ -96,8 +96,8 @@ export class WhisperEngine {
 	}
 
 	private endpoint(): string {
-		// whisper.cpp server espone un endpoint OpenAI-compatibile.
-		return `http://127.0.0.1:${this.port}/v1/audio/transcriptions`;
+		// whisper.cpp server: endpoint di trascrizione (multipart 'file', response_format json).
+		return `http://127.0.0.1:${this.port}/inference`;
 	}
 
 	dispose(): void {
