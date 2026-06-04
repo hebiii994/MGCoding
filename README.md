@@ -3,7 +3,7 @@
 [![Latest release](https://img.shields.io/github/v/release/hebiii994/MGCoding)](https://github.com/hebiii994/MGCoding/releases/latest)
 [![Download](https://img.shields.io/github/downloads/hebiii994/MGCoding/total)](https://github.com/hebiii994/MGCoding/releases)
 
-**MGCoding** è un IDE agentico *spec-driven*, fork di [Visual Studio Code / Code-OSS](https://github.com/microsoft/vscode). Porta un agente di codifica completo dentro l'editor, con **LLM locali (Ollama)** oppure **modelli cloud (Claude, ChatGPT, Gemini, …)**, scegliendo liberamente quale usare.
+**MGCoding** è un IDE agentico *spec-driven*, fork di [Visual Studio Code / Code-OSS](https://github.com/microsoft/vscode). Porta un agente di codifica completo dentro l'editor — con workflow spec (requirements → design → tasks), steering, hook e MCP — usando **LLM locali (Ollama)** oppure **modelli cloud (Claude, ChatGPT, Gemini, …)**, a tua scelta.
 
 > Basato su Code-OSS sotto licenza [MIT](LICENSE.txt). MGCoding non è affiliato a Microsoft.
 

@@ -1,6 +1,6 @@
 # Contribuire a MGCoding
 
-Grazie per l'interesse verso MGCoding! Questo documento spiega come segnalare problemi e proporre modifiche.
+Grazie per l'interesse verso MGCoding! Questa guida spiega come segnalare problemi e proporre modifiche.
 
 MGCoding è un fork di [Visual Studio Code / Code-OSS](https://github.com/microsoft/vscode) (Microsoft, licenza MIT). Per problemi che riguardano il *core* dell'editor (non specifici di MGCoding) la documentazione e gli issue di VS Code restano un riferimento utile.
 
