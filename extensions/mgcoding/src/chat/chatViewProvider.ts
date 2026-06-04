@@ -113,7 +113,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		webviewView.webview.options = { enableScripts: true, localResourceRoots: [this.extensionUri] };
 		webviewView.webview.html = this.getHtml();
 
-		webviewView.webview.onDidReceiveMessage(async (msg: { type: string; text?: string; id?: string; mode?: ChatMode; images?: string[] }) => {
+		webviewView.webview.onDidReceiveMessage(async (msg: { type: string; text?: string; id?: string; mode?: ChatMode; specMode?: string; images?: string[] }) => {
 			switch (msg.type) {
 				case 'ready':
 					await this.sendState();
@@ -190,6 +190,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 					break;
 				case 'guidedSetup':
 					await vscode.commands.executeCommand('mgcoding.guidedSetup');
+					break;
+				case 'specMode':
+					if (msg.specMode) {
+						await this.startSpecMode(msg.specMode);
+					}
 					break;
 				case 'specApprove':
 					await this.approveSpec();
@@ -481,7 +486,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		if (!session.spec) {
 			const name = (text.trim().split('\n')[0] || 'Nuova funzionalità').slice(0, 60);
 			session.spec = { name, slug: slugify(name), idea: text.trim(), phase: 'requirements' };
-			await this.runSpecPhase('requirements');
+			// Chiede COME procedere (combo): passo-passo / veloce / singolo file.
+			this.post({ type: 'assistant', text: `📋 Spec «${name}». Come vuoi procedere?` });
+			this.post({ type: 'specModeChoose' });
 			return true;
 		}
 		// Fase in corso: l'utente fornisce indicazioni → rigenero la fase corrente.
@@ -489,7 +496,40 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		return true;
 	}
 
-	private async runSpecPhase(phase: Exclude<SpecPhase, 'done'>, feedback?: string): Promise<void> {
+	/** Avvia la spec nella modalità scelta dall'utente. */
+	private async startSpecMode(mode: string): Promise<void> {
+		const spec = this.active().spec;
+		if (!spec) {
+			return;
+		}
+		if (mode === 'step') {
+			await this.runSpecPhase('requirements');
+			return;
+		}
+		if (mode === 'fast') {
+			for (const phase of ['requirements', 'design', 'tasks'] as const) {
+				spec.phase = phase;
+				await this.runSpecPhase(phase, undefined, false);
+			}
+			spec.phase = 'done';
+			await this.save();
+			this.post({ type: 'assistant', text: `✅ Spec «${spec.name}» generata (requirements + design + tasks) in \`.mg/specs/${spec.slug}/\`.` });
+			this.post({ type: 'specActions', phase: 'done' });
+			return;
+		}
+		if (mode.startsWith('single:')) {
+			const file = mode.slice('single:'.length) as Exclude<SpecPhase, 'done'>;
+			await this.runSpecPhase(file, undefined, false);
+			spec.phase = 'done';
+			await this.save();
+			this.post({ type: 'assistant', text: `Documento ${file}.md generato. Puoi chiedere gli altri quando vuoi.` });
+			if (file === 'tasks') {
+				this.post({ type: 'specActions', phase: 'done' });
+			}
+		}
+	}
+
+	private async runSpecPhase(phase: Exclude<SpecPhase, 'done'>, feedback?: string, showActions = true): Promise<void> {
 		const session = this.active();
 		const spec = session.spec;
 		const root = specsRoot();
@@ -523,7 +563,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			await writeAndOpen(vscode.Uri.joinPath(dir, `${phase}.md`), content);
 			spec[phase] = content;
 			this.post({ type: 'assistant', text: content });
-			this.post({ type: 'specActions', phase });
+			if (showActions) {
+				this.post({ type: 'specActions', phase });
+			}
 			await this.save();
 		} catch (err) {
 			this.post({ type: 'error', text: err instanceof Error ? err.message : String(err) });
@@ -951,6 +993,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		b.addEventListener('click', function () { vscode.postMessage({ type: msg }); card.remove(); });
 		card.appendChild(b);
 	}
+	function renderSpecModeChoose() {
+		ensureCleared();
+		var card = document.createElement('div'); card.className = 'spec-actions';
+		var lbl = document.createElement('span'); lbl.className = 'sa-label'; lbl.textContent = 'Come procedo con la spec?';
+		card.appendChild(lbl);
+		function mb(label, mode, primary) {
+			var b = document.createElement('button'); b.textContent = label; if (primary) { b.className = 'primary'; }
+			b.addEventListener('click', function () { vscode.postMessage({ type: 'specMode', specMode: mode }); card.remove(); });
+			card.appendChild(b);
+		}
+		mb('Passo-passo', 'step', true);
+		mb('Veloce (tutto)', 'fast', false);
+		mb('Solo requirements', 'single:requirements', false);
+		mb('Solo design', 'single:design', false);
+		mb('Solo tasks', 'single:tasks', false);
+		log.appendChild(card); log.scrollTop = log.scrollHeight;
+	}
 	function renderSpecActions(phase) {
 		ensureCleared();
 		var card = document.createElement('div'); card.className = 'spec-actions';
@@ -1025,6 +1084,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		else if (m.type === 'busy') { document.body.classList.toggle('busy', m.value); }
 		else if (m.type === 'changes') { renderChanges(m.count || 0); }
 		else if (m.type === 'specActions') { renderSpecActions(m.phase); }
+		else if (m.type === 'specModeChoose') { renderSpecModeChoose(); }
 		else if (m.type === 'run') {
 			if (m.phase === 'start') {
 				ensureCleared();
