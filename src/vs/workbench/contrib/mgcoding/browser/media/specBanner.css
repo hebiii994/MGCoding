@@ -1,0 +1,79 @@
+/*---------------------------------------------------------------------------------------------
+ *  MGCoding - stile della barra "Spec" in alto (stepper a fasi + azioni)
+ *  Mirato ai link-comando della spec: non altera gli altri banner.
+ *--------------------------------------------------------------------------------------------*/
+
+.monaco-workbench .part.banner .message-container {
+	display: flex;
+	align-items: center;
+}
+
+.monaco-workbench .part.banner .message-container p {
+	display: inline-flex;
+	align-items: center;
+	gap: 1px;
+}
+
+/* Nome della spec (chip a sinistra) */
+.monaco-workbench .part.banner .message-container > p > strong:first-child {
+	font-weight: 600;
+	margin-right: 8px;
+	max-width: 30ch;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* Link-comando della spec resi come pill cliccabili */
+.monaco-workbench .part.banner .message-container a[data-href^="command:mgcoding."] {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 1px 8px;
+	margin: 0 1px;
+	border-radius: 10px;
+	text-decoration: none;
+	color: var(--vscode-banner-foreground);
+	opacity: 0.82;
+}
+
+.monaco-workbench .part.banner .message-container a[data-href^="command:mgcoding."]:hover {
+	background: rgba(255, 255, 255, 0.16);
+	opacity: 1;
+	text-decoration: none;
+}
+
+/* Fase corrente evidenziata (etichetta in grassetto) */
+.monaco-workbench .part.banner .message-container a[data-href^="command:mgcoding.specOpen"]:has(strong) {
+	background: rgba(255, 255, 255, 0.24);
+	opacity: 1;
+}
+
+.monaco-workbench .part.banner .message-container a[data-href^="command:mgcoding.specOpen"] strong {
+	font-weight: 600;
+}
+
+/* Separatori (chevron) più tenui */
+.monaco-workbench .part.banner .message-container .codicon-chevron-right {
+	opacity: 0.4;
+	font-size: 13px;
+	margin: 0 1px;
+}
+
+/* "Continue" come bottone pieno d'accento */
+.monaco-workbench .part.banner .message-container a[data-href="command:mgcoding.runSpecTasksHere"] {
+	background: var(--vscode-button-background, rgba(0, 0, 0, 0.28));
+	color: var(--vscode-button-foreground, var(--vscode-banner-foreground));
+	font-weight: 600;
+	opacity: 1;
+	margin-left: 6px;
+}
+
+.monaco-workbench .part.banner .message-container a[data-href="command:mgcoding.runSpecTasksHere"]:hover {
+	background: var(--vscode-button-hoverBackground, rgba(0, 0, 0, 0.4));
+}
+
+/* "Sync Files" leggermente separato dallo stepper */
+.monaco-workbench .part.banner .message-container a[data-href="command:mgcoding.specSync"] {
+	margin-left: 8px;
+}

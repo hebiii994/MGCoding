@@ -3,6 +3,7 @@
  *  Mostra un banner quando è attivo un file di una spec (.mg/specs o .kiro/specs).
  *--------------------------------------------------------------------------------------------*/
 
+import './media/specBanner.css';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { MarkdownString } from '../../../../base/common/htmlContent.js';
 import { Codicon } from '../../../../base/common/codicons.js';
@@ -42,18 +43,36 @@ class SpecBannerContribution extends Disposable implements IWorkbenchContributio
 		return (i >= 0 && parts[i + 1]) ? parts[i + 1] : 'spec';
 	}
 
+	/** Rende leggibile lo slug della cartella spec (trattini → spazi, prima lettera maiuscola). */
+	private prettyName(slug: string): string {
+		const s = slug.replace(/[-_]+/g, ' ').trim();
+		return s ? s.charAt(0).toUpperCase() + s.slice(1) : 'Spec';
+	}
+
+	/** Fase corrente in base al file aperto. */
+	private phaseOf(path: string): 'requirements' | 'design' | 'tasks' {
+		if (/requirements\.md$/i.test(path)) { return 'requirements'; }
+		if (/design\.md$/i.test(path)) { return 'design'; }
+		return 'tasks';
+	}
+
 	private update(): void {
 		const resource = this.editorService.activeEditor?.resource;
 		const path = resource?.path ?? '';
 		if (resource && SPEC_FILE_RE.test(path)) {
 			const feature = this.featureName(path);
+			const phase = this.phaseOf(path);
+			// La fase attiva ha l'etichetta in grassetto (aggancio CSS per evidenziarla).
+			const step = (active: boolean, label: string, cmd: string): string =>
+				active ? `[**${label}**](command:${cmd})` : `[${label}](command:${cmd})`;
+			const chevron = ' $(chevron-right) ';
 			const message = new MarkdownString(
-				`$(checklist) **${feature}** &nbsp; ` +
-				`[1 Requirements](command:mgcoding.specOpenRequirements) › ` +
-				`[2 Design](command:mgcoding.specOpenDesign) › ` +
-				`[3 Task list](command:mgcoding.specOpenTasks) &nbsp;&nbsp;·&nbsp;&nbsp; ` +
-				`[$(sync) Sync Files](command:mgcoding.specSync) &nbsp; ` +
-				`[$(run-all) Continue](command:mgcoding.runSpecTasksHere)`,
+				`**${this.prettyName(feature)}** ` +
+				step(phase === 'requirements', '1 Requirements', 'mgcoding.specOpenRequirements') + chevron +
+				step(phase === 'design', '2 Design', 'mgcoding.specOpenDesign') + chevron +
+				step(phase === 'tasks', '3 Task list', 'mgcoding.specOpenTasks') +
+				` [$(sync) Sync Files](command:mgcoding.specSync)` +
+				` [$(run-all) Continue](command:mgcoding.runSpecTasksHere)`,
 				{ isTrusted: { enabledCommands: SPEC_COMMANDS }, supportThemeIcons: true }
 			);
 			this.bannerService.show({
