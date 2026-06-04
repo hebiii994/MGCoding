@@ -292,16 +292,89 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		this.view?.webview.postMessage(message);
 	}
 
-	/** Mostra un selettore di contesto (file) e inserisce il riferimento @percorso nel composer. */
+	/** Selettore di contesto: file, codebase, problemi, git diff. Inserisce un token nel composer. */
 	private async pickContext(): Promise<void> {
-		const uris = await vscode.workspace.findFiles('**/*', '**/{node_modules,.git,out,out-build,out-vscode,.build,dist,Library,Temp,Logs,obj,bin}/**', 1000);
-		const items = uris
-			.map(u => vscode.workspace.asRelativePath(u, false))
-			.sort()
-			.map(label => ({ label }));
-		const picked = await vscode.window.showQuickPick(items, { placeHolder: 'Aggiungi contesto: scegli un file da allegare (@)', matchOnDetail: true });
-		if (picked) {
-			this.post({ type: 'insertRef', text: `@${picked.label} ` });
+		const cat = await vscode.window.showQuickPick(
+			[
+				{ label: '$(file) File', detail: 'Allega il contenuto di un file (@percorso)', id: 'file' },
+				{ label: '$(symbol-structure) Codebase', detail: 'Struttura del progetto (#codebase)', id: 'codebase' },
+				{ label: '$(warning) Problemi', detail: 'Errori e warning correnti (#problems)', id: 'problems' },
+				{ label: '$(git-compare) Git diff', detail: 'Modifiche non committate (#git)', id: 'git' }
+			],
+			{ placeHolder: 'Aggiungi contesto' }
+		);
+		if (!cat) {
+			return;
+		}
+		if (cat.id === 'file') {
+			const uris = await vscode.workspace.findFiles('**/*', '**/{node_modules,.git,out,out-build,out-vscode,.build,dist,Library,Temp,Logs,obj,bin}/**', 1000);
+			const items = uris.map(u => vscode.workspace.asRelativePath(u, false)).sort().map(label => ({ label }));
+			const picked = await vscode.window.showQuickPick(items, { placeHolder: 'Scegli un file (@)', matchOnDetail: true });
+			if (picked) {
+				this.post({ type: 'insertRef', text: `@${picked.label} ` });
+			}
+			return;
+		}
+		this.post({ type: 'insertRef', text: `#${cat.id} ` });
+	}
+
+	/** Espande i token di contesto #codebase / #problems / #git in blocchi testuali. */
+	private async augmentWithProviders(text: string): Promise<string> {
+		const blocks: string[] = [];
+		if (/#codebase\b/i.test(text)) {
+			blocks.push(await this.codebaseContext());
+		}
+		if (/#problems\b/i.test(text)) {
+			blocks.push(this.problemsContext());
+		}
+		if (/#git\b/i.test(text)) {
+			blocks.push(await this.gitDiffContext());
+		}
+		const ok = blocks.filter(Boolean);
+		return ok.length ? `${text}\n\n${ok.join('\n\n')}` : text;
+	}
+
+	private async codebaseContext(): Promise<string> {
+		const folders = vscode.workspace.workspaceFolders;
+		if (!folders?.length) {
+			return '';
+		}
+		const uris = await vscode.workspace.findFiles('**/*', '**/{node_modules,.git,out,out-build,out-vscode,.build,dist,Library,Temp,Logs,obj,bin}/**', 400);
+		const list = uris.map(u => vscode.workspace.asRelativePath(u, false)).sort().slice(0, 400);
+		return `Contesto #codebase (file del progetto, max 400):\n${list.join('\n')}`;
+	}
+
+	private problemsContext(): string {
+		const out: string[] = [];
+		for (const [uri, diags] of vscode.languages.getDiagnostics()) {
+			for (const d of diags) {
+				if (d.severity === vscode.DiagnosticSeverity.Error || d.severity === vscode.DiagnosticSeverity.Warning) {
+					const sev = d.severity === vscode.DiagnosticSeverity.Error ? 'ERROR' : 'WARN';
+					out.push(`${sev} ${vscode.workspace.asRelativePath(uri, false)}:${d.range.start.line + 1} ${d.message}`);
+				}
+			}
+		}
+		return out.length ? `Contesto #problems (${out.length}):\n${out.slice(0, 100).join('\n')}` : 'Contesto #problems: nessun errore/warning.';
+	}
+
+	private async gitDiffContext(): Promise<string> {
+		const folders = vscode.workspace.workspaceFolders;
+		if (!folders?.length) {
+			return '';
+		}
+		try {
+			const { execFile } = await import('child_process');
+			const cwd = folders[0].uri.fsPath;
+			const diff = await new Promise<string>((resolve) => {
+				execFile('git', ['diff', '--stat', '--', '.'], { cwd, maxBuffer: 1024 * 1024 }, (err, stdout) => resolve(err ? '' : stdout));
+			});
+			const full = await new Promise<string>((resolve) => {
+				execFile('git', ['diff', '--', '.'], { cwd, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => resolve(err ? '' : stdout));
+			});
+			const body = full.slice(0, 12000);
+			return body ? `Contesto #git (git diff):\n${diff}\n\`\`\`diff\n${body}${full.length > 12000 ? '\n…(troncato)' : ''}\n\`\`\`` : 'Contesto #git: nessuna modifica non committata.';
+		} catch {
+			return '';
 		}
 	}
 
@@ -360,7 +433,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		if (session.title === 'Nuova sessione') {
 			session.title = (text || 'Immagine').slice(0, 40);
 		}
-		const userMsg: ChatMessage = { role: 'user', content: await this.augmentWithMentions(text) };
+		const withMentions = await this.augmentWithMentions(text);
+		const userMsg: ChatMessage = { role: 'user', content: await this.augmentWithProviders(withMentions) };
 		if (images?.length) {
 			userMsg.images = images.slice(0, 4);
 		}
