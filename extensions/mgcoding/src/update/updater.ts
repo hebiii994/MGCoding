@@ -2,7 +2,7 @@
  *  MGCoding - controllo aggiornamenti via GitHub Releases (con download + install in-app)
  *--------------------------------------------------------------------------------------------*/
 
-import { spawn } from 'child_process';
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -137,25 +137,30 @@ async function downloadAndInstall(): Promise<void> {
 		return;
 	}
 
-	// Aggiornamento automatico. Uno script .bat (lanciato VIA explorer.exe, così
-	// gira FUORI dal processo di MGCoding e sopravvive alla sua chiusura) attende
-	// la chiusura dell'app, installa in silenzio e riapre l'app aggiornata.
+	// Aggiornamento automatico. Lo script gira sotto il Task Scheduler di Windows
+	// (processo INDIPENDENTE da MGCoding → sopravvive alla chiusura dell'app):
+	// attende la chiusura, installa in silenzio e riapre l'app aggiornata.
 	const exePath = process.execPath;
 	const exeName = exePath.split(/[\\/]/).pop() ?? 'MGCoding.exe';
 	const batPath = path.join(os.tmpdir(), `mgcoding-update-${tag}.bat`);
+	const taskName = 'MGCodingUpdate';
 	const bat = [
 		'@echo off',
 		':wait',
 		`tasklist /FI "IMAGENAME eq ${exeName}" 2>NUL | find /I "${exeName}" >NUL && (timeout /t 1 /nobreak >NUL & goto wait)`,
 		`"${dest}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`,
 		`start "" "${exePath}"`,
+		`schtasks /Delete /F /TN ${taskName} >NUL 2>&1`,
 		'del "%~f0"'
 	].join('\r\n');
 
 	let launchError = '';
 	try {
 		fs.writeFileSync(batPath, bat, 'utf8');
-		spawn('explorer.exe', [batPath], { detached: true, stdio: 'ignore' }).unref();
+		// Crea un task una-tantum e lo esegue subito: gira sotto il servizio
+		// Utilità di pianificazione, fuori dal job di MGCoding.
+		execFileSync('schtasks', ['/Create', '/F', '/TN', taskName, '/SC', 'ONCE', '/ST', '00:00', '/TR', `cmd /c "${batPath}"`], { stdio: 'ignore', windowsHide: true });
+		execFileSync('schtasks', ['/Run', '/TN', taskName], { stdio: 'ignore', windowsHide: true });
 	} catch (err) {
 		launchError = err instanceof Error ? err.message : String(err);
 	}
@@ -173,7 +178,7 @@ async function downloadAndInstall(): Promise<void> {
 	}
 
 	vscode.window.showInformationMessage(`Aggiornamento a MGCoding ${tag} in corso: l'app si chiuderà e si riaprirà aggiornata tra pochi secondi…`);
-	// Chiude MGCoding così l'installer può sostituire i file senza prompt.
+	// Chiude MGCoding così l'installer (avviato dal Task Scheduler) può procedere.
 	setTimeout(() => void vscode.commands.executeCommand('workbench.action.quit'), 1500);
 }
 
