@@ -56,6 +56,8 @@ L'estensione che implementa MGCoding vive in [`extensions/mgcoding`](extensions/
 
 MGCoding è un fork di [Visual Studio Code – Code-OSS](https://github.com/microsoft/vscode) (Microsoft, licenza MIT).
 
+Idea dell'assistente vocale ("Jarvis/Ikki") da [TheSr-Project/SRCoding](https://github.com/TheSr-Project/SRCoding) — grazie!
+
 ## Licenza
 
 Distribuito sotto licenza [MIT](LICENSE.txt). Il codice di Code-OSS è Copyright (c) Microsoft Corporation.
