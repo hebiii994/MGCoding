@@ -900,6 +900,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	.iconbtn:hover { background: var(--vscode-toolbar-hoverBackground, rgba(127,127,127,0.18)); opacity: 1; }
 	.iconbtn.rec { color: var(--vscode-errorForeground); opacity: 1; animation: mgpulse 1s infinite; }
 	.iconbtn.stt-busy { opacity: 0.5; }
+	.iconbtn.on { color: var(--mg-accent); opacity: 1; background: color-mix(in srgb, var(--mg-accent) 18%, transparent); }
+	.iconbtn.speaking { animation: mgpulse 1.4s infinite; }
 	@keyframes mgpulse { 50% { opacity: 0.4; } }
 	#ctxpie { flex: 0 0 auto; display: flex; align-items: center; margin-left: 2px; }
 	#ctxpie svg { display: block; }
@@ -954,6 +956,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			<button class="iconbtn" id="hash" title="Aggiungi contesto (file)">#</button>
 			<button class="iconbtn" id="attach" title="Allega immagine">📎</button>
 			<button class="iconbtn" id="mic" title="Detta a voce (STT)">🎤</button>
+			<button class="iconbtn" id="convo" title="Conversazione vocale a mani libere (parla e ascolta la risposta)">🎧</button>
 			<span id="ctxpie" title="Contesto utilizzato"></span>
 			<span class="spacer"></span>
 			<div id="model-dd">
@@ -979,7 +982,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	var hashBtn = document.getElementById('hash');
 	var attachBtn = document.getElementById('attach');
 	var micBtn = document.getElementById('mic');
+	var convoBtn = document.getElementById('convo');
 	var mgRecording = false, mgCtx = null, mgSrc = null, mgProc = null, mgStream = null, mgPcm = [], mgRate = 16000;
+	var mgHandsFree = false, mgSpeaking = false;
 	function encodeWav(chunks, sampleRate) {
 		var len = 0; for (var i = 0; i < chunks.length; i++) { len += chunks[i].length; }
 		var data = new Float32Array(len); var off = 0;
@@ -993,30 +998,78 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		var p = 44; for (var n = 0; n < data.length; n++) { var v = Math.max(-1, Math.min(1, data[n])); view.setInt16(p, v < 0 ? v * 0x8000 : v * 0x7fff, true); p += 2; }
 		return new Blob([view], { type: 'audio/wav' });
 	}
-	function stopRec() {
-		try { if (mgProc) { mgProc.disconnect(); } if (mgSrc) { mgSrc.disconnect(); } } catch (e) {}
+	function teardownAudio() {
+		try { if (mgProc) { mgProc.onaudioprocess = null; mgProc.disconnect(); } if (mgSrc) { mgSrc.disconnect(); } } catch (e) {}
 		try { if (mgStream) { mgStream.getTracks().forEach(function (t) { t.stop(); }); } } catch (e) {}
 		try { if (mgCtx) { mgCtx.close(); } } catch (e) {}
-		var blob = encodeWav(mgPcm, mgRate);
+		mgCtx = null; mgSrc = null; mgProc = null; mgStream = null;
+	}
+	// Ferma la registrazione e invia l'audio a trascrivere.
+	function stopRec() {
+		if (!mgRecording) { return; }
+		teardownAudio();
+		mgRecording = false; micBtn.classList.remove('rec');
+		var pcm = mgPcm; mgPcm = [];
+		if (!pcm.length) { if (mgHandsFree) { restartListen(); } return; }
+		var blob = encodeWav(pcm, mgRate);
 		var r = new FileReader();
 		r.onloadend = function () { var b64 = String(r.result).split(',')[1] || ''; if (b64) { vscode.postMessage({ type: 'transcribe', text: b64, mime: 'audio/wav' }); } };
 		r.readAsDataURL(blob);
+	}
+	// Annulla la registrazione senza inviare (es. nessun parlato rilevato).
+	function cancelRec() {
+		if (!mgRecording) { return; }
+		teardownAudio();
 		mgRecording = false; micBtn.classList.remove('rec'); mgPcm = [];
 	}
-	micBtn.addEventListener('click', async function () {
-		if (mgRecording) { stopRec(); return; }
+	// In hands-free: dopo un giro a vuoto, torna in ascolto se non è in corso altro.
+	function restartListen() {
+		setTimeout(function () {
+			if (mgHandsFree && !mgRecording && !mgSpeaking && !document.body.classList.contains('busy')) { startRecording(); }
+		}, 250);
+	}
+	async function startRecording() {
+		if (mgRecording) { return; }
 		try {
 			mgStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 			mgCtx = new (window.AudioContext || window.webkitAudioContext)();
 			mgRate = mgCtx.sampleRate; mgPcm = [];
 			mgSrc = mgCtx.createMediaStreamSource(mgStream);
 			mgProc = mgCtx.createScriptProcessor(4096, 1, 1);
-			mgProc.onaudioprocess = function (e) { mgPcm.push(new Float32Array(e.inputBuffer.getChannelData(0))); };
+			var analyser = mgCtx.createAnalyser(); analyser.fftSize = 512;
+			mgSrc.connect(analyser);
+			var win = new Float32Array(analyser.fftSize);
+			var speechStarted = false, silenceStart = 0, startedAt = Date.now();
+			mgProc.onaudioprocess = function (e) {
+				mgPcm.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+				if (!mgHandsFree) { return; }
+				// Rilevamento attività vocale (VAD): stop automatico dopo una pausa.
+				analyser.getFloatTimeDomainData(win);
+				var sum = 0; for (var i = 0; i < win.length; i++) { sum += win[i] * win[i]; }
+				var rms = Math.sqrt(sum / win.length), now = Date.now();
+				if (rms > 0.018) { speechStarted = true; silenceStart = 0; }
+				else if (speechStarted) {
+					if (!silenceStart) { silenceStart = now; }
+					else if (now - silenceStart > 1300) { stopRec(); return; }
+				}
+				if (!speechStarted && now - startedAt > 9000) { cancelRec(); restartListen(); return; }
+				if (now - startedAt > 30000) { stopRec(); return; }
+			};
 			mgSrc.connect(mgProc); mgProc.connect(mgCtx.destination);
 			mgRecording = true; micBtn.classList.add('rec');
 		} catch (e) {
+			mgHandsFree = false; convoBtn.classList.remove('on');
 			vscode.postMessage({ type: 'sttError', text: (e && e.message) ? e.message : String(e) });
 		}
+	}
+	micBtn.addEventListener('click', function () {
+		if (mgRecording) { stopRec(); } else { startRecording(); }
+	});
+	convoBtn.addEventListener('click', function () {
+		mgHandsFree = !mgHandsFree;
+		convoBtn.classList.toggle('on', mgHandsFree);
+		if (mgHandsFree) { startRecording(); }
+		else { try { if (window.speechSynthesis) { window.speechSynthesis.cancel(); } } catch (e) {} mgSpeaking = false; convoBtn.classList.remove('speaking'); cancelRec(); }
 	});
 	var autoBtn = document.getElementById('auto');
 	var ctxPie = document.getElementById('ctxpie');
@@ -1042,15 +1095,36 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	var fenceRe = new RegExp(BT + BT + BT + '(\\\\w*)\\\\n?([\\\\s\\\\S]*?)' + BT + BT + BT, 'g');
 	var inlineRe = new RegExp(BT + '([^' + BT + ']+)' + BT, 'g');
 
-	function speak(text) {
+	// Ripulisce il markdown per una lettura vocale naturale.
+	var symRe = new RegExp('[*_#>' + BT + ']', 'g');
+	function ttsClean(t) {
+		return String(t)
+			.replace(fenceRe, ' . ')
+			.replace(/\\[([^\\]]+)\\]\\([^)]+\\)/g, '$1')
+			.replace(inlineRe, '$1')
+			.replace(symRe, '')
+			.replace(/\\s+/g, ' ')
+			.trim();
+	}
+	function speak(text, onDone) {
 		try {
 			var s = window.speechSynthesis;
-			if (!s || !text) { return; }
+			var clean = ttsClean(text);
+			if (!s || !clean) { if (onDone) { onDone(); } return; }
 			s.cancel();
-			var u = new SpeechSynthesisUtterance(String(text).slice(0, 4000));
+			var u = new SpeechSynthesisUtterance(clean.slice(0, 4000));
 			u.lang = 'it-IT';
+			if (onDone) { u.onend = onDone; u.onerror = onDone; }
 			s.speak(u);
-		} catch (e) { /* TTS non disponibile */ }
+		} catch (e) { if (onDone) { onDone(); } }
+	}
+	// Hands-free: legge la risposta e, al termine, torna in ascolto.
+	function speakThenListen(text) {
+		mgSpeaking = true; convoBtn.classList.add('speaking');
+		speak(text, function () {
+			mgSpeaking = false; convoBtn.classList.remove('speaking');
+			if (mgHandsFree && !mgRecording && !document.body.classList.contains('busy')) { startRecording(); }
+		});
 	}
 	function addSpeakBtn(msgEl, getText) {
 		var b = document.createElement('button'); b.className = 'speak-btn'; b.title = 'Leggi ad alta voce'; b.textContent = '\\uD83D\\uDD0A';
@@ -1345,15 +1419,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		}
 		else if (m.type === 'streamStart') { current = makeAssistant(); }
 		else if (m.type === 'streamDelta') { if (current) { current.raw += m.text; renderAssistant(current); } }
-		else if (m.type === 'streamEnd') { current = null; }
+		else if (m.type === 'streamEnd') { var _et = current ? current.raw : ''; current = null; if (mgHandsFree && _et) { speakThenListen(_et); } }
 		else if (m.type === 'streamCancel') { if (current) { current.el.remove(); current = null; } }
-		else if (m.type === 'assistant') { addStatic('assistant', m.text); }
+		else if (m.type === 'assistant') { addStatic('assistant', m.text); if (mgHandsFree && m.text) { speakThenListen(m.text); } }
 		else if (m.type === 'tool') { lastToolResult = addTool(m.name, m.args); }
 		else if (m.type === 'toolResult') { if (lastToolResult) { lastToolResult.textContent = m.text; log.scrollTop = log.scrollHeight; } }
 		else if (m.type === 'error') { addStatic('error', '⚠ ' + m.text); }
 		else if (m.type === 'busy') { document.body.classList.toggle('busy', m.value); }
 		else if (m.type === 'changes') { renderChanges(m.count || 0); }
-		else if (m.type === 'sttResult') { if (m.text) { input.value = (input.value ? input.value + ' ' : '') + m.text; autoGrow(); input.focus(); if (m.autoSend) { send(); } } }
+		else if (m.type === 'sttResult') { if (m.text) { input.value = (input.value ? input.value + ' ' : '') + m.text; autoGrow(); input.focus(); if (m.autoSend || mgHandsFree) { send(); } } else if (mgHandsFree) { restartListen(); } }
 		else if (m.type === 'sttBusy') { micBtn.classList.toggle('stt-busy', !!m.value); }
 		else if (m.type === 'specActions') { renderSpecActions(m.phase); }
 		else if (m.type === 'specModeChoose') { renderSpecModeChoose(); }
