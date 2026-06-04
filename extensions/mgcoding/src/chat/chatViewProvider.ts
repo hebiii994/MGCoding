@@ -1106,14 +1106,34 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			.replace(/\\s+/g, ' ')
 			.trim();
 	}
+	// Voci disponibili per la sintesi vocale (caricate in modo asincrono dal browser).
+	var mgVoices = [];
+	function loadVoices() { try { mgVoices = window.speechSynthesis.getVoices() || []; } catch (e) {} }
+	try { loadVoices(); if (window.speechSynthesis) { window.speechSynthesis.onvoiceschanged = loadVoices; } } catch (e) {}
+	// Rileva in modo euristico se il testo è italiano o inglese (default: italiano).
+	function detectLang(t) {
+		var s = ' ' + String(t).toLowerCase() + ' ';
+		var it = (s.match(/[àèéìòù]| (il|lo|la|le|gli|di|che|con|per|non|una|uno|sono|questo|come|anche|perché|cosa|fare|puoi|ciao|grazie|qui|del|della|dei|nel|alla) /g) || []).length;
+		var en = (s.match(/ (the|and|is|are|to|of|you|for|with|this|that|have|will|can|your|here|please|thanks|file|code) /g) || []).length;
+		return en > it ? 'en' : 'it';
+	}
+	// Sceglie una voce installata che corrisponda alla lingua rilevata.
+	function pickVoice(lang) {
+		if (!mgVoices.length) { loadVoices(); }
+		for (var i = 0; i < mgVoices.length; i++) { if ((mgVoices[i].lang || '').toLowerCase().indexOf(lang) === 0) { return mgVoices[i]; } }
+		return null;
+	}
 	function speak(text, onDone) {
 		try {
 			var s = window.speechSynthesis;
 			var clean = ttsClean(text);
 			if (!s || !clean) { if (onDone) { onDone(); } return; }
 			s.cancel();
+			var lang = detectLang(clean);
+			var v = pickVoice(lang);
 			var u = new SpeechSynthesisUtterance(clean.slice(0, 4000));
-			u.lang = 'it-IT';
+			u.lang = v ? v.lang : (lang === 'en' ? 'en-US' : 'it-IT');
+			if (v) { u.voice = v; }
 			if (onDone) { u.onend = onDone; u.onerror = onDone; }
 			s.speak(u);
 		} catch (e) { if (onDone) { onDone(); } }
