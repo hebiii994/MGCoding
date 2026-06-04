@@ -326,6 +326,26 @@
 		"configuration": {
 			"title": "MGCoding",
 			"properties": {
+				"mgcoding.stt.endpoint": {
+					"type": "string",
+					"default": "",
+					"description": "Endpoint OpenAI-compatibile per la trascrizione vocale (es. server whisper locale: http://localhost:8000/v1/audio/transcriptions). Vuoto = microfono disattivato."
+				},
+				"mgcoding.stt.model": {
+					"type": "string",
+					"default": "whisper-1",
+					"description": "Modello per la trascrizione vocale (STT)."
+				},
+				"mgcoding.stt.apiKey": {
+					"type": "string",
+					"default": "",
+					"description": "API key per l'endpoint STT (lascia vuoto per server locale senza chiave)."
+				},
+				"mgcoding.stt.autoSend": {
+					"type": "boolean",
+					"default": false,
+					"description": "Invia automaticamente il messaggio dopo la trascrizione vocale."
+				},
 				"mgcoding.tasks.parallel": {
 					"type": "number",
 					"default": 2,

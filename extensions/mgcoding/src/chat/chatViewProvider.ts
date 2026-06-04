@@ -188,6 +188,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 				case 'refreshState':
 					await this.sendState();
 					break;
+				case 'transcribe':
+					if (msg.text) {
+						await this.transcribeAudio(msg.text, (msg as { mime?: string }).mime);
+					}
+					break;
+				case 'sttError':
+					this.post({ type: 'error', text: `Microfono: ${msg.text ?? 'errore'}` });
+					break;
 				case 'guidedSetup':
 					await vscode.commands.executeCommand('mgcoding.guidedSetup');
 					break;
@@ -321,6 +329,39 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			return;
 		}
 		this.post({ type: 'insertRef', text: `#${cat.id} ` });
+	}
+
+	/** Trascrive l'audio registrato (base64) via endpoint STT OpenAI-compatibile. */
+	private async transcribeAudio(audioB64: string, mime?: string): Promise<void> {
+		const c = vscode.workspace.getConfiguration('mgcoding');
+		const endpoint = c.get<string>('stt.endpoint', '').trim();
+		if (!endpoint) {
+			this.post({ type: 'error', text: 'STT non configurato: imposta "mgcoding.stt.endpoint" (es. server whisper locale).' });
+			return;
+		}
+		this.post({ type: 'sttBusy', value: true });
+		try {
+			const buf = Buffer.from(audioB64, 'base64');
+			const form = new FormData();
+			form.append('file', new Blob([buf], { type: mime || 'audio/webm' }), 'audio.webm');
+			form.append('model', c.get<string>('stt.model', 'whisper-1'));
+			const headers: Record<string, string> = {};
+			const key = c.get<string>('stt.apiKey', '').trim();
+			if (key) {
+				headers['authorization'] = `Bearer ${key}`;
+			}
+			const res = await fetch(endpoint, { method: 'POST', headers, body: form });
+			if (!res.ok) {
+				throw new Error(`HTTP ${res.status}`);
+			}
+			const data = await res.json() as { text?: string };
+			const text = (data.text ?? '').trim();
+			this.post({ type: 'sttResult', text, autoSend: c.get<boolean>('stt.autoSend', false) });
+		} catch (err) {
+			this.post({ type: 'error', text: `Trascrizione non riuscita: ${err instanceof Error ? err.message : String(err)}` });
+		} finally {
+			this.post({ type: 'sttBusy', value: false });
+		}
 	}
 
 	/** Espande i token di contesto #codebase / #problems / #git in blocchi testuali. */
@@ -718,6 +759,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	#row { display: flex; align-items: center; gap: 4px; padding: 0 2px; }
 	.iconbtn { flex: 0 0 auto; width: 28px; height: 28px; padding: 0; display: flex; align-items: center; justify-content: center; background: transparent; color: var(--vscode-foreground); border: none; border-radius: 7px; cursor: pointer; opacity: 0.75; font-size: 14px; }
 	.iconbtn:hover { background: var(--vscode-toolbar-hoverBackground, rgba(127,127,127,0.18)); opacity: 1; }
+	.iconbtn.rec { color: var(--vscode-errorForeground); opacity: 1; animation: mgpulse 1s infinite; }
+	.iconbtn.stt-busy { opacity: 0.5; }
+	@keyframes mgpulse { 50% { opacity: 0.4; } }
 	#ctxpie { flex: 0 0 auto; display: flex; align-items: center; margin-left: 2px; }
 	#ctxpie svg { display: block; }
 	.spacer { flex: 1 1 auto; }
@@ -770,6 +814,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		<div id="row">
 			<button class="iconbtn" id="hash" title="Aggiungi contesto (file)">#</button>
 			<button class="iconbtn" id="attach" title="Allega immagine">📎</button>
+			<button class="iconbtn" id="mic" title="Detta a voce (STT)">🎤</button>
 			<span id="ctxpie" title="Contesto utilizzato"></span>
 			<span class="spacer"></span>
 			<div id="model-dd">
@@ -794,6 +839,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	var modeSpec = document.getElementById('mode-spec');
 	var hashBtn = document.getElementById('hash');
 	var attachBtn = document.getElementById('attach');
+	var micBtn = document.getElementById('mic');
+	var mgRecording = false, mgRecorder = null, mgChunks = [];
+	micBtn.addEventListener('click', async function () {
+		if (mgRecording && mgRecorder) { mgRecorder.stop(); return; }
+		try {
+			var stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+			mgChunks = [];
+			mgRecorder = new MediaRecorder(stream);
+			mgRecorder.ondataavailable = function (e) { if (e.data && e.data.size) { mgChunks.push(e.data); } };
+			mgRecorder.onstop = function () {
+				try { stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
+				var blob = new Blob(mgChunks, { type: (mgRecorder && mgRecorder.mimeType) || 'audio/webm' });
+				var r = new FileReader();
+				r.onloadend = function () { var b64 = String(r.result).split(',')[1] || ''; if (b64) { vscode.postMessage({ type: 'transcribe', text: b64, mime: blob.type }); } };
+				r.readAsDataURL(blob);
+				mgRecording = false; micBtn.classList.remove('rec');
+			};
+			mgRecorder.start();
+			mgRecording = true; micBtn.classList.add('rec');
+		} catch (e) {
+			vscode.postMessage({ type: 'sttError', text: (e && e.message) ? e.message : String(e) });
+		}
+	});
 	var autoBtn = document.getElementById('auto');
 	var ctxPie = document.getElementById('ctxpie');
 	var CTX_WINDOW = 128000;
@@ -1101,6 +1169,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		else if (m.type === 'error') { addStatic('error', '⚠ ' + m.text); }
 		else if (m.type === 'busy') { document.body.classList.toggle('busy', m.value); }
 		else if (m.type === 'changes') { renderChanges(m.count || 0); }
+		else if (m.type === 'sttResult') { if (m.text) { input.value = (input.value ? input.value + ' ' : '') + m.text; autoGrow(); input.focus(); if (m.autoSend) { send(); } } }
+		else if (m.type === 'sttBusy') { micBtn.classList.toggle('stt-busy', !!m.value); }
 		else if (m.type === 'specActions') { renderSpecActions(m.phase); }
 		else if (m.type === 'specModeChoose') { renderSpecModeChoose(); }
 		else if (m.type === 'run') {
