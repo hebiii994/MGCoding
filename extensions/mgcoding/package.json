@@ -154,6 +154,10 @@
 				"title": "MGCoding: Autopilot on/off"
 			},
 			{
+				"command": "mgcoding.toggleNativeTools",
+				"title": "MGCoding: Tool nativi Ollama on/off"
+			},
+			{
 				"command": "mgcoding.initSteering",
 				"title": "Inizializza Steering",
 				"icon": "$(add)"
@@ -553,7 +557,7 @@
 				"mgcoding.ollama.nativeTools": {
 					"type": "boolean",
 					"default": false,
-					"description": "Usa il tool-use NATIVO di Ollama (function calling). Molti modelli coder (es. qwen2.5-coder) NON lo supportano e restituiscono la chiamata come testo: in tal caso lascia disattivato (verrà usato il protocollo testuale, più affidabile). Attivalo solo con modelli tool-capable (es. llama3.1)."
+					"description": "Usa il tool-use NATIVO di Ollama (function calling). Attivalo solo con i modelli che lo supportano: nel menu del modello (in chat) i modelli compatibili mostrano un badge 🔧. Con gli altri lascialo OFF (verrà usato il protocollo testuale, più affidabile). Puoi attivarlo/disattivarlo dal menu del modello o dal comando \"MGCoding: Tool nativi Ollama on/off\"."
 				},
 				"mgcoding.autoApprove": {
 					"type": "boolean",

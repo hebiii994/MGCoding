@@ -17,6 +17,8 @@ import { ChatMessage } from '../llm/types';
 interface ProviderOption {
 	id: string;
 	label: string;
+	/** Solo Ollama: il modello supporta il tool-use nativo. */
+	tools?: boolean;
 }
 
 type ChatMode = 'vibe' | 'spec';
@@ -195,6 +197,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 						await this.sendState();
 					}
 					break;
+				case 'toggleNativeTools':
+					{
+						const cfg = vscode.workspace.getConfiguration('mgcoding');
+						await cfg.update('ollama.nativeTools', !cfg.get<boolean>('ollama.nativeTools', false), vscode.ConfigurationTarget.Global);
+						await this.sendState();
+					}
+					break;
 				case 'pickContext':
 					await this.pickContext();
 					break;
@@ -272,7 +281,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		});
 	}
 
-	private async buildState(): Promise<{ current: string; options: ProviderOption[]; sessions: { id: string; title: string }[]; activeId: string; mode: ChatMode; autopilot: boolean; tokens: number }> {
+	private async buildState(): Promise<{ current: string; options: ProviderOption[]; sessions: { id: string; title: string }[]; activeId: string; mode: ChatMode; autopilot: boolean; tokens: number; nativeTools: boolean }> {
 		const c = vscode.workspace.getConfiguration('mgcoding');
 		const claudeModel = c.get<string>('claude.model', 'claude-opus-4-8');
 		const ollamaModel = c.get<string>('ollama.model', 'qwen2.5-coder:14b');
@@ -288,9 +297,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		if (provider === 'ollama' && ollamaModel && !ollamaList.includes(ollamaModel)) {
 			ollamaList.unshift(ollamaModel);
 		}
-		for (const m of ollamaList) {
-			options.push({ id: `ollama:${m}`, label: `Ollama · ${m}` });
-		}
+		// Rileva quali modelli Ollama supportano il tool-use nativo (cache lato provider).
+		const toolCaps = await Promise.all(ollamaList.map(m => this.registry.ollamaModelSupportsTools(m).catch(() => false)));
+		ollamaList.forEach((m, i) => {
+			options.push({ id: `ollama:${m}`, label: `Ollama · ${m}`, tools: toolCaps[i] });
+		});
 
 		// OpenAI-compatibile: modelli esposti dall'endpoint configurato (Gemini/ChatGPT/…).
 		const oaiLabel = openAiProviderLabel(c.get<string>('openai.endpoint', ''));
@@ -312,7 +323,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			activeId: this.activeId,
 			mode: this.active().mode,
 			autopilot: c.get<boolean>('autoApprove', false),
-			tokens: Math.round(chars / 4)
+			tokens: Math.round(chars / 4),
+			nativeTools: c.get<boolean>('ollama.nativeTools', false)
 		};
 	}
 
@@ -972,6 +984,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	.model-item { padding: 6px 9px; border-radius: 6px; font-size: 12px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 	.model-item:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.18)); }
 	.model-item.sel { background: color-mix(in srgb, var(--mg-accent) 22%, transparent); }
+	.model-item .tool-badge { margin-left: 6px; opacity: 0.9; font-size: 11px; }
+	.menu-sep { height: 1px; margin: 4px 2px; background: var(--vscode-dropdown-border, var(--vscode-panel-border)); opacity: 0.6; }
+	.menu-toggle { padding: 6px 9px; border-radius: 6px; font-size: 11px; cursor: pointer; opacity: 0.9; white-space: normal; }
+	.menu-toggle:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.18)); }
 	.toggle { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; background: transparent; border: none; color: var(--vscode-foreground); cursor: pointer; font-size: 12px; padding: 3px 4px; border-radius: 7px; }
 	.toggle:hover { background: var(--vscode-toolbar-hoverBackground, rgba(127,127,127,0.18)); }
 	.toggle .knob { width: 26px; height: 15px; border-radius: 9px; background: var(--vscode-input-border, #5a5a5a); position: relative; transition: background .15s; }
@@ -1348,13 +1364,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	modelBtn.addEventListener('click', function (e) { e.stopPropagation(); modelMenu.classList.toggle('open'); if (modelMenu.classList.contains('open')) { vscode.postMessage({ type: 'refreshState' }); } });
 	document.addEventListener('click', function () { modelMenu.classList.remove('open'); });
 	modelMenu.addEventListener('click', function (e) { e.stopPropagation(); });
-	function renderModelMenu(options, current) {
+	function renderModelMenu(options, current, nativeTools) {
 		modelMenu.innerHTML = '';
+		var hasOllama = false, curOpt = null;
 		for (var i = 0; i < options.length; i++) {
 			(function (o) {
+				if (o.id.indexOf('ollama:') === 0) { hasOllama = true; }
+				if (o.id === current) { curOpt = o; }
 				var it = document.createElement('div');
 				it.className = 'model-item' + (o.id === current ? ' sel' : '');
 				it.textContent = o.label;
+				if (o.tools) {
+					var badge = document.createElement('span');
+					badge.className = 'tool-badge'; badge.textContent = '\\uD83D\\uDD27';
+					badge.title = 'Questo modello supporta il tool-use nativo';
+					it.appendChild(badge);
+				}
 				it.addEventListener('click', function () {
 					modelMenu.classList.remove('open');
 					vscode.postMessage({ type: 'setProvider', id: o.id });
@@ -1362,6 +1387,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 				modelMenu.appendChild(it);
 				if (o.id === current) { modelCur.textContent = o.label; }
 			})(options[i]);
+		}
+		// Toggle dei tool nativi Ollama (mostrato solo se ci sono modelli Ollama).
+		if (hasOllama) {
+			var sep = document.createElement('div'); sep.className = 'menu-sep'; modelMenu.appendChild(sep);
+			var row = document.createElement('div'); row.className = 'menu-toggle';
+			var curIsOllama = curOpt && curOpt.id.indexOf('ollama:') === 0;
+			var hint = curIsOllama ? (curOpt.tools ? ' \\u2014 il modello attuale li supporta \\uD83D\\uDD27' : ' \\u2014 il modello attuale non li dichiara') : '';
+			row.innerHTML = '\\uD83D\\uDD27 Tool nativi Ollama: <b>' + (nativeTools ? 'ON' : 'OFF') + '</b>' + hint;
+			row.title = 'Usa il function-calling nativo di Ollama. Attivalo con i modelli che hanno il badge 🔧; con gli altri lascialo OFF (verrà usato il protocollo testuale, più affidabile).';
+			row.addEventListener('click', function (e) { e.stopPropagation(); vscode.postMessage({ type: 'toggleNativeTools' }); });
+			modelMenu.appendChild(row);
 		}
 	}
 	sessionSel.addEventListener('change', function () { vscode.postMessage({ type: 'switchSession', id: sessionSel.value }); });
@@ -1459,7 +1495,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	window.addEventListener('message', function (event) {
 		var m = event.data;
 		if (m.type === 'state') {
-			renderModelMenu(m.state.options, m.state.current);
+			renderModelMenu(m.state.options, m.state.current, m.state.nativeTools);
 			sessionSel.innerHTML = '';
 			for (var j = 0; j < m.state.sessions.length; j++) {
 				var s = m.state.sessions[j];

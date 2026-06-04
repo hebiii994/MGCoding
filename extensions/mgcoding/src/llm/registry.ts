@@ -121,6 +121,11 @@ export class ProviderRegistry implements vscode.Disposable {
 		return this.ollama.listModels();
 	}
 
+	/** True se il modello Ollama dichiara di supportare il tool-use nativo. */
+	ollamaModelSupportsTools(model: string): Promise<boolean> {
+		return this.ollama.supportsTools(model);
+	}
+
 	listOpenAIModels(): Promise<string[]> {
 		return this.openai.listModels();
 	}

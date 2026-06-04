@@ -53,6 +53,35 @@ export class OllamaProvider implements LLMProvider {
 		}
 	}
 
+	/** Cache delle capability per modello (per non interrogare /api/show ogni volta). */
+	private readonly toolCapCache = new Map<string, boolean>();
+
+	/** True se il modello dichiara di supportare il tool-use nativo (da /api/show). */
+	async supportsTools(model: string): Promise<boolean> {
+		const cached = this.toolCapCache.get(model);
+		if (cached !== undefined) {
+			return cached;
+		}
+		const endpoint = this.getConfig().endpoint.replace(/\/$/, '');
+		try {
+			const res = await fetch(`${endpoint}/api/show`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				// "model" (Ollama recenti) e "name" (versioni precedenti) per compatibilità.
+				body: JSON.stringify({ model, name: model })
+			});
+			if (!res.ok) {
+				return false;
+			}
+			const data = await res.json() as { capabilities?: string[] };
+			const ok = Array.isArray(data.capabilities) && data.capabilities.includes('tools');
+			this.toolCapCache.set(model, ok);
+			return ok;
+		} catch {
+			return false;
+		}
+	}
+
 	/** POST /api/chat con streaming NDJSON; restituisce gli oggetti JSON già parsati. */
 	private async *postNdjson(body: object, signal?: AbortSignal): AsyncIterable<any> {
 		const endpoint = this.getConfig().endpoint.replace(/\/$/, '');

@@ -135,6 +135,12 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('mgcoding.switchProvider', () => registry.switchProvider()),
 		vscode.commands.registerCommand('mgcoding.guidedSetup', () => registry.guidedSetup()),
 		vscode.commands.registerCommand('mgcoding.toggleAnalytics', () => toggleAnalytics()),
+		vscode.commands.registerCommand('mgcoding.toggleNativeTools', async () => {
+			const cfg = vscode.workspace.getConfiguration('mgcoding');
+			const next = !cfg.get<boolean>('ollama.nativeTools', false);
+			await cfg.update('ollama.nativeTools', next, vscode.ConfigurationTarget.Global);
+			vscode.window.showInformationMessage(`Tool nativi Ollama: ${next ? 'ON' : 'OFF'}.`);
+		}),
 		vscode.commands.registerCommand('mgcoding.setApiKey', () => registry.setApiKey()),
 		vscode.commands.registerCommand('mgcoding.setOpenAIKey', () => registry.setOpenAIKey()),
 		vscode.commands.registerCommand('mgcoding.openChat', () => vscode.commands.executeCommand('mgcoding.chat.focus')),
