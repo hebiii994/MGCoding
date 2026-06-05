@@ -3,7 +3,7 @@
 	"publisher": "mgcoding",
 	"displayName": "MGCoding",
 	"description": "Agente di sviluppo spec-driven (Specs, Steering, Hooks, MCP) con LLM locale o Claude.",
-	"version": "0.5.3",
+	"version": "0.5.4",
 	"license": "MIT",
 	"engines": {
 		"vscode": "^1.5.0"
@@ -237,6 +237,11 @@
 				"title": "Mostra nel File Explorer"
 			},
 			{
+				"command": "mgcoding.renameSpec",
+				"title": "Rinomina Spec",
+				"icon": "$(edit)"
+			},
+			{
 				"command": "mgcoding.deleteSpec",
 				"title": "Elimina Spec",
 				"icon": "$(trash)"
@@ -271,6 +276,7 @@
 		"menus": {
 			"commandPalette": [
 				{ "command": "mgcoding.revealSpec", "when": "false" },
+				{ "command": "mgcoding.renameSpec", "when": "false" },
 				{ "command": "mgcoding.deleteSpec", "when": "false" },
 				{ "command": "mgcoding.revealHook", "when": "false" },
 				{ "command": "mgcoding.deleteHook", "when": "false" },
@@ -385,9 +391,14 @@
 					"group": "9_files@1"
 				},
 				{
-					"command": "mgcoding.deleteSpec",
+					"command": "mgcoding.renameSpec",
 					"when": "view == mgcoding.specs && viewItem == mgcoding.spec",
 					"group": "9_files@2"
+				},
+				{
+					"command": "mgcoding.deleteSpec",
+					"when": "view == mgcoding.specs && viewItem == mgcoding.spec",
+					"group": "9_files@3"
 				},
 				{
 					"command": "mgcoding.revealHook",

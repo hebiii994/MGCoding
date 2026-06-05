@@ -224,6 +224,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('mgcoding.removeMcpServer', async (node?: { status?: { name?: string } }) => { if (await removeMcpServer(node?.status?.name)) { restartMcp(); } }),
 		vscode.commands.registerCommand('mgcoding.toggleMcpServer', async (node?: { status?: { name?: string } }) => { if (await toggleMcpServer(node?.status?.name)) { restartMcp(); } }),
 		vscode.commands.registerCommand('mgcoding.revealSpec', (node?: { uri?: vscode.Uri }) => revealNode(node?.uri)),
+		vscode.commands.registerCommand('mgcoding.renameSpec', async (node?: { uri?: vscode.Uri }) => { if (await renameSpecDir(node?.uri)) { specsTree.refresh(); } }),
 		vscode.commands.registerCommand('mgcoding.deleteSpec', async (node?: { uri?: vscode.Uri; label?: string }) => { if (await deleteUri(node?.uri, `Eliminare la spec "${node?.label ?? ''}"?`)) { specsTree.refresh(); } }),
 		vscode.commands.registerCommand('mgcoding.revealHook', (node?: { hook?: Hook }) => revealNode(node?.hook?.uri)),
 		vscode.commands.registerCommand('mgcoding.deleteHook', async (node?: { hook?: Hook }) => { if (await deleteUri(node?.hook?.uri, `Eliminare l'hook "${node?.hook?.name ?? ''}"?`)) { hooksTree.refresh(); } }),
@@ -294,6 +295,35 @@ async function deleteUri(uri: vscode.Uri | undefined, prompt: string): Promise<b
 		return true;
 	} catch (e) {
 		vscode.window.showErrorMessage(`Eliminazione non riuscita: ${e instanceof Error ? e.message : String(e)}`);
+		return false;
+	}
+}
+
+/** Rinomina la cartella di una spec (chiede il nuovo nome, crea uno slug). */
+async function renameSpecDir(uri?: vscode.Uri): Promise<boolean> {
+	if (!uri) {
+		return false;
+	}
+	const current = uri.path.split('/').pop() ?? '';
+	const name = await vscode.window.showInputBox({
+		title: 'Rinomina spec',
+		prompt: 'Nuovo nome della spec',
+		value: current.replace(/-/g, ' '),
+		validateInput: v => v.trim() ? undefined : 'Inserisci un nome'
+	});
+	if (!name) {
+		return false;
+	}
+	const slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || current;
+	if (slug === current) {
+		return false;
+	}
+	const dest = vscode.Uri.joinPath(uri, '..', slug);
+	try {
+		await vscode.workspace.fs.rename(uri, dest, { overwrite: false });
+		return true;
+	} catch (e) {
+		vscode.window.showErrorMessage(`Rinomina non riuscita: ${e instanceof Error ? e.message : String(e)}`);
 		return false;
 	}
 }
