@@ -5,7 +5,7 @@
  *  Tutto resta locale e offline una volta scaricato. Eseguire prima del packaging (0.5.0+).
  *--------------------------------------------------------------------------------------------*/
 
-import { createWriteStream, existsSync, mkdirSync, copyFileSync, rmSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, copyFileSync, rmSync, readdirSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { execFileSync } from 'node:child_process';
@@ -21,6 +21,20 @@ const ZIP_URL = `https://github.com/ggml-org/whisper.cpp/releases/download/${WHI
 const MODEL_URL = process.env.MG_WHISPER_MODEL_URL || 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin';
 const MODEL_FILE = 'ggml-base.bin';
 const NEEDED = ['whisper-server.exe', 'ggml-base.dll', 'ggml-cpu.dll', 'ggml.dll', 'whisper.dll'];
+
+// SoX: recorder microfono (registrazione FUORI dal webview, poi Whisper trascrive).
+const SOX_URL = process.env.MG_SOX_URL || 'https://downloads.sourceforge.net/project/sox/sox/14.4.2/sox-14.4.2-win32.zip';
+const SOX_DIR_IN_ZIP = 'sox-14.4.2';
+
+/** Estrae uno zip: prova `tar`, poi PowerShell Expand-Archive (alcuni zip non piacciono a tar). */
+function unzip(zip, dest) {
+	try {
+		execFileSync('tar', ['-xf', zip, '-C', dest], { stdio: 'ignore' });
+		return;
+	} catch {
+		execFileSync('powershell', ['-NoProfile', '-Command', `Expand-Archive -Path "${zip}" -DestinationPath "${dest}" -Force`], { stdio: 'inherit' });
+	}
+}
 
 async function download(url, dest) {
 	if (existsSync(dest)) { console.log(`[fetch-stt] già presente: ${dest}`); return; }
@@ -51,6 +65,26 @@ async function main() {
 
 	// 2) Modello
 	await download(MODEL_URL, join(binDir, MODEL_FILE));
+
+	// 3) SoX (recorder microfono) in bin/sox/
+	const soxDir = join(binDir, 'sox');
+	if (!existsSync(join(soxDir, 'sox.exe'))) {
+		mkdirSync(soxDir, { recursive: true });
+		const zip = join(tmpdir(), 'mg-sox.zip');
+		const ex = join(tmpdir(), 'mg-sox-ex');
+		await download(SOX_URL, zip);
+		rmSync(ex, { recursive: true, force: true });
+		mkdirSync(ex, { recursive: true });
+		unzip(zip, ex);
+		const from = join(ex, SOX_DIR_IN_ZIP);
+		for (const f of readdirSync(from)) {
+			if (f.endsWith('.exe') && f !== 'sox.exe') { continue; } // scarta wget.exe
+			if (f.endsWith('.exe') || f.endsWith('.dll')) {
+				copyFileSync(join(from, f), join(soxDir, f));
+			}
+		}
+		console.log('[fetch-stt] SoX estratto in bin/sox.');
+	}
 	console.log('[fetch-stt] completato.');
 }
 

@@ -8,6 +8,7 @@
 import { ChildProcess, spawn } from 'child_process';
 import * as fs from 'fs';
 import * as net from 'net';
+import * as os from 'os';
 import * as path from 'path';
 
 /** Trova una porta TCP libera. */
@@ -100,12 +101,70 @@ export class WhisperEngine {
 		return `http://127.0.0.1:${this.port}/inference`;
 	}
 
+	// ---- Registrazione microfono (via SoX, FUORI dal webview) ----
+
+	private recProc?: ChildProcess;
+
+	private soxPath(): string {
+		return path.join(this.binDir, 'sox', process.platform === 'win32' ? 'sox.exe' : 'sox');
+	}
+
+	/** True se il recorder (SoX) è incluso. */
+	canRecord(): boolean {
+		return fs.existsSync(this.soxPath());
+	}
+
+	/**
+	 * Registra dal microfono di default in un WAV 16kHz mono, fermandosi da solo dopo
+	 * una pausa (VAD di SoX). Ritorna il percorso del WAV, o undefined se non ha catturato voce.
+	 * @param maxSeconds limite di sicurezza (kill).
+	 */
+	recordToWav(maxSeconds = 60): Promise<string | undefined> {
+		return new Promise(resolve => {
+			if (!this.canRecord()) {
+				resolve(undefined);
+				return;
+			}
+			const out = path.join(os.tmpdir(), `mg-rec-${Date.now()}.wav`);
+			// silence 1 0.1 3%  → inizia quando rileva voce; 1 1.5 3% → ferma dopo 1.5s di silenzio.
+			const args = ['-t', 'waveaudio', '-d', '-r', '16000', '-c', '1', '-b', '16', out,
+				'silence', '1', '0.1', '3%', '1', '1.5', '3%'];
+			let done = false;
+			const finish = (val: string | undefined): void => { if (!done) { done = true; resolve(val); } };
+			let p: ChildProcess;
+			try {
+				p = spawn(this.soxPath(), args, { stdio: 'ignore' });
+			} catch {
+				finish(undefined);
+				return;
+			}
+			this.recProc = p;
+			const timer = setTimeout(() => { try { p.kill(); } catch { /* */ } }, maxSeconds * 1000);
+			p.on('error', () => { clearTimeout(timer); this.recProc = undefined; finish(undefined); });
+			p.on('exit', () => {
+				clearTimeout(timer);
+				this.recProc = undefined;
+				try {
+					finish(fs.statSync(out).size > 1500 ? out : undefined);
+				} catch {
+					finish(undefined);
+				}
+			});
+		});
+	}
+
+	/** Ferma una registrazione in corso (SoX finalizza il file alla chiusura). */
+	stopRecording(): void {
+		try { this.recProc?.kill(); } catch { /* */ }
+	}
+
 	dispose(): void {
 		try {
 			this.proc?.kill();
 		} catch {
 			// ignora
 		}
+		this.stopRecording();
 		this.proc = undefined;
 		this.port = 0;
 	}

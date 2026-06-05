@@ -4,6 +4,7 @@
 
 import * as vscode from 'vscode';
 import { runAgent } from '../agent/agentLoop';
+import * as fs from 'fs';
 import { complete, streamPure, buildGroundingContext } from '../agent/agent';
 import { track } from '../analytics/analytics';
 import { changedCount } from '../edit/checkpoint';
@@ -211,13 +212,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 				case 'refreshState':
 					await this.sendState();
 					break;
-				case 'transcribe':
-					if (msg.text) {
-						await this.transcribeAudio(msg.text, (msg as { mime?: string }).mime);
-					}
+				case 'recordMic':
+					await this.recordMic((msg as { mode?: 'dictate' | 'convo' }).mode === 'convo' ? 'convo' : 'dictate');
 					break;
-				case 'sttError':
-					this.post({ type: 'error', text: `Microfono: ${msg.text ?? 'errore'}` });
+				case 'stopRecording':
+					this.whisper.stopRecording();
 					break;
 				case 'guidedSetup':
 					await vscode.commands.executeCommand('mgcoding.guidedSetup');
@@ -364,52 +363,69 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		this.post({ type: 'insertRef', text: `#${cat.id} ` });
 	}
 
-	/** Trascrive l'audio registrato (base64) via endpoint STT OpenAI-compatibile. */
-	private async transcribeAudio(audioB64: string, mime?: string): Promise<void> {
+	/** Invia un buffer audio all'endpoint STT (Whisper incluso o esterno) e ritorna il testo. */
+	private async transcribeBuffer(buf: Buffer, filename: string): Promise<string> {
 		const c = vscode.workspace.getConfiguration('mgcoding');
 		let endpoint = c.get<string>('stt.endpoint', '').trim();
-		this.post({ type: 'sttBusy', value: true });
-		// Se non c'è un endpoint configurato, usa il motore Whisper incluso (auto-avviato).
 		if (!endpoint && this.whisper.isAvailable()) {
 			endpoint = (await this.whisper.ensureRunning()) ?? '';
 		}
 		if (!endpoint) {
-			this.post({ type: 'sttBusy', value: false });
-			this.post({ type: 'error', text: 'STT non disponibile: motore vocale non installato e nessun "mgcoding.stt.endpoint" configurato.' });
+			throw new Error('motore vocale non disponibile');
+		}
+		const form = new FormData();
+		form.append('file', new Blob([buf], { type: 'audio/wav' }), filename);
+		form.append('model', c.get<string>('stt.model', 'whisper-1'));
+		form.append('response_format', 'json');
+		const headers: Record<string, string> = {};
+		const key = c.get<string>('stt.apiKey', '').trim();
+		if (key) {
+			headers['authorization'] = `Bearer ${key}`;
+		}
+		const res = await fetch(endpoint, { method: 'POST', headers, body: form });
+		if (!res.ok) {
+			throw new Error(`HTTP ${res.status}`);
+		}
+		const body = (await res.text()).trim();
+		let text = body;
+		try {
+			const j = JSON.parse(body) as { text?: string };
+			if (typeof j.text === 'string') {
+				text = j.text;
+			}
+		} catch {
+			// non-JSON: testo grezzo
+		}
+		return text.trim();
+	}
+
+	/** Registra dal microfono (SoX, FUORI dal webview), trascrive e restituisce il testo. */
+	private async recordMic(mode: 'dictate' | 'convo'): Promise<void> {
+		if (!this.whisper.canRecord()) {
+			this.post({ type: 'micState', state: 'idle' });
+			this.post({ type: 'error', text: 'Registratore vocale non incluso in questa build.' });
 			return;
 		}
+		this.post({ type: 'micState', state: 'recording' });
+		const wav = await this.whisper.recordToWav(60);
+		if (!wav) {
+			// nessuna voce catturata: in conversazione, riprende ad ascoltare
+			this.post({ type: 'micState', state: 'idle' });
+			this.post({ type: 'sttResult', text: '', autoSend: false, mode });
+			return;
+		}
+		this.post({ type: 'micState', state: 'transcribing' });
 		try {
-			const buf = Buffer.from(audioB64, 'base64');
-			const form = new FormData();
-			form.append('file', new Blob([buf], { type: mime || 'audio/webm' }), 'audio.webm');
-			form.append('model', c.get<string>('stt.model', 'whisper-1'));
-			form.append('response_format', 'json');
-			const headers: Record<string, string> = {};
-			const key = c.get<string>('stt.apiKey', '').trim();
-			if (key) {
-				headers['authorization'] = `Bearer ${key}`;
-			}
-			const res = await fetch(endpoint, { method: 'POST', headers, body: form });
-			if (!res.ok) {
-				throw new Error(`HTTP ${res.status}`);
-			}
-			// La risposta può essere JSON ({text}) o testo semplice (whisper.cpp).
-			const body = (await res.text()).trim();
-			let text = body;
-			try {
-				const j = JSON.parse(body) as { text?: string };
-				if (typeof j.text === 'string') {
-					text = j.text;
-				}
-			} catch {
-				// non-JSON: usa il testo grezzo
-			}
-			text = text.trim();
-			this.post({ type: 'sttResult', text, autoSend: c.get<boolean>('stt.autoSend', false) });
+			const buf = fs.readFileSync(wav);
+			const text = await this.transcribeBuffer(buf, 'audio.wav');
+			const auto = mode === 'convo' || vscode.workspace.getConfiguration('mgcoding').get<boolean>('stt.autoSend', false);
+			this.post({ type: 'sttResult', text, autoSend: auto, mode });
 		} catch (err) {
 			this.post({ type: 'error', text: `Trascrizione non riuscita: ${err instanceof Error ? err.message : String(err)}` });
+			this.post({ type: 'sttResult', text: '', autoSend: false, mode });
 		} finally {
-			this.post({ type: 'sttBusy', value: false });
+			this.post({ type: 'micState', state: 'idle' });
+			try { fs.unlinkSync(wav); } catch { /* */ }
 		}
 	}
 
@@ -1197,93 +1213,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	var attachBtn = document.getElementById('attach');
 	var micBtn = document.getElementById('mic');
 	var convoBtn = document.getElementById('convo');
-	var mgRecording = false, mgCtx = null, mgSrc = null, mgProc = null, mgStream = null, mgPcm = [], mgRate = 16000;
-	var mgHandsFree = false, mgSpeaking = false;
-	function encodeWav(chunks, sampleRate) {
-		var len = 0; for (var i = 0; i < chunks.length; i++) { len += chunks[i].length; }
-		var data = new Float32Array(len); var off = 0;
-		for (var j = 0; j < chunks.length; j++) { data.set(chunks[j], off); off += chunks[j].length; }
-		var buf = new ArrayBuffer(44 + data.length * 2); var view = new DataView(buf);
-		function ws(o, s) { for (var k = 0; k < s.length; k++) { view.setUint8(o + k, s.charCodeAt(k)); } }
-		ws(0, 'RIFF'); view.setUint32(4, 36 + data.length * 2, true); ws(8, 'WAVE'); ws(12, 'fmt ');
-		view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
-		view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true);
-		view.setUint16(32, 2, true); view.setUint16(34, 16, true); ws(36, 'data'); view.setUint32(40, data.length * 2, true);
-		var p = 44; for (var n = 0; n < data.length; n++) { var v = Math.max(-1, Math.min(1, data[n])); view.setInt16(p, v < 0 ? v * 0x8000 : v * 0x7fff, true); p += 2; }
-		return new Blob([view], { type: 'audio/wav' });
-	}
-	function teardownAudio() {
-		try { if (mgProc) { mgProc.onaudioprocess = null; mgProc.disconnect(); } if (mgSrc) { mgSrc.disconnect(); } } catch (e) {}
-		try { if (mgStream) { mgStream.getTracks().forEach(function (t) { t.stop(); }); } } catch (e) {}
-		try { if (mgCtx) { mgCtx.close(); } } catch (e) {}
-		mgCtx = null; mgSrc = null; mgProc = null; mgStream = null;
-	}
-	// Ferma la registrazione e invia l'audio a trascrivere.
-	function stopRec() {
-		if (!mgRecording) { return; }
-		teardownAudio();
-		mgRecording = false; micBtn.classList.remove('rec');
-		var pcm = mgPcm; mgPcm = [];
-		if (!pcm.length) { if (mgHandsFree) { restartListen(); } return; }
-		var blob = encodeWav(pcm, mgRate);
-		var r = new FileReader();
-		r.onloadend = function () { var b64 = String(r.result).split(',')[1] || ''; if (b64) { vscode.postMessage({ type: 'transcribe', text: b64, mime: 'audio/wav' }); } };
-		r.readAsDataURL(blob);
-	}
-	// Annulla la registrazione senza inviare (es. nessun parlato rilevato).
-	function cancelRec() {
-		if (!mgRecording) { return; }
-		teardownAudio();
-		mgRecording = false; micBtn.classList.remove('rec'); mgPcm = [];
-	}
-	// In hands-free: dopo un giro a vuoto, torna in ascolto se non è in corso altro.
-	function restartListen() {
-		setTimeout(function () {
-			if (mgHandsFree && !mgRecording && !mgSpeaking && !document.body.classList.contains('busy')) { startRecording(); }
-		}, 250);
-	}
-	async function startRecording() {
+	var mgHandsFree = false, mgSpeaking = false, mgRecording = false;
+	// La registrazione avviene NELL'ESTENSIONE (SoX): i webview di VS Code non possono
+	// accedere al microfono. Qui chiediamo solo di registrare e riceviamo la trascrizione.
+	function micStart(mode) {
 		if (mgRecording) { return; }
-		try {
-			mgStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-			mgCtx = new (window.AudioContext || window.webkitAudioContext)();
-			mgRate = mgCtx.sampleRate; mgPcm = [];
-			mgSrc = mgCtx.createMediaStreamSource(mgStream);
-			mgProc = mgCtx.createScriptProcessor(4096, 1, 1);
-			var analyser = mgCtx.createAnalyser(); analyser.fftSize = 512;
-			mgSrc.connect(analyser);
-			var win = new Float32Array(analyser.fftSize);
-			var speechStarted = false, silenceStart = 0, startedAt = Date.now();
-			mgProc.onaudioprocess = function (e) {
-				mgPcm.push(new Float32Array(e.inputBuffer.getChannelData(0)));
-				if (!mgHandsFree) { return; }
-				// Rilevamento attività vocale (VAD): stop automatico dopo una pausa.
-				analyser.getFloatTimeDomainData(win);
-				var sum = 0; for (var i = 0; i < win.length; i++) { sum += win[i] * win[i]; }
-				var rms = Math.sqrt(sum / win.length), now = Date.now();
-				if (rms > 0.018) { speechStarted = true; silenceStart = 0; }
-				else if (speechStarted) {
-					if (!silenceStart) { silenceStart = now; }
-					else if (now - silenceStart > 1300) { stopRec(); return; }
-				}
-				if (!speechStarted && now - startedAt > 9000) { cancelRec(); restartListen(); return; }
-				if (now - startedAt > 30000) { stopRec(); return; }
-			};
-			mgSrc.connect(mgProc); mgProc.connect(mgCtx.destination);
-			mgRecording = true; micBtn.classList.add('rec');
-		} catch (e) {
-			mgHandsFree = false; convoBtn.classList.remove('on');
-			vscode.postMessage({ type: 'sttError', text: (e && e.message) ? e.message : String(e) });
-		}
+		vscode.postMessage({ type: 'recordMic', mode: mode || 'dictate' });
+	}
+	function micStop() {
+		vscode.postMessage({ type: 'stopRecording' });
 	}
 	micBtn.addEventListener('click', function () {
-		if (mgRecording) { stopRec(); } else { startRecording(); }
+		if (mgRecording) { micStop(); } else { micStart('dictate'); }
 	});
 	convoBtn.addEventListener('click', function () {
 		mgHandsFree = !mgHandsFree;
 		convoBtn.classList.toggle('on', mgHandsFree);
-		if (mgHandsFree) { startRecording(); }
-		else { try { if (window.speechSynthesis) { window.speechSynthesis.cancel(); } } catch (e) {} mgSpeaking = false; convoBtn.classList.remove('speaking'); cancelRec(); }
+		if (mgHandsFree) { micStart('convo'); }
+		else {
+			try { if (window.speechSynthesis) { window.speechSynthesis.cancel(); } } catch (e) {}
+			mgSpeaking = false; convoBtn.classList.remove('speaking');
+			micStop();
+		}
 	});
 	var autoBtn = document.getElementById('auto');
 	var ctxPie = document.getElementById('ctxpie');
@@ -1373,7 +1324,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		mgSpeaking = true; convoBtn.classList.add('speaking');
 		speak(text, function () {
 			mgSpeaking = false; convoBtn.classList.remove('speaking');
-			if (mgHandsFree && !mgRecording && !document.body.classList.contains('busy')) { startRecording(); }
+			if (mgHandsFree && !mgRecording && !document.body.classList.contains('busy')) { micStart('convo'); }
 		});
 	}
 	function addSpeakBtn(msgEl, getText) {
@@ -1750,8 +1701,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		else if (m.type === 'error') { addStatic('error', '⚠ ' + m.text); }
 		else if (m.type === 'busy') { document.body.classList.toggle('busy', m.value); }
 		else if (m.type === 'changes') { renderChanges(m.count || 0); }
-		else if (m.type === 'sttResult') { if (m.text) { input.value = (input.value ? input.value + ' ' : '') + m.text; autoGrow(); input.focus(); if (m.autoSend || mgHandsFree) { send(); } } else if (mgHandsFree) { restartListen(); } }
-		else if (m.type === 'sttBusy') { micBtn.classList.toggle('stt-busy', !!m.value); }
+		else if (m.type === 'sttResult') {
+			if (m.text) { input.value = (input.value ? input.value + ' ' : '') + m.text; autoGrow(); input.focus(); if (m.autoSend) { send(); } }
+			else if (mgHandsFree && m.mode === 'convo') { setTimeout(function () { if (mgHandsFree && !mgSpeaking && !document.body.classList.contains('busy')) { micStart('convo'); } }, 300); }
+		}
+		else if (m.type === 'micState') {
+			mgRecording = (m.state === 'recording');
+			micBtn.classList.toggle('rec', m.state === 'recording');
+			micBtn.classList.toggle('stt-busy', m.state === 'transcribing');
+		}
 		else if (m.type === 'plan') { renderPlan(m.steps); }
 		else if (m.type === 'steeringChips') { renderSteeringChips(m.names); planCard = null; }
 		else if (m.type === 'specActions') { renderSpecActions(m.phase); }
