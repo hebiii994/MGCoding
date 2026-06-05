@@ -214,13 +214,19 @@ export async function runSpecTasks(registry: ProviderRegistry, specDir: vscode.U
 	const design = await readIfExists(vscode.Uri.joinPath(specDir, 'design.md'));
 	const specName = specDir.path.split('/').pop() ?? 'spec';
 
-	const pending = parseTasks(tasksMd).filter(t => !t.done && (includeOptional || !t.optional));
+	const all = parseTasks(tasksMd);
+	const doneCount = all.filter(t => t.done).length;
+	const pending = all.filter(t => !t.done && (includeOptional || !t.optional));
 	if (pending.length === 0) {
 		vscode.window.showInformationMessage(`Nessun task da eseguire per "${specName}"${includeOptional ? '' : ' (esclusi gli opzionali)'}.`);
 		return;
 	}
 
-	reporter.start(`Spec: ${specName}`, pending.map(t => t.text));
+	const resumeNote = doneCount > 0 ? ` — riprendo: ${doneCount} già completati, ${pending.length} rimanenti` : '';
+	reporter.start(`Spec: ${specName}${resumeNote}`, pending.map(t => t.text));
+	if (doneCount > 0) {
+		reporter.log(`↩️ Riprendo dal task non completato (saltati ${doneCount} già fatti).`);
+	}
 
 	setSpecWriteGuard(true);
 	try {
@@ -231,7 +237,7 @@ export async function runSpecTasks(registry: ProviderRegistry, specDir: vscode.U
 		}
 		const task = pending[i];
 		reporter.setStatus(i, 'running');
-		reporter.log(`▶ Task ${i + 1}/${pending.length}: ${task.text}`);
+		reporter.log(`▶ [${i + 1}/${pending.length} da fare] ${task.text}`);
 
 		// Segna il task come "in corso" ([~]) nel file, così è visibile ovunque.
 		tasksMd = setTaskMark(tasksMd, task.lineIdx, '~');
