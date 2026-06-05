@@ -1116,6 +1116,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	.menu-sep { height: 1px; margin: 4px 2px; background: var(--vscode-dropdown-border, var(--vscode-panel-border)); opacity: 0.6; }
 	.menu-toggle { padding: 6px 9px; border-radius: 6px; font-size: 11px; cursor: pointer; opacity: 0.9; white-space: normal; }
 	.menu-toggle:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.18)); }
+	.menu-toggle.top { position: sticky; top: 0; z-index: 1; background: var(--vscode-dropdown-background); border: 1px solid color-mix(in srgb, var(--mg-accent) 30%, transparent); }
 	.toggle { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; background: transparent; border: none; color: var(--vscode-foreground); cursor: pointer; font-size: 12px; padding: 3px 4px; border-radius: 7px; }
 	.toggle:hover { background: var(--vscode-toolbar-hoverBackground, rgba(127,127,127,0.18)); }
 	.toggle .knob { width: 26px; height: 15px; border-radius: 9px; background: var(--vscode-input-border, #5a5a5a); position: relative; transition: background .15s; }
@@ -1531,10 +1532,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	function renderModelMenu(options, current, nativeTools) {
 		modelMenu.innerHTML = '';
 		var hasOllama = false, curOpt = null;
+		for (var k = 0; k < options.length; k++) {
+			if (options[k].id.indexOf('ollama:') === 0) { hasOllama = true; }
+			if (options[k].id === current) { curOpt = options[k]; }
+		}
+		// Toggle tool nativi Ollama IN CIMA (sticky), così è subito visibile.
+		if (hasOllama) {
+			var row = document.createElement('div'); row.className = 'menu-toggle top';
+			var curIsOllama = curOpt && curOpt.id.indexOf('ollama:') === 0;
+			var hint = curIsOllama ? (curOpt.tools ? ' \\u2014 il modello attuale li supporta \\uD83D\\uDD27' : ' \\u2014 non dichiarati da questo modello') : '';
+			row.innerHTML = '\\uD83D\\uDD27 Tool nativi Ollama: <b>' + (nativeTools ? 'ON' : 'OFF') + '</b>' + hint;
+			row.title = 'Usa il function-calling nativo di Ollama. Attivalo con i modelli che hanno il badge 🔧; con gli altri lascialo OFF (protocollo testuale, più affidabile).';
+			row.addEventListener('click', function (e) { e.stopPropagation(); vscode.postMessage({ type: 'toggleNativeTools' }); });
+			modelMenu.appendChild(row);
+			var sep = document.createElement('div'); sep.className = 'menu-sep'; modelMenu.appendChild(sep);
+		}
 		for (var i = 0; i < options.length; i++) {
 			(function (o) {
-				if (o.id.indexOf('ollama:') === 0) { hasOllama = true; }
-				if (o.id === current) { curOpt = o; }
 				var it = document.createElement('div');
 				it.className = 'model-item' + (o.id === current ? ' sel' : '');
 				it.textContent = o.label;
@@ -1551,17 +1565,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 				modelMenu.appendChild(it);
 				if (o.id === current) { modelCur.textContent = o.label; }
 			})(options[i]);
-		}
-		// Toggle dei tool nativi Ollama (mostrato solo se ci sono modelli Ollama).
-		if (hasOllama) {
-			var sep = document.createElement('div'); sep.className = 'menu-sep'; modelMenu.appendChild(sep);
-			var row = document.createElement('div'); row.className = 'menu-toggle';
-			var curIsOllama = curOpt && curOpt.id.indexOf('ollama:') === 0;
-			var hint = curIsOllama ? (curOpt.tools ? ' \\u2014 il modello attuale li supporta \\uD83D\\uDD27' : ' \\u2014 il modello attuale non li dichiara') : '';
-			row.innerHTML = '\\uD83D\\uDD27 Tool nativi Ollama: <b>' + (nativeTools ? 'ON' : 'OFF') + '</b>' + hint;
-			row.title = 'Usa il function-calling nativo di Ollama. Attivalo con i modelli che hanno il badge 🔧; con gli altri lascialo OFF (verrà usato il protocollo testuale, più affidabile).';
-			row.addEventListener('click', function (e) { e.stopPropagation(); vscode.postMessage({ type: 'toggleNativeTools' }); });
-			modelMenu.appendChild(row);
 		}
 	}
 	sessionSel.addEventListener('change', function () { vscode.postMessage({ type: 'switchSession', id: sessionSel.value }); });
