@@ -2,7 +2,7 @@
  *  MGCoding - controllo aggiornamenti via GitHub Releases (con download + install in-app)
  *--------------------------------------------------------------------------------------------*/
 
-import { spawn } from 'child_process';
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -137,32 +137,33 @@ async function downloadAndInstall(): Promise<void> {
 		return;
 	}
 
-	// Aggiornamento automatico tramite uno script .bat lanciato in modo DETACHED
-	// (processo indipendente: sopravvive alla chiusura di MGCoding). Lo script
-	// attende la chiusura dell'app, installa in silenzio e la riapre aggiornata.
+	// Aggiornamento automatico tramite il Task Scheduler di Windows: lo script .bat
+	// gira sotto il SERVIZIO Utilità di pianificazione, quindi è del tutto INDIPENDENTE
+	// dal processo di MGCoding (lo spawn "detached" veniva invece ucciso alla chiusura
+	// dell'app perché Electron mette i figli in un job). Lo script attende la chiusura,
+	// installa in silenzio e riapre l'app aggiornata.
 	const exePath = process.execPath;
 	const exeName = exePath.split(/[\\/]/).pop() ?? 'MGCoding.exe';
 	const batPath = path.join(os.tmpdir(), `mgcoding-update-${tag}.bat`);
+	const taskName = 'MGCodingUpdate';
+	// Percorso completo a schtasks (robusto anche se System32 non è nel PATH).
+	const schtasks = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'schtasks.exe');
 	const bat = [
 		'@echo off',
-		'timeout /t 2 /nobreak >NUL',
 		':wait',
 		`tasklist /FI "IMAGENAME eq ${exeName}" 2>NUL | find /I "${exeName}" >NUL && (timeout /t 1 /nobreak >NUL & goto wait)`,
 		`"${dest}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`,
 		`start "" "${exePath}"`,
+		`"${schtasks}" /Delete /F /TN ${taskName} >NUL 2>&1`,
 		'del "%~f0"'
 	].join('\r\n');
 
 	let launchError = '';
 	try {
 		fs.writeFileSync(batPath, bat, 'utf8');
-		// Lancia il .bat staccato dal processo di MGCoding così continua dopo il quit.
-		const child = spawn(process.env.ComSpec || 'cmd.exe', ['/c', batPath], {
-			detached: true,
-			stdio: 'ignore',
-			windowsHide: true
-		});
-		child.unref();
+		// Crea ed esegue subito un task una-tantum: gira sotto il servizio, fuori dal job di MGCoding.
+		execFileSync(schtasks, ['/Create', '/F', '/TN', taskName, '/SC', 'ONCE', '/ST', '00:00', '/TR', `cmd /c "${batPath}"`], { stdio: 'ignore', windowsHide: true });
+		execFileSync(schtasks, ['/Run', '/TN', taskName], { stdio: 'ignore', windowsHide: true });
 	} catch (err) {
 		launchError = err instanceof Error ? err.message : String(err);
 	}
