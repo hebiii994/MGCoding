@@ -192,6 +192,8 @@ export class CodeApplication extends Disposable {
 
 		const allowedPermissionsInWebview = new Set([
 			...alwaysAllowedPermissions,
+			// MGCoding: consente il microfono nel webview della chat (dettatura / conversazione vocale).
+			'media',
 			'clipboard-read',
 			'clipboard-sanitized-write',
 			// TODO(deepak1556): Should be removed once migration is complete
