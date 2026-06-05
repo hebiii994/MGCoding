@@ -58,7 +58,9 @@ export function activate(context: vscode.ExtensionContext): void {
 	registerAutocomplete(context);
 
 	// Chat (barra laterale secondaria, a destra)
-	const chat = new ChatViewProvider(context.extensionUri, registry, context.workspaceState);
+	// globalState (non workspaceState): la cronologia chat persiste tra i riavvii
+	// e indipendentemente dalla cartella aperta.
+	const chat = new ChatViewProvider(context.extensionUri, registry, context.globalState);
 	context.subscriptions.push(chat);
 	context.subscriptions.push(
 		vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, chat, {

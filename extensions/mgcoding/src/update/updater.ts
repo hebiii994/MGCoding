@@ -148,11 +148,32 @@ async function downloadAndInstall(): Promise<void> {
 	const taskName = 'MGCodingUpdate';
 	// Percorso completo a schtasks (robusto anche se System32 non è nel PATH).
 	const schtasks = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'schtasks.exe');
+	const logPath = path.join(os.tmpdir(), 'mgcoding-update.log');
+	// Script VISIBILE e robusto: mostra lo stato, attende la chiusura (max ~20s),
+	// installa con barra di avanzamento (/SILENT), riapre, e scrive un log per diagnosi.
 	const bat = [
 		'@echo off',
+		'title MGCoding - Aggiornamento',
+		`echo Aggiornamento di MGCoding ${tag} > "${logPath}"`,
+		'echo ============================================',
+		'echo  Aggiornamento di MGCoding in corso...',
+		'echo  (non chiudere questa finestra)',
+		'echo ============================================',
+		'echo Attendo la chiusura dell app...',
+		'set /a n=0',
 		':wait',
-		`tasklist /FI "IMAGENAME eq ${exeName}" 2>NUL | find /I "${exeName}" >NUL && (timeout /t 1 /nobreak >NUL & goto wait)`,
-		`"${dest}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`,
+		`tasklist /FI "IMAGENAME eq ${exeName}" 2>NUL | find /I "${exeName}" >NUL`,
+		'if errorlevel 1 goto install',
+		'set /a n+=1',
+		'if %n% geq 20 goto install',
+		'timeout /t 1 /nobreak >NUL',
+		'goto wait',
+		':install',
+		`echo Installazione in corso... >> "${logPath}"`,
+		'echo Installazione in corso, attendere qualche minuto...',
+		`"${dest}" /SILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL >> "${logPath}" 2>&1`,
+		`echo Exit code installer: %errorlevel% >> "${logPath}"`,
+		'echo Riavvio di MGCoding...',
 		`start "" "${exePath}"`,
 		`"${schtasks}" /Delete /F /TN ${taskName} >NUL 2>&1`,
 		'del "%~f0"'
