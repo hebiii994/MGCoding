@@ -61,9 +61,22 @@ export async function runAgent(
 	beginCheckpoint();
 	const hint = [...messages].reverse().find(m => m.role === 'user')?.content;
 	const provider = registry.pickProvider(hint);
-	// Percorso preferito: tool-use NATIVO se il provider lo supporta (Claude/OpenAI sempre; Ollama se abilitato).
-	const ollamaNative = provider.id !== 'ollama'
-		|| vscode.workspace.getConfiguration('mgcoding').get<boolean>('ollama.nativeTools', true);
+	// Percorso preferito: tool-use NATIVO. Claude/OpenAI sempre; per Ollama si usa il
+	// nativo se l'utente lo forza col toggle OPPURE (automatico) se il modello dichiara
+	// di supportare i tool — così i modelli capaci non usano il fragile protocollo testuale.
+	let ollamaNative = true;
+	if (provider.id === 'ollama') {
+		const cfg = vscode.workspace.getConfiguration('mgcoding');
+		if (cfg.get<boolean>('ollama.nativeTools', false)) {
+			ollamaNative = true;
+		} else {
+			try {
+				ollamaNative = await registry.ollamaModelSupportsTools(cfg.get<string>('ollama.model', ''));
+			} catch {
+				ollamaNative = false;
+			}
+		}
+	}
 	if (typeof provider.streamAgent === 'function' && ollamaNative) {
 		return runNativeAgent(provider, messages, cb, signal, systemExtra);
 	}
@@ -84,6 +97,7 @@ async function runJsonAgent(
 ): Promise<void> {
 	const sys = systemExtra ? `${toolSystemPrompt()}\n\n${systemExtra}` : toolSystemPrompt();
 	const streaming = typeof cb.onStreamDelta === 'function';
+	const callCounts = new Map<string, number>();
 
 	for (let i = 0; i < MAX_ITERATIONS; i++) {
 		if (signal?.aborted) {
@@ -121,10 +135,20 @@ async function runJsonAgent(
 		}
 		messages.push({ role: 'assistant', content: reply });
 
+		// Guard anti-loop: i modelli deboli ripetono la stessa chiamata all'infinito.
+		const sig = `${call.tool}:${JSON.stringify(call.args)}`;
+		const n = (callCounts.get(sig) ?? 0) + 1;
+		callCounts.set(sig, n);
+		if (n > 4) {
+			cb.onAssistantText('_(interrotto: chiamata ripetuta troppe volte allo stesso tool senza progresso)_');
+			return;
+		}
+
 		cb.onToolStart(call);
 		const result = await executeTool(call);
 		cb.onToolResult(result);
-		messages.push({ role: 'user', content: `Risultato del tool ${call.tool}:\n${result}` });
+		const hint = n >= 3 ? `\n\n[AVVISO: hai già chiamato ${call.tool} con questi stessi argomenti ${n} volte. Cambia approccio (altro tool/argomenti) oppure, se hai le informazioni, procedi o concludi.]` : '';
+		messages.push({ role: 'user', content: `Risultato del tool ${call.tool}:\n${result}${hint}` });
 	}
 
 	cb.onAssistantText('_(raggiunto il limite massimo di passi dell\'agente)_');
@@ -156,6 +180,18 @@ async function runNativeAgent(
 	const system = await buildSystemPrompt(systemExtra);
 	const tools = [...anthropicBuiltinTools(), ...(getMcpManager()?.anthropicTools() ?? [])];
 	const streaming = typeof cb.onStreamDelta === 'function';
+	const callCounts = new Map<string, number>();
+	// Esegue un tool con guard anti-loop (modelli che ripetono la stessa chiamata).
+	const runToolGuarded = async (name: string, input: unknown): Promise<string> => {
+		const sig = `${name}:${JSON.stringify(input)}`;
+		const n = (callCounts.get(sig) ?? 0) + 1;
+		callCounts.set(sig, n);
+		if (n > 4) {
+			return `[interrotto: hai già chiamato ${name} con questi stessi argomenti ${n} volte senza progresso. Cambia approccio o concludi.]`;
+		}
+		const result = await executeTool({ tool: name, args: input as Record<string, unknown> });
+		return n >= 3 ? `${result}\n\n[AVVISO: chiamata a ${name} ripetuta ${n} volte; cambia strategia o concludi.]` : result;
+	};
 
 	// Costruisce i messaggi Anthropic dallo storico testuale.
 	const messages: AnthropicMessage[] = history.map(m => {
@@ -289,7 +325,7 @@ async function runNativeAgent(
 		if (toolUses.length > 1 && toolUses.every(tu => READ_ONLY_TOOLS.has(tu.name))) {
 			const results = await Promise.all(toolUses.map(async tu => {
 				cb.onToolStart({ tool: tu.name, args: tu.input });
-				const result = await executeTool({ tool: tu.name, args: tu.input });
+				const result = await runToolGuarded(tu.name, tu.input);
 				cb.onToolResult(result);
 				return { id: tu.id, result };
 			}));
@@ -299,7 +335,7 @@ async function runNativeAgent(
 		} else {
 			for (const tu of toolUses) {
 				cb.onToolStart({ tool: tu.name, args: tu.input });
-				const result = await executeTool({ tool: tu.name, args: tu.input });
+				const result = await runToolGuarded(tu.name, tu.input);
 				cb.onToolResult(result);
 				resultBlocks.push({ type: 'tool_result', tool_use_id: tu.id, content: result });
 			}

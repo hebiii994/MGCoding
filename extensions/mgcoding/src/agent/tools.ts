@@ -49,6 +49,12 @@ export const TOOL_SPECS: ToolSpec[] = [
 		inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'Percorso relativo (default: radice)' } } }
 	},
 	{
+		name: 'create_directory',
+		description: 'Crea una cartella (e le cartelle intermedie). Usa QUESTO invece di "mkdir" da shell, che ha sintassi diversa tra i sistemi.',
+		args: '{"path": "src/components"}',
+		inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'Percorso relativo della cartella da creare' } }, required: ['path'] }
+	},
+	{
 		name: 'run_command',
 		description: 'Esegue un comando shell nella radice del workspace (può richiedere conferma).',
 		args: '{"command": "..."}',
@@ -161,6 +167,14 @@ export async function executeTool(call: ToolCall): Promise<string> {
 				const entries = await vscode.workspace.fs.readDirectory(uri);
 				return entries.map(([n, t]) => (t === vscode.FileType.Directory ? `${n}/` : n)).join('\n') || '(vuota)';
 			}
+			case 'create_directory': {
+				const rel = String(call.args.path ?? '');
+				if (!rel) {
+					return 'Errore: path mancante.';
+				}
+				await vscode.workspace.fs.createDirectory(resolve(rel));
+				return `OK: cartella creata ${rel}`;
+			}
 			case 'run_command': {
 				const command = String(call.args.command ?? '');
 				if (!command) {
@@ -180,7 +194,9 @@ export async function executeTool(call: ToolCall): Promise<string> {
 					const { stdout, stderr } = await execAsync(command, {
 						cwd: workspaceRoot().fsPath,
 						timeout: 120000,
-						maxBuffer: 1024 * 1024
+						maxBuffer: 1024 * 1024,
+						// Spinge i tool a NON essere interattivi (evita wizard appesi che poi vengono annullati).
+						env: { ...process.env, CI: '1', npm_config_yes: 'true', npm_config_audit: 'false', npm_config_fund: 'false', ADBLOCK: '1' }
 					});
 					return `[stdout]\n${stdout}\n${stderr ? `[stderr]\n${stderr}` : ''}`.trim();
 				} catch (err: any) {

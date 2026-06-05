@@ -129,9 +129,21 @@ export async function buildGroundingContext(): Promise<string> {
 	return [project, steering].filter(Boolean).join('\n\n');
 }
 
+/** Info sull'ambiente: indica al modello SO e shell così usa la sintassi giusta. */
+function environmentInfo(): string {
+	const isWin = process.platform === 'win32';
+	const shell = isWin ? 'cmd.exe (Prompt dei comandi di Windows)' : '/bin/sh';
+	const folders = vscode.workspace.workspaceFolders;
+	const cwd = folders?.length ? folders[0].uri.fsPath : '(nessuna cartella aperta)';
+	const winRules = isWin
+		? '\n- Sintassi WINDOWS: NON usare comandi bash/unix (niente `mkdir -p`, `ls`, `rm -rf`, `touch`, né espansione graffe `{a,b}`). Per più comandi separa con `&&`.\n- Per creare cartelle usa il tool create_directory (NON `mkdir` da shell). Per creare/scrivere file usa write_file (crea da solo le cartelle mancanti).'
+		: '';
+	return `## Ambiente\n- Sistema operativo: ${process.platform}\n- Shell di run_command: ${shell}\n- Cartella di lavoro: ${cwd}\n- I comandi devono essere NON interattivi (usa flag tipo --yes/--y; non lanciare wizard che restano in attesa di input).${winRules}`;
+}
+
 export async function buildSystemPrompt(extra?: string): Promise<string> {
 	const [project, steering, active] = await Promise.all([buildProjectContext(), buildSteeringContext(), buildActiveContext()]);
-	return [BASE_SYSTEM, project, steering, active, extra].filter(Boolean).join('\n\n');
+	return [BASE_SYSTEM, environmentInfo(), project, steering, active, extra].filter(Boolean).join('\n\n');
 }
 
 /** Streaming: invoca onDelta per ogni frammento di testo. */
