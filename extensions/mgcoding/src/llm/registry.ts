@@ -57,6 +57,7 @@ export class ProviderRegistry implements vscode.Disposable {
 					model: c.get<string>('claude.model', 'claude-opus-4-8'),
 					maxTokens: c.get<number>('claude.maxTokens', 8192),
 					thinking: c.get<boolean>('claude.thinking', false),
+					thinkingAuto: c.get<boolean>('claude.thinkingAuto', true),
 					thinkingBudget: c.get<number>('claude.thinkingBudget', 2048)
 				};
 			}

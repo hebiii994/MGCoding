@@ -3,7 +3,7 @@
 	"publisher": "mgcoding",
 	"displayName": "MGCoding",
 	"description": "Agente di sviluppo spec-driven (Specs, Steering, Hooks, MCP) con LLM locale o Claude.",
-	"version": "0.5.6",
+	"version": "0.5.7",
 	"license": "MIT",
 	"engines": {
 		"vscode": "^1.5.0"
@@ -575,7 +575,12 @@
 				"mgcoding.claude.thinking": {
 					"type": "boolean",
 					"default": false,
-					"description": "Abilita l'extended thinking di Claude (mostra il ragionamento nel pannello Ragionamento)."
+					"description": "Abilita l'extended thinking di Claude anche nella chat semplice (mostra il ragionamento nel pannello Ragionamento)."
+				},
+				"mgcoding.claude.thinkingAuto": {
+					"type": "boolean",
+					"default": true,
+					"description": "Attiva automaticamente l'extended thinking di Claude nei task agentici (con tool): ragionare migliora molto la qualità. Disattivalo per risposte più rapide/economiche."
 				},
 				"mgcoding.claude.thinkingBudget": {
 					"type": "number",

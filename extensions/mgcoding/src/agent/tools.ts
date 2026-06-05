@@ -71,6 +71,12 @@ export const TOOL_SPECS: ToolSpec[] = [
 		description: 'Cerca testo o regex nei file, opzionalmente sotto una cartella "path". Ritorna righe "file:linea: testo".',
 		args: '{"query": "pattern", "glob": "**/*.ts", "path": "src"}',
 		inputSchema: { type: 'object', properties: { query: { type: 'string' }, glob: { type: 'string' }, path: { type: 'string', description: 'Cartella base relativa' } }, required: ['query'] }
+	},
+	{
+		name: 'get_diagnostics',
+		description: 'Errori e warning correnti dai language server (TypeScript, ESLint, ecc.), per un file o per tutto il workspace. Usalo per "correggi gli errori" e SEMPRE per verificare dopo aver modificato del codice.',
+		args: '{"path": "src/x.ts"}  // path opzionale: vuoto = intero workspace',
+		inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'File relativo da controllare; vuoto = intero workspace' } } }
 	}
 ];
 
@@ -259,6 +265,26 @@ export async function executeTool(call: ToolCall): Promise<string> {
 					}
 				}
 				return out.join('\n') || '(nessuna corrispondenza)';
+			}
+			case 'get_diagnostics': {
+				const sevName = (s: vscode.DiagnosticSeverity): string =>
+					s === vscode.DiagnosticSeverity.Error ? 'errore' : s === vscode.DiagnosticSeverity.Warning ? 'warning' : 'info';
+				const fmt = (uri: vscode.Uri, diags: readonly vscode.Diagnostic[]): string[] =>
+					diags
+						.filter(d => d.severity <= vscode.DiagnosticSeverity.Warning)
+						.map(d => `${vscode.workspace.asRelativePath(uri, false)}:${d.range.start.line + 1}:${d.range.start.character + 1} ${sevName(d.severity)} ${d.message.split('\n')[0]}${d.source ? ` [${d.source}]` : ''}`);
+				const lines: string[] = [];
+				if (call.args.path) {
+					lines.push(...fmt(resolve(String(call.args.path)), vscode.languages.getDiagnostics(resolve(String(call.args.path)))));
+				} else {
+					for (const [uri, diags] of vscode.languages.getDiagnostics()) {
+						lines.push(...fmt(uri, diags));
+						if (lines.length > 200) {
+							break;
+						}
+					}
+				}
+				return lines.length ? lines.slice(0, 200).join('\n') : 'Nessun errore o warning rilevato.';
 			}
 			default: {
 				const mcp = getMcpManager();

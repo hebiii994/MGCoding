@@ -13,6 +13,9 @@ import { anthropicBuiltinTools, executeTool, ToolCall, TOOL_SPECS } from './tool
 
 const MAX_ITERATIONS = 30;
 
+/** Tool senza effetti collaterali: eseguibili in parallelo nello stesso turno. */
+const READ_ONLY_TOOLS = new Set(['read_file', 'list_dir', 'find_files', 'search_text', 'get_diagnostics']);
+
 function toolSystemPrompt(): string {
 	const specs = [...TOOL_SPECS, ...(getMcpManager()?.toolSpecs() ?? [])];
 	const list = specs.map(t => `- ${t.name}: ${t.description} args: ${t.args}`).join('\n');
@@ -279,13 +282,27 @@ async function runNativeAgent(
 			cb.onAssistantText(textAcc);
 		}
 
-		// Esegue i tool e prepara i tool_result.
+		// Esegue i tool e prepara i tool_result. Se nella stessa risposta ci sono PIÙ
+		// tool di sola lettura, li esegue in PARALLELO (più veloce); le scritture/comandi
+		// restano sequenziali (ordine e conferme).
 		const resultBlocks: AnthropicBlock[] = [];
-		for (const tu of toolUses) {
-			cb.onToolStart({ tool: tu.name, args: tu.input });
-			const result = await executeTool({ tool: tu.name, args: tu.input });
-			cb.onToolResult(result);
-			resultBlocks.push({ type: 'tool_result', tool_use_id: tu.id, content: result });
+		if (toolUses.length > 1 && toolUses.every(tu => READ_ONLY_TOOLS.has(tu.name))) {
+			const results = await Promise.all(toolUses.map(async tu => {
+				cb.onToolStart({ tool: tu.name, args: tu.input });
+				const result = await executeTool({ tool: tu.name, args: tu.input });
+				cb.onToolResult(result);
+				return { id: tu.id, result };
+			}));
+			for (const r of results) {
+				resultBlocks.push({ type: 'tool_result', tool_use_id: r.id, content: r.result });
+			}
+		} else {
+			for (const tu of toolUses) {
+				cb.onToolStart({ tool: tu.name, args: tu.input });
+				const result = await executeTool({ tool: tu.name, args: tu.input });
+				cb.onToolResult(result);
+				resultBlocks.push({ type: 'tool_result', tool_use_id: tu.id, content: result });
+			}
 		}
 		messages.push({ role: 'user', content: resultBlocks });
 	}

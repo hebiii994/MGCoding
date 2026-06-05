@@ -32,6 +32,8 @@ export interface ClaudeConfig {
 	model: string;
 	maxTokens: number;
 	thinking?: boolean;
+	/** Attiva l'extended thinking nel percorso agentico (tool-use) anche se "thinking" è off. */
+	thinkingAuto?: boolean;
 	thinkingBudget?: number;
 }
 
@@ -138,7 +140,9 @@ export class ClaudeProvider implements LLMProvider {
 			messages: params.messages,
 			tools: cachedTools(params.tools as unknown[])
 		};
-		if (cfg.thinking) {
+		// Extended thinking nel percorso agentico: attivo se richiesto esplicitamente
+		// o in automatico (thinkingAuto), perché ragionare aiuta molto nei task con tool.
+		if (cfg.thinking || cfg.thinkingAuto) {
 			const budget = Math.min(cfg.thinkingBudget ?? 2048, Math.max(1024, maxTokens - 1024));
 			body.thinking = { type: 'enabled', budget_tokens: budget };
 		}
