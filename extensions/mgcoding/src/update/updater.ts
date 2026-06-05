@@ -176,7 +176,8 @@ async function downloadAndInstall(): Promise<void> {
 		'echo Riavvio di MGCoding...',
 		`start "" "${exePath}"`,
 		`"${schtasks}" /Delete /F /TN ${taskName} >NUL 2>&1`,
-		'del "%~f0"'
+		// Auto-eliminazione pulita (evita il messaggio "batch file cannot be found").
+		'(goto) 2>nul & del "%~f0"'
 	].join('\r\n');
 
 	let launchError = '';

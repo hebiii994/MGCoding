@@ -29,7 +29,7 @@ function electronTarget() {
 	throw new Error('Impossibile determinare la versione target di Electron da .npmrc');
 }
 
-const MODULES = ['@vscode/sqlite3', 'native-keymap'];
+const MODULES = ['@vscode/sqlite3', 'native-keymap', 'native-is-elevated', '@parcel/watcher', 'node-pty'];
 
 const target = electronTarget();
 console.log(`[mgcoding] Ricompilo i moduli nativi per Electron ${target}: ${MODULES.join(', ')}`);
