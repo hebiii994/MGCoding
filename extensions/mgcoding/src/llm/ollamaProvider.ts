@@ -15,6 +15,7 @@ export interface OllamaConfig {
 interface OllamaMessage {
 	role: string;
 	content: string;
+	images?: string[];
 	tool_calls?: { function: { name: string; arguments: unknown } }[];
 }
 
@@ -187,7 +188,16 @@ export class OllamaProvider implements LLMProvider {
 					}
 				} else {
 					const text = m.content.filter(b => b.type === 'text').map(b => (b as { text: string }).text).join('');
-					out.push({ role: 'user', content: text });
+					// Immagini (vision): Ollama vuole i base64 grezzi nel campo "images".
+					const images = m.content
+						.filter(b => b.type === 'image')
+						.map(b => (b as { source?: { data?: string } }).source?.data)
+						.filter((x): x is string => !!x);
+					const msg: OllamaMessage = { role: 'user', content: text };
+					if (images.length) {
+						msg.images = images;
+					}
+					out.push(msg);
 				}
 			}
 		}

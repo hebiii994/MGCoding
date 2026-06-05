@@ -1323,6 +1323,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	// Voci disponibili per la sintesi vocale (caricate in modo asincrono dal browser).
 	var mgVoices = [];
 	var mgVoiceLang = 'it-IT';
+	var mgVoiceWarned = false;
 	function loadVoices() { try { mgVoices = window.speechSynthesis.getVoices() || []; } catch (e) {} }
 	try { loadVoices(); if (window.speechSynthesis) { window.speechSynthesis.onvoiceschanged = loadVoices; } } catch (e) {}
 	// Rileva in modo euristico se il testo è italiano o inglese, con forte preferenza
@@ -1354,6 +1355,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			s.cancel();
 			var lang = chosenLang(clean);
 			var v = pickVoice(lang);
+			// Se manca una voce per la lingua richiesta, avvisa UNA volta (causa tipica del
+			// "legge in inglese": nessuna voce italiana installata nel sistema).
+			if (!v && lang === 'it' && !mgVoiceWarned) {
+				mgVoiceWarned = true;
+				addStatic('error', 'Nessuna voce italiana trovata nel sistema: la lettura userà la voce predefinita (inglese). Per leggere in italiano installa una voce IT da Impostazioni Windows → Ora e lingua → Voce → Aggiungi voci → Italiano (poi riavvia MGCoding).');
+			}
 			var u = new SpeechSynthesisUtterance(clean.slice(0, 4000));
 			u.lang = v ? v.lang : (lang === 'en' ? 'en-US' : 'it-IT');
 			if (v) { u.voice = v; }
