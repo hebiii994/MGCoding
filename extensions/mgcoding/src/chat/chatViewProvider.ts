@@ -515,6 +515,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	private async handleSend(text: string, images?: string[]): Promise<void> {
 		const session = this.active();
 		track('chat_sent', { mode: session.mode, provider: vscode.workspace.getConfiguration('mgcoding').get<string>('provider', 'ollama'), hasImages: !!images?.length });
+		// "Riprendi/continua la spec …" in linguaggio naturale (qualsiasi modalità).
+		if (await this.tryResumeSpec(text)) {
+			return;
+		}
 		if (session.mode === 'spec') {
 			if (session.title === 'Nuova sessione') {
 				session.title = (text || 'Spec').slice(0, 40);
@@ -647,7 +651,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		const text = this.pendingSpecText;
 		this.pendingSpecText = '';
 		if (choice === 'yes' && text) {
-			const name = (text.split('\n')[0] || 'Nuova funzionalità').slice(0, 60);
+			const name = await this.conciseSpecName(text);
 			session.mode = 'spec';
 			session.spec = { name, slug: slugify(name), idea: text, phase: 'requirements' };
 			await this.save();
@@ -682,6 +686,104 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 
 	// ---- Workflow Spec guidato (requirements → design → tasks → esecuzione) ----
 
+	/** Elenca le spec esistenti (.mg/specs) con lo stato dei documenti. */
+	private async listSpecsWithState(): Promise<{ slug: string; dir: vscode.Uri; req: boolean; design: boolean; tasks: boolean; mtime: number }[]> {
+		const root = specsRoot();
+		if (!root) {
+			return [];
+		}
+		let entries: [string, vscode.FileType][];
+		try {
+			entries = await vscode.workspace.fs.readDirectory(root);
+		} catch {
+			return [];
+		}
+		const has = async (dir: vscode.Uri, f: string): Promise<boolean> => {
+			try { await vscode.workspace.fs.stat(vscode.Uri.joinPath(dir, f)); return true; } catch { return false; }
+		};
+		const out: { slug: string; dir: vscode.Uri; req: boolean; design: boolean; tasks: boolean; mtime: number }[] = [];
+		for (const [name, t] of entries) {
+			if (t !== vscode.FileType.Directory) {
+				continue;
+			}
+			const dir = vscode.Uri.joinPath(root, name);
+			let mtime = 0;
+			try { mtime = (await vscode.workspace.fs.stat(dir)).mtime; } catch { /* ignora */ }
+			out.push({ slug: name, dir, req: await has(dir, 'requirements.md'), design: await has(dir, 'design.md'), tasks: await has(dir, 'tasks.md'), mtime });
+		}
+		return out;
+	}
+
+	/** Se il messaggio chiede di riprendere/continuare una spec esistente, la carica. */
+	private async tryResumeSpec(text: string): Promise<boolean> {
+		const t = text.toLowerCase();
+		const resumeIntent = /\b(riprend|riprist|continu|riapri|prosegu|complet|finisc|carica|recuper)\w*/.test(t)
+			&& /(spec|precedent|ultim|prima|esistent|quell|lasciat|sospes|iniziat)/.test(t);
+		if (!resumeIntent) {
+			return false;
+		}
+		const specs = await this.listSpecsWithState();
+		if (!specs.length) {
+			return false;
+		}
+		// 1) match esplicito per nome nel messaggio; 2) "ultima/recente"; 3) una sola; 4) scelta.
+		let chosen = specs.find(s => t.includes(s.slug.replace(/-/g, ' ')) || t.includes(s.slug.toLowerCase()));
+		if (!chosen) {
+			if (specs.length === 1 || /(ultim|recent|precedent|prima|sospes|lasciat)/.test(t)) {
+				chosen = specs.slice().sort((a, b) => b.mtime - a.mtime)[0];
+			} else {
+				const pick = await vscode.window.showQuickPick(specs.map(s => s.slug), { placeHolder: 'Quale spec vuoi riprendere?' });
+				if (!pick) {
+					return true;
+				}
+				chosen = specs.find(s => s.slug === pick);
+			}
+		}
+		if (!chosen) {
+			return false;
+		}
+		await this.loadSpecIntoSession(chosen);
+		return true;
+	}
+
+	/** Carica una spec esistente nella sessione e prosegue dalla fase mancante. */
+	private async loadSpecIntoSession(s: { slug: string; dir: vscode.Uri; req: boolean; design: boolean; tasks: boolean }): Promise<void> {
+		const session = this.active();
+		const dec = new TextDecoder();
+		const read = async (f: string): Promise<string> => {
+			try { return dec.decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(s.dir, f))); } catch { return ''; }
+		};
+		const requirements = await read('requirements.md');
+		const design = await read('design.md');
+		const phase: SpecPhase = !s.req ? 'requirements' : !s.design ? 'design' : !s.tasks ? 'tasks' : 'done';
+		session.mode = 'spec';
+		session.spec = { name: s.slug.replace(/-/g, ' '), slug: s.slug, idea: requirements.slice(0, 200) || s.slug, phase, requirements, design };
+		await this.save();
+		await this.sendState();
+		const have = [s.req && 'requirements', s.design && 'design', s.tasks && 'tasks'].filter(Boolean).join(' + ') || 'nessun documento';
+		this.post({ type: 'assistant', text: `📂 Ho ripreso la spec «${s.slug}» (presenti: ${have}).` });
+		if (phase === 'done') {
+			this.post({ type: 'assistant', text: 'La spec è completa. Vuoi eseguire i task o modificare un documento?' });
+			this.post({ type: 'specActions', phase: 'done' });
+		} else {
+			this.post({ type: 'assistant', text: `Proseguo generando: ${SPEC_PHASE_TITLE[phase]}…` });
+			await this.runSpecPhase(phase as Exclude<SpecPhase, 'done'>);
+		}
+	}
+
+	/** Genera un titolo breve e sensato per la spec a partire dall'idea (fallback euristico). */
+	private async conciseSpecName(idea: string): Promise<string> {
+		const fallback = (idea.split('\n')[0] || 'Nuova funzionalità').replace(/^(ciao|ehi|hey|salve)[,!.\s]*/i, '').replace(/^(vorrei|voglio|potresti|puoi)\s+/i, '').slice(0, 50).trim() || 'Nuova funzionalità';
+		try {
+			const sys = 'Proponi un TITOLO BREVE (2-5 parole, in italiano) per la funzionalità o app descritta dal messaggio. Rispondi SOLO con il titolo, senza virgolette né punteggiatura finale.';
+			const raw = await complete(this.registry, [{ role: 'user', content: idea }], sys, undefined, undefined, true);
+			const name = splitThink(raw).answer.trim().split('\n')[0].replace(/^["'«»]+|["'«».]+$/g, '').slice(0, 50).trim();
+			return name || fallback;
+		} catch {
+			return fallback;
+		}
+	}
+
 	/** Gestisce un messaggio in modalità Spec. Ritorna false se va trattato come chat normale. */
 	private async handleSpecMessage(text: string): Promise<boolean> {
 		const session = this.active();
@@ -696,7 +798,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			return false;
 		}
 		if (!session.spec) {
-			const name = (text.trim().split('\n')[0] || 'Nuova funzionalità').slice(0, 60);
+			const name = await this.conciseSpecName(text.trim());
 			session.spec = { name, slug: slugify(name), idea: text.trim(), phase: 'requirements' };
 			// Chiede COME procedere (combo): passo-passo / veloce / singolo file.
 			this.post({ type: 'assistant', text: `📋 Spec «${name}». Come vuoi procedere?` });
