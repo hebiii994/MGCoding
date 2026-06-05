@@ -8,6 +8,26 @@ import { AgentStreamParams, AnthropicStreamEvent, ChatMessage, LLMError, LLMProv
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_VERSION = '2023-06-01';
 
+const EPHEMERAL = { type: 'ephemeral' as const };
+
+/** System prompt come blocco cache-abile (prompt caching). Vuoto → non inviare nulla di cache. */
+function cachedSystem(system?: string): unknown {
+	if (!system || !system.trim()) {
+		return system;
+	}
+	return [{ type: 'text', text: system, cache_control: EPHEMERAL }];
+}
+
+/** Marca l'ultimo tool con cache_control così l'intero blocco tools viene messo in cache. */
+function cachedTools(tools?: unknown[]): unknown[] | undefined {
+	if (!tools || !tools.length) {
+		return tools;
+	}
+	const out = tools.map(t => ({ ...(t as object) }));
+	out[out.length - 1] = { ...(out[out.length - 1] as object), cache_control: EPHEMERAL };
+	return out;
+}
+
 export interface ClaudeConfig {
 	model: string;
 	maxTokens: number;
@@ -93,7 +113,7 @@ export class ClaudeProvider implements LLMProvider {
 		const body = {
 			model: cfg.model,
 			max_tokens: req.maxTokens ?? cfg.maxTokens,
-			system: req.system,
+			system: cachedSystem(req.system),
 			messages: req.messages
 				.filter(m => m.role !== 'system')
 				.map((m: ChatMessage) => ({ role: m.role, content: m.content }))
@@ -114,9 +134,9 @@ export class ClaudeProvider implements LLMProvider {
 		const body: Record<string, unknown> = {
 			model: cfg.model,
 			max_tokens: maxTokens,
-			system: params.system,
+			system: cachedSystem(params.system),
 			messages: params.messages,
-			tools: params.tools
+			tools: cachedTools(params.tools as unknown[])
 		};
 		if (cfg.thinking) {
 			const budget = Math.min(cfg.thinkingBudget ?? 2048, Math.max(1024, maxTokens - 1024));

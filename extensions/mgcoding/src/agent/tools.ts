@@ -32,13 +32,13 @@ export interface ToolSpec {
 export const TOOL_SPECS: ToolSpec[] = [
 	{
 		name: 'read_file',
-		description: 'Legge il contenuto di un file (percorso relativo alla radice del workspace).',
-		args: '{"path": "percorso/relativo"}',
-		inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'Percorso relativo del file' } }, required: ['path'] }
+		description: 'Legge un file (percorso relativo alla radice). Restituisce ogni riga con il numero ("N\\tcontenuto"): i numeri servono solo a orientarti e NON fanno parte del file — rimuovili prima di usare il testo in apply_patch. Per file grandi usa offset/limit.',
+		args: '{"path": "percorso/relativo", "offset": 0, "limit": 400}',
+		inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'Percorso relativo del file' }, offset: { type: 'number', description: 'Riga di partenza (0-based)' }, limit: { type: 'number', description: 'Numero massimo di righe da leggere' } }, required: ['path'] }
 	},
 	{
 		name: 'write_file',
-		description: 'Crea o sovrascrive un file con il contenuto dato.',
+		description: 'Crea un nuovo file o ne sovrascrive UNO ESISTENTE per intero. Per modifiche mirate a un file esistente preferisci apply_patch (più sicuro). Crea automaticamente le cartelle mancanti.',
 		args: '{"path": "percorso/relativo", "content": "..."}',
 		inputSchema: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] }
 	},
@@ -109,7 +109,20 @@ export async function executeTool(call: ToolCall): Promise<string> {
 			case 'read_file': {
 				const uri = resolve(String(call.args.path));
 				const bytes = await vscode.workspace.fs.readFile(uri);
-				return DEC.decode(bytes);
+				const lines = DEC.decode(bytes).split('\n');
+				const offset = Math.max(0, Math.floor(Number(call.args.offset ?? 0)) || 0);
+				const limit = call.args.limit !== undefined ? Math.max(1, Math.floor(Number(call.args.limit))) : undefined;
+				const end = limit !== undefined ? Math.min(lines.length, offset + limit) : lines.length;
+				const MAX_CHARS = 100000;
+				let body = lines.slice(offset, end).map((l, i) => `${offset + i + 1}\t${l}`).join('\n');
+				let note = '';
+				if (body.length > MAX_CHARS) {
+					body = body.slice(0, MAX_CHARS);
+					note = '\n… [output troncato: usa offset/limit per leggere il resto]';
+				} else if (end < lines.length) {
+					note = `\n… [altre ${lines.length - end} righe; continua con offset=${end}]`;
+				}
+				return (body + note) || '(file vuoto)';
 			}
 			case 'write_file': {
 				const rel = String(call.args.path);

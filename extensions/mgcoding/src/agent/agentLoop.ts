@@ -11,7 +11,7 @@ import { parseToolCall, TOOL_RE } from '../util/parsing';
 import { buildSystemPrompt, complete, streamChat } from './agent';
 import { anthropicBuiltinTools, executeTool, ToolCall, TOOL_SPECS } from './tools';
 
-const MAX_ITERATIONS = 12;
+const MAX_ITERATIONS = 30;
 
 function toolSystemPrompt(): string {
 	const specs = [...TOOL_SPECS, ...(getMcpManager()?.toolSpecs() ?? [])];
