@@ -17,6 +17,7 @@ import { importFromKiro } from './migrate/importKiro';
 import { checkForUpdates } from './update/updater';
 import { initAnalytics, track, toggleAnalytics } from './analytics/analytics';
 import { registerAutocomplete } from './complete/autocomplete';
+import { TelegramBridge } from './remote/telegram';
 import { createSpec, runSpecTask, runSpecTasks, runSpecTasksParallel, SpecsTreeProvider, SpecTasksCodeLensProvider, toggleSpecTask } from './specs/specs';
 import { initSteering, SteeringTreeProvider } from './steering/steering';
 
@@ -115,6 +116,16 @@ export function activate(context: vscode.ExtensionContext): void {
 	const hookManager = new HookManager(registry, () => hooksTree.refresh(), () => chat.runReporter(), () => chat.beginRun());
 	context.subscriptions.push(hookManager);
 
+	// Bridge Telegram (controllo da smartphone). Si avvia solo se è stato salvato un token.
+	const TELEGRAM_SECRET = 'mgcoding.telegram.token';
+	const telegram = new TelegramBridge(registry, context.globalState);
+	context.subscriptions.push({ dispose: () => telegram.dispose() });
+	void context.secrets.get(TELEGRAM_SECRET).then(tok => {
+		if (tok) {
+			void telegram.start(tok);
+		}
+	});
+
 	const restartMcp = async () => { await mcpManager.start(); mcpTree.refresh(); };
 	void restartMcp();
 	const mcpWatcher = vscode.workspace.createFileSystemWatcher('**/{.mg/mcp.json,.kiro/settings/mcp.json}');
@@ -137,6 +148,29 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('mgcoding.switchProvider', () => registry.switchProvider()),
 		vscode.commands.registerCommand('mgcoding.guidedSetup', () => registry.guidedSetup()),
 		vscode.commands.registerCommand('mgcoding.toggleAnalytics', () => toggleAnalytics()),
+		vscode.commands.registerCommand('mgcoding.connectTelegram', async () => {
+			const token = await vscode.window.showInputBox({
+				title: 'Connetti Telegram',
+				prompt: 'Incolla il token del tuo bot (da @BotFather su Telegram)',
+				placeHolder: '123456789:ABC...',
+				password: true,
+				ignoreFocusOut: true
+			});
+			if (!token || !token.includes(':')) {
+				if (token !== undefined) {
+					vscode.window.showWarningMessage('Token non valido.');
+				}
+				return;
+			}
+			await context.secrets.store(TELEGRAM_SECRET, token.trim());
+			await telegram.start(token.trim());
+		}),
+		vscode.commands.registerCommand('mgcoding.disconnectTelegram', async () => {
+			telegram.stop();
+			await context.secrets.delete(TELEGRAM_SECRET);
+			await context.globalState.update('mgcoding.telegram.chatId', undefined);
+			vscode.window.showInformationMessage('Telegram disconnesso.');
+		}),
 		vscode.commands.registerCommand('mgcoding.toggleNativeTools', async () => {
 			const cfg = vscode.workspace.getConfiguration('mgcoding');
 			const next = !cfg.get<boolean>('ollama.nativeTools', false);

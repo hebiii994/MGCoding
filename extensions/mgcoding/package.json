@@ -3,7 +3,7 @@
 	"publisher": "mgcoding",
 	"displayName": "MGCoding",
 	"description": "Agente di sviluppo spec-driven (Specs, Steering, Hooks, MCP) con LLM locale o Claude.",
-	"version": "0.5.13",
+	"version": "0.6.0",
 	"license": "MIT",
 	"engines": {
 		"vscode": "^1.5.0"
@@ -156,6 +156,14 @@
 			{
 				"command": "mgcoding.toggleNativeTools",
 				"title": "MGCoding: Tool nativi Ollama on/off"
+			},
+			{
+				"command": "mgcoding.connectTelegram",
+				"title": "MGCoding: Connetti Telegram (controllo da smartphone)"
+			},
+			{
+				"command": "mgcoding.disconnectTelegram",
+				"title": "MGCoding: Disconnetti Telegram"
 			},
 			{
 				"command": "mgcoding.initSteering",
@@ -484,6 +492,11 @@
 					"type": "boolean",
 					"default": false,
 					"description": "Invia automaticamente il messaggio dopo la trascrizione vocale."
+				},
+				"mgcoding.telegram.autoApprove": {
+					"type": "boolean",
+					"default": false,
+					"description": "Consenti all'agente, quando comandato da Telegram (da remoto), di modificare file ed eseguire comandi SENZA conferma sul PC. Lascialo disattivato per sicurezza: da remoto le azioni che richiedono conferma verranno saltate."
 				},
 				"mgcoding.voice.lang": {
 					"type": "string",

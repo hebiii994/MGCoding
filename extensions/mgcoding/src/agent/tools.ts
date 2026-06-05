@@ -121,6 +121,14 @@ function isProtectedSpecFile(rel: string): boolean {
 	return blockSpecWrites && SPEC_FILE_GUARD.test(rel.replace(/\\/g, '/'));
 }
 
+/** Modalità remota (Telegram): non ci sono dialog di conferma sul PC. */
+let remoteMode = false;
+let remoteAutoApprove = false;
+export function setRemoteMode(on: boolean, autoApprove: boolean): void {
+	remoteMode = on;
+	remoteAutoApprove = autoApprove;
+}
+
 export async function executeTool(call: ToolCall): Promise<string> {
 	try {
 		switch (call.tool) {
@@ -155,8 +163,11 @@ export async function executeTool(call: ToolCall): Promise<string> {
 				} catch {
 					// file nuovo
 				}
+				if (remoteMode && !remoteAutoApprove) {
+					return `Modifica a ${rel} NON applicata: da remoto serve la conferma. Attiva "mgcoding.telegram.autoApprove" per consentire le modifiche a distanza.`;
+				}
 				const cfg = vscode.workspace.getConfiguration('mgcoding');
-				const needApproval = cfg.get<boolean>('diffApproval', true) && !cfg.get<boolean>('autoApprove', false);
+				const needApproval = !remoteMode && cfg.get<boolean>('diffApproval', true) && !cfg.get<boolean>('autoApprove', false);
 				if (needApproval) {
 					const ok = await confirmWrite(rel, oldContent, newContent);
 					if (!ok) {
@@ -186,7 +197,10 @@ export async function executeTool(call: ToolCall): Promise<string> {
 				if (!command) {
 					return 'Errore: comando vuoto.';
 				}
-				const auto = vscode.workspace.getConfiguration('mgcoding').get<boolean>('autoApprove', false);
+				if (remoteMode && !remoteAutoApprove) {
+					return `Comando NON eseguito (da remoto serve conferma): ${command}. Attiva "mgcoding.telegram.autoApprove" per consentire i comandi a distanza.`;
+				}
+				const auto = remoteMode ? remoteAutoApprove : vscode.workspace.getConfiguration('mgcoding').get<boolean>('autoApprove', false);
 				if (!auto) {
 					const ok = await vscode.window.showWarningMessage(
 						`L'agente vuole eseguire:\n\n${command}`,
@@ -235,8 +249,11 @@ export async function executeTool(call: ToolCall): Promise<string> {
 					return `Errore: old_string presente ${occurrences} volte in ${rel}; rendilo univoco o usa replaceAll:true.`;
 				}
 				const updated = replaceAll ? content.split(oldStr).join(newStr) : content.replace(oldStr, newStr);
+				if (remoteMode && !remoteAutoApprove) {
+					return `Modifica a ${rel} NON applicata: da remoto serve la conferma. Attiva "mgcoding.telegram.autoApprove" per consentire le modifiche a distanza.`;
+				}
 				const cfg = vscode.workspace.getConfiguration('mgcoding');
-				const needApproval = cfg.get<boolean>('diffApproval', true) && !cfg.get<boolean>('autoApprove', false);
+				const needApproval = !remoteMode && cfg.get<boolean>('diffApproval', true) && !cfg.get<boolean>('autoApprove', false);
 				if (needApproval && !(await confirmWrite(rel, content, updated))) {
 					return `Modifica a ${rel} scartata dall'utente.`;
 				}
