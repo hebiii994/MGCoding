@@ -10,6 +10,33 @@ import { setSpecWriteGuard } from '../agent/tools';
 import { ProviderRegistry } from '../llm/registry';
 import { RunReporter } from '../run/runView';
 import { resolveFeatureDirs } from '../util/paths';
+import { splitThink } from '../util/parsing';
+
+/** Genera un report finale (cosa è stato fatto + come avviarlo), salvato anche in REPORT.md. */
+async function generateRunReport(registry: ProviderRegistry, specDir: vscode.Uri, specName: string, completed: string[], reporter: RunReporter): Promise<void> {
+	if (!completed.length || !reporter.summary) {
+		return;
+	}
+	try {
+		const folders = vscode.workspace.workspaceFolders;
+		let scripts = '(nessun package.json)';
+		if (folders?.length) {
+			try {
+				const pkg = JSON.parse(DEC.decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(folders[0].uri, 'package.json')))) as { scripts?: Record<string, string> };
+				scripts = JSON.stringify(pkg.scripts ?? {}, null, 2);
+			} catch { /* nessun package.json */ }
+		}
+		reporter.log('📝 Genero il report finale…');
+		const sys = 'Scrivi un REPORT finale CONCISO in italiano dopo aver implementato una funzionalità. Solo Markdown, con esattamente due sezioni: "## Cosa ho fatto" (elenco puntato sintetico) e "## Come avviarlo e testarlo" (passi e comandi CONCRETI basati sugli script reali di package.json; se le dipendenze non risultano installate indica prima `npm install`). Niente blocchi di codice lunghi. Gli identificatori di codice restano in inglese.';
+		const user = `Funzionalità: ${specName}\nTask completati (${completed.length}):\n${completed.map(t => '- ' + t).join('\n')}\n\nscripts di package.json:\n${scripts}`;
+		const raw = await complete(registry, [{ role: 'user', content: user }], sys, undefined, undefined, true);
+		const report = (splitThink(raw).answer || raw).trim();
+		if (report) {
+			reporter.summary(`## ✅ Report — ${specName}\n\n${report}`);
+			try { await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(specDir, 'REPORT.md'), ENC.encode(`# Report — ${specName}\n\n${report}\n`)); } catch { /* best effort */ }
+		}
+	} catch { /* il report è opzionale */ }
+}
 
 const ENC = new TextEncoder();
 const DEC = new TextDecoder();
@@ -228,6 +255,7 @@ export async function runSpecTasks(registry: ProviderRegistry, specDir: vscode.U
 		reporter.log(`↩️ Riprendo dal task non completato (saltati ${doneCount} già fatti).`);
 	}
 
+	const completed: string[] = [];
 	setSpecWriteGuard(true);
 	try {
 	for (let i = 0; i < pending.length; i++) {
@@ -268,6 +296,7 @@ Quando hai finito di implementare questo task, fornisci un breve riepilogo di co
 			}, signal);
 			reporter.setStatus(i, 'done');
 			ok = true;
+			completed.push(task.text);
 		} catch (err) {
 			reporter.setStatus(i, 'error');
 			reporter.log(`[errore] ${String(err)}`);
@@ -283,6 +312,9 @@ Quando hai finito di implementare questo task, fornisci un breve riepilogo di co
 		setSpecWriteGuard(false);
 	}
 
+	if (!signal?.aborted) {
+		await generateRunReport(registry, specDir, specName, completed, reporter);
+	}
 	reporter.finish('=== Esecuzione task terminata ===');
 }
 
@@ -384,6 +416,7 @@ export async function runSpecTasksParallel(
 		return writeLock;
 	};
 
+	const completedP: string[] = [];
 	const runOne = async (i: number, waveNo: number): Promise<void> => {
 		const task = pending[i];
 		const tag = `[W${waveNo}·${i + 1}]`;
@@ -410,6 +443,7 @@ NON modificare i file della spec (requirements/design/tasks.md). Al termine un b
 			}, signal);
 			reporter.log(`✓ ${tag} completato`);
 			ok = true;
+			completedP.push(task.text);
 		} catch (err) {
 			reporter.log(`✗ ${tag} ${String(err)}`);
 		}
@@ -439,6 +473,9 @@ NON modificare i file della spec (requirements/design/tasks.md). Al termine un b
 	}
 
 	await writeLock;
+	if (!signal?.aborted) {
+		await generateRunReport(registry, specDir, specName, completedP, reporter);
+	}
 	reporter.finish(`=== Esecuzione a wave terminata (${specName}) ===`);
 }
 

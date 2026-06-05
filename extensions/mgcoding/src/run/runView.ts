@@ -12,6 +12,8 @@ export interface RunReporter {
 	setStatus(index: number, status: StepStatus): void;
 	log(line: string): void;
 	finish(message?: string): void;
+	/** Mostra un report finale in Markdown (cosa è stato fatto + come avviarlo). */
+	summary?(markdown: string): void;
 }
 
 interface Step {

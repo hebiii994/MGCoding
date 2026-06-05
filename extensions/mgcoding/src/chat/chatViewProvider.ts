@@ -976,6 +976,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			},
 			setStatus: () => { /* i dettagli arrivano via log */ },
 			log: (line: string) => this.post({ type: 'run', phase: 'append', text: line }),
+			summary: (markdown: string) => {
+				// Report finale come messaggio markdown vero (non run-line).
+				this.post({ type: 'run', phase: 'end' });
+				this.post({ type: 'assistant', text: markdown });
+			},
 			finish: (message?: string) => {
 				if (message) {
 					this.post({ type: 'run', phase: 'append', text: message });
