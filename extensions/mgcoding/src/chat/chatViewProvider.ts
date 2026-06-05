@@ -561,7 +561,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 				onStreamCancel: () => this.post({ type: 'streamCancel' }),
 				onAssistantText: t => this.post({ type: 'assistant', text: t }),
 				onToolStart: call => this.post({ type: 'tool', name: call.tool, args: JSON.stringify(call.args) }),
-				onToolResult: r => this.post({ type: 'toolResult', text: r })
+				onToolResult: r => this.post({ type: 'toolResult', text: r }),
+				onPlan: steps => this.post({ type: 'plan', steps })
 			}, this.abort.signal, systemExtra);
 		} catch (err) {
 			this.post({ type: 'error', text: err instanceof Error ? err.message : String(err) });
@@ -1052,6 +1053,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	.steering-chip { font-size: 11px; padding: 2px 8px; border-radius: 10px; white-space: nowrap; background: color-mix(in srgb, var(--mg-accent) 14%, transparent); border: 1px solid color-mix(in srgb, var(--mg-accent) 32%, transparent); }
 	body.busy .mg-avatar { animation: mgavatar 1.2s ease-in-out infinite; }
 	@keyframes mgavatar { 0%,100% { transform: scale(1); } 50% { transform: scale(1.15); } }
+	.plan-card { align-self: stretch; background: var(--vscode-textBlockQuote-background); border-left: 3px solid var(--mg-accent); border-radius: 6px; padding: 7px 10px; margin: 4px 0; }
+	.plan-card .plan-title { font-weight: 600; font-size: 0.85em; opacity: 0.8; margin-bottom: 5px; text-transform: uppercase; letter-spacing: 0.03em; }
+	.plan-step { display: flex; align-items: flex-start; gap: 7px; padding: 2px 0; font-size: 0.92em; }
+	.plan-step .pi { flex: 0 0 auto; width: 14px; text-align: center; }
+	.plan-step.done .pt { opacity: 0.6; text-decoration: line-through; }
+	.plan-step.in_progress { font-weight: 600; }
+	.plan-step.in_progress .pi { color: var(--mg-accent); }
 	.run-block { align-self: stretch; background: var(--vscode-textBlockQuote-background); border-left: 3px solid var(--mg-accent); border-radius: 6px; }
 	.run-block .run-head { font-weight: 600; padding: 7px 9px; }
 	.run-block .run-body { padding: 0 9px 7px; font-family: var(--vscode-editor-font-family); font-size: 0.85em; opacity: 0.9; max-height: 320px; overflow: auto; }
@@ -1485,6 +1493,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		}
 		log.appendChild(card); log.scrollTop = log.scrollHeight;
 	}
+	var planCard = null;
+	// Piano di lavoro a step (tool update_plan): card che si aggiorna sul posto.
+	function renderPlan(steps) {
+		ensureCleared();
+		if (!planCard || !planCard.isConnected) {
+			planCard = document.createElement('div'); planCard.className = 'plan-card';
+			var t = document.createElement('div'); t.className = 'plan-title'; t.textContent = '\\uD83D\\uDCCB Piano';
+			planCard.appendChild(t);
+			var body = document.createElement('div'); body.className = 'plan-body'; planCard.appendChild(body);
+			planCard._body = body;
+			log.appendChild(planCard);
+		}
+		var body = planCard._body; body.innerHTML = '';
+		for (var i = 0; i < (steps || []).length; i++) {
+			var s = steps[i]; var st = s.status || 'pending';
+			var row = document.createElement('div'); row.className = 'plan-step ' + st;
+			var ic = document.createElement('span'); ic.className = 'pi';
+			ic.textContent = st === 'done' ? '\\u2713' : st === 'in_progress' ? '\\u25D0' : '\\u25CB';
+			var tx = document.createElement('span'); tx.className = 'pt'; tx.textContent = s.text;
+			row.appendChild(ic); row.appendChild(tx); body.appendChild(row);
+		}
+		log.scrollTop = log.scrollHeight;
+	}
 	function addTool(name, args) {
 		ensureCleared();
 		var el = document.createElement('div'); el.className = 'msg tool';
@@ -1709,7 +1740,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		else if (m.type === 'changes') { renderChanges(m.count || 0); }
 		else if (m.type === 'sttResult') { if (m.text) { input.value = (input.value ? input.value + ' ' : '') + m.text; autoGrow(); input.focus(); if (m.autoSend || mgHandsFree) { send(); } } else if (mgHandsFree) { restartListen(); } }
 		else if (m.type === 'sttBusy') { micBtn.classList.toggle('stt-busy', !!m.value); }
-		else if (m.type === 'steeringChips') { renderSteeringChips(m.names); }
+		else if (m.type === 'plan') { renderPlan(m.steps); }
+		else if (m.type === 'steeringChips') { renderSteeringChips(m.names); planCard = null; }
 		else if (m.type === 'specActions') { renderSpecActions(m.phase); }
 		else if (m.type === 'specModeChoose') { renderSpecModeChoose(); }
 		else if (m.type === 'specOffer') { renderSpecOffer(); }

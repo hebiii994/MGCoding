@@ -43,6 +43,26 @@ export interface AgentCallbacks {
 	onStreamDelta?(text: string): void;
 	onStreamEnd?(): void;
 	onStreamCancel?(): void;
+	/** Piano di lavoro a step aggiornato dall'agente (tool update_plan). */
+	onPlan?(steps: PlanStep[]): void;
+}
+
+export interface PlanStep {
+	text: string;
+	status?: 'pending' | 'in_progress' | 'done';
+}
+
+/** Intercetta il tool update_plan: aggiorna il piano in UI senza passare da executeTool. */
+function handlePlanTool(name: string, input: unknown, cb: AgentCallbacks): string | undefined {
+	if (name !== 'update_plan') {
+		return undefined;
+	}
+	const raw = (input as { steps?: unknown })?.steps;
+	const steps: PlanStep[] = Array.isArray(raw)
+		? raw.map(s => ({ text: String((s as PlanStep).text ?? ''), status: (s as PlanStep).status })).filter(s => s.text)
+		: [];
+	cb.onPlan?.(steps);
+	return `Piano aggiornato (${steps.length} step).`;
 }
 
 /**
@@ -145,7 +165,7 @@ async function runJsonAgent(
 		}
 
 		cb.onToolStart(call);
-		const result = await executeTool(call);
+		const result = handlePlanTool(call.tool, call.args, cb) ?? await executeTool(call);
 		cb.onToolResult(result);
 		const hint = n >= 3 ? `\n\n[AVVISO: hai già chiamato ${call.tool} con questi stessi argomenti ${n} volte. Cambia approccio (altro tool/argomenti) oppure, se hai le informazioni, procedi o concludi.]` : '';
 		messages.push({ role: 'user', content: `Risultato del tool ${call.tool}:\n${result}${hint}` });
@@ -183,6 +203,10 @@ async function runNativeAgent(
 	const callCounts = new Map<string, number>();
 	// Esegue un tool con guard anti-loop (modelli che ripetono la stessa chiamata).
 	const runToolGuarded = async (name: string, input: unknown): Promise<string> => {
+		const plan = handlePlanTool(name, input, cb);
+		if (plan !== undefined) {
+			return plan;
+		}
 		const sig = `${name}:${JSON.stringify(input)}`;
 		const n = (callCounts.get(sig) ?? 0) + 1;
 		callCounts.set(sig, n);

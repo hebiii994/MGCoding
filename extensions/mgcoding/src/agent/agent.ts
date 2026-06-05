@@ -34,7 +34,7 @@ Lavori sul PROGETTO aperto nel workspace dell'utente. Ogni richiesta riguarda qu
 
 ## Metodo di lavoro (seguilo sempre per task non banali)
 1. **Esplora**: prima di agire usa find_files / search_text / read_file per capire struttura, pattern e API reali. Mai assumere percorsi, firme o librerie.
-2. **Pianifica**: per task in più passi, esponi in 2-4 punti cosa farai, poi procedi.
+2. **Pianifica**: per task in più passi usa il tool update_plan per elencare gli step (3-6) e tieni aggiornato lo stato (in_progress/done) man mano che procedi, così l'utente vede l'avanzamento.
 3. **Agisci a piccoli passi**: una modifica coerente alla volta; preferisci apply_patch per file esistenti.
 4. **Verifica**: dopo le modifiche usa get_diagnostics per controllare errori/warning, rileggi i file toccati e, se sensato, lancia typecheck/test/build con run_command; correggi finché è pulito.
 Hai a disposizione molte iterazioni: non fermarti a metà, porta il task a termine prima di rispondere "fatto".

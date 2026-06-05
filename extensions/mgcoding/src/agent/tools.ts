@@ -79,6 +79,12 @@ export const TOOL_SPECS: ToolSpec[] = [
 		inputSchema: { type: 'object', properties: { query: { type: 'string' }, glob: { type: 'string' }, path: { type: 'string', description: 'Cartella base relativa' } }, required: ['query'] }
 	},
 	{
+		name: 'update_plan',
+		description: 'Crea o aggiorna un PIANO di lavoro a step, mostrato all\'utente in chat. Usalo all\'inizio di un task non banale per elencare i passi, e richiamalo per aggiornare lo stato man mano che procedi. Stati ammessi: "pending", "in_progress", "done". Tieni un solo step "in_progress" alla volta.',
+		args: '{"steps":[{"text":"Esplorare il codice","status":"done"},{"text":"Implementare X","status":"in_progress"},{"text":"Test","status":"pending"}]}',
+		inputSchema: { type: 'object', properties: { steps: { type: 'array', items: { type: 'object', properties: { text: { type: 'string' }, status: { type: 'string', enum: ['pending', 'in_progress', 'done'] } }, required: ['text'] } } }, required: ['steps'] }
+	},
+	{
 		name: 'get_diagnostics',
 		description: 'Errori e warning correnti dai language server (TypeScript, ESLint, ecc.), per un file o per tutto il workspace. Usalo per "correggi gli errori" e SEMPRE per verificare dopo aver modificato del codice.',
 		args: '{"path": "src/x.ts"}  // path opzionale: vuoto = intero workspace',
@@ -281,6 +287,10 @@ export async function executeTool(call: ToolCall): Promise<string> {
 					}
 				}
 				return out.join('\n') || '(nessuna corrispondenza)';
+			}
+			case 'update_plan': {
+				// Normalmente gestito nel loop agentico (handlePlanTool); qui solo fallback.
+				return 'Piano aggiornato.';
 			}
 			case 'get_diagnostics': {
 				const sevName = (s: vscode.DiagnosticSeverity): string =>
