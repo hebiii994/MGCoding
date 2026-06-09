@@ -11,7 +11,7 @@ function stripFences(text: string): string {
 	return (m ? m[1] : text).replace(/\s+$/, '');
 }
 
-export async function inlineEdit(registry: ProviderRegistry): Promise<void> {
+export async function inlineEdit(registry: ProviderRegistry, presetInstruction?: string): Promise<void> {
 	const editor = vscode.window.activeTextEditor;
 	if (!editor) {
 		vscode.window.showWarningMessage('Apri un file ed eventualmente seleziona del codice.');
@@ -24,7 +24,7 @@ export async function inlineEdit(registry: ProviderRegistry): Promise<void> {
 		vscode.window.showWarningMessage('Niente da modificare.');
 		return;
 	}
-	const instruction = await vscode.window.showInputBox({
+	const instruction = presetInstruction ?? await vscode.window.showInputBox({
 		prompt: sel.isEmpty ? 'Modifica MGCoding sul file' : 'Modifica MGCoding sulla selezione',
 		placeHolder: 'es. aggiungi gestione errori, rinomina in X, converti in async…',
 		ignoreFocusOut: true

@@ -7,11 +7,14 @@ valido da Windows.
 ## Prerequisiti (sul Mac)
 
 ```bash
-xcode-select --install            # Xcode Command Line Tools
-brew install python create-dmg    # python3 per node-gyp; create-dmg opzionale
+xcode-select --install                  # Xcode Command Line Tools
+brew install python cmake sox create-dmg # python3 (node-gyp), cmake+sox (voce), create-dmg opz.
 # Node.js 24.x (consigliato fnm o nvm):
 #   brew install fnm && fnm install 24 && fnm use 24
 ```
+
+`cmake` serve a compilare il motore vocale whisper.cpp; `sox` è il recorder del
+microfono (la voce si disattiva da sola se manca).
 
 ## Build
 
@@ -33,6 +36,16 @@ MGCODING_MAKE_DMG=1 bash build/mgcoding/build-mac-arm64.sh
 
 Senza un Apple Developer ID, al primo avvio macOS mostra "app non verificata".
 Soluzione: **clic destro sull'app → Apri** (solo la prima volta).
+
+## Voce / STT e aggiornamenti in-app (macOS)
+
+- **Voce (🎤 dettatura, 🎧 hands-free)**: funziona su Mac. Lo script compila
+  whisper.cpp (serve `cmake`) e usa `sox` di Homebrew per il microfono
+  (`brew install sox`). Senza questi, la voce resta disattivata ma il resto funziona.
+- **Aggiornamenti in-app**: dal Mac, MGCoding scarica il `.dmg` della nuova release e
+  lo monta; trascini l'app in *Applicazioni* per sostituirla. Perché funzioni, la
+  release su GitHub deve contenere un asset `*arm64*.dmg` (genera il DMG con
+  `MGCODING_MAKE_DMG=1`, vedi sotto, e caricalo nella release).
 
 ## Firma + notarizzazione (opzionale, per distribuzione pulita)
 

@@ -6,6 +6,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as vscode from 'vscode';
 import { getMcpManager } from '../mcp/mcpClient';
+import { codeIndex } from '../index/codeIndex';
 import { AnthropicToolDef } from '../llm/types';
 import { confirmWrite } from '../edit/diffApproval';
 import { recordOriginal } from '../edit/checkpoint';
@@ -56,9 +57,9 @@ export const TOOL_SPECS: ToolSpec[] = [
 	},
 	{
 		name: 'run_command',
-		description: 'Esegue un comando shell nella radice del workspace (può richiedere conferma).',
-		args: '{"command": "..."}',
-		inputSchema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] }
+		description: 'Esegue un comando shell nella radice del workspace (può richiedere conferma). I comandi che non terminano (dev server, watch: es. "npm run dev") vengono avviati nel TERMINALE INTEGRATO e considerati avviati subito — non attenderne l\'output. Per forzare il terminale su un comando, passa "background": true.',
+		args: '{"command": "npm run dev", "background": true}',
+		inputSchema: { type: 'object', properties: { command: { type: 'string' }, background: { type: 'boolean', description: 'true = avvia nel terminale integrato senza attendere (per processi che restano attivi)' } }, required: ['command'] }
 	},
 	{
 		name: 'apply_patch',
@@ -89,6 +90,30 @@ export const TOOL_SPECS: ToolSpec[] = [
 		description: 'Errori e warning correnti dai language server (TypeScript, ESLint, ecc.), per un file o per tutto il workspace. Usalo per "correggi gli errori" e SEMPRE per verificare dopo aver modificato del codice.',
 		args: '{"path": "src/x.ts"}  // path opzionale: vuoto = intero workspace',
 		inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'File relativo da controllare; vuoto = intero workspace' } } }
+	},
+	{
+		name: 'ask_user',
+		description: 'Fai una DOMANDA all\'utente mostrando opzioni cliccabili e ATTENDI la risposta. Usalo quando una scelta è ambigua e cambierebbe ciò che fai (es. linguaggio/framework, nome, approccio, file da toccare). Preferiscilo alle assunzioni silenziose. Fornisci 2-4 opzioni chiare e mutuamente esclusive; l\'utente può comunque scrivere una risposta libera.',
+		args: '{"question":"Quale framework UI preferisci?","options":["React","Vue","Svelte"],"multiSelect":false}',
+		inputSchema: { type: 'object', properties: { question: { type: 'string' }, options: { type: 'array', items: { type: 'string' }, description: '2-4 opzioni' }, multiSelect: { type: 'boolean', description: 'true se si possono scegliere più opzioni' } }, required: ['question', 'options'] }
+	},
+	{
+		name: 'search_code',
+		description: 'Ricerca SEMANTICA nel workspace (codice E documenti md/pdf/docx/pptx/xlsx): trova i frammenti più pertinenti a una descrizione in linguaggio naturale (non solo per parola esatta come search_text). USALO PER PRIMO per localizzare dove sta una funzionalità/logica/informazione prima di leggere o modificare. Richiede l\'indice (creato in automatico al primo uso).',
+		args: '{"query":"dove viene gestito il login utente","k":6}',
+		inputSchema: { type: 'object', properties: { query: { type: 'string' }, k: { type: 'number', description: 'Numero di risultati (default 6)' } }, required: ['query'] }
+	},
+	{
+		name: 'delegate',
+		description: 'Affida un SOTTOCOMPITO ben definito e indipendente a un subagent focalizzato, che lo porta a termine con i propri tool e ti restituisce un report. Usalo quando orchestri un task complesso: scomponilo (anche con update_plan) e delega i pezzi indipendenti. Dai istruzioni complete e autosufficienti nel campo task (più eventuale context), perché il subagent non vede questa conversazione.',
+		args: '{"task":"Implementa la validazione del form in src/forms/login.ts secondo questi requisiti…","context":"vincoli/decisioni rilevanti"}',
+		inputSchema: { type: 'object', properties: { task: { type: 'string' }, context: { type: 'string', description: 'Contesto/vincoli utili al subagent' } }, required: ['task'] }
+	},
+	{
+		name: 'remember',
+		description: 'Salva una preferenza PERSONALE e TRASVERSALE sull\'utente nel suo profilo (es. "preferisce TypeScript", "si chiama Marco", "vuole risposte concise", "usa Windows"). Vale per QUALSIASI progetto. NON usarlo per dettagli del progetto/workspace corrente: niente nomi di progetto/repo, niente descrizioni di cosa sta costruendo ora, niente file/funzioni/feature specifiche (quelli NON sono preferenze e non vanno ricordati tra progetti).',
+		args: '{"fact":"Preferisce TypeScript e risposte concise"}',
+		inputSchema: { type: 'object', properties: { fact: { type: 'string', description: 'La preferenza/fatto da ricordare, conciso' } }, required: ['fact'] }
 	}
 ];
 
@@ -127,6 +152,35 @@ let remoteAutoApprove = false;
 export function setRemoteMode(on: boolean, autoApprove: boolean): void {
 	remoteMode = on;
 	remoteAutoApprove = autoApprove;
+}
+
+/**
+ * Diagnostiche di tipo ERRORE per i file relativi indicati (per la verifica automatica).
+ * Ritorna '' se non ci sono errori. Esclude i warning per non innescare loop di correzione.
+ */
+export async function errorsForPaths(relPaths: string[]): Promise<string> {
+	const lines: string[] = [];
+	for (const rel of relPaths) {
+		const uri = resolve(rel);
+		for (const d of vscode.languages.getDiagnostics(uri)) {
+			if (d.severity === vscode.DiagnosticSeverity.Error) {
+				lines.push(`${rel}:${d.range.start.line + 1}:${d.range.start.character + 1} ${d.message.split('\n')[0]}${d.source ? ` [${d.source}]` : ''}`);
+			}
+		}
+	}
+	return lines.slice(0, 80).join('\n');
+}
+
+/** Comandi che NON terminano (dev server, watcher): vanno nel terminale integrato. */
+const LONG_RUNNING_RE = /\b(npm|yarn|pnpm|bun)\s+(run\s+)?(dev|start|serve|watch|preview)\b|\bvite\b|\bnext\s+(dev|start)\b|\bnodemon\b|--watch\b|\bwatch\b|http-server\b|http\.server\b|\bserve\b|\buvicorn\b|\bflask\s+run\b|\bng\s+serve\b|\brails\s+server\b|bootRun/i;
+
+/** Terminale integrato riutilizzabile per i comandi long-running avviati dall'agente. */
+let mgTerminal: vscode.Terminal | undefined;
+function getMgTerminal(): vscode.Terminal {
+	if (!mgTerminal || !vscode.window.terminals.includes(mgTerminal)) {
+		mgTerminal = vscode.window.createTerminal({ name: 'MGCoding', cwd: workspaceRoot().fsPath });
+	}
+	return mgTerminal;
 }
 
 export async function executeTool(call: ToolCall): Promise<string> {
@@ -209,6 +263,14 @@ export async function executeTool(call: ToolCall): Promise<string> {
 					if (ok !== 'Esegui') {
 						return 'Comando annullato dall\'utente.';
 					}
+				}
+				// Comandi long-running (dev server, watch) → terminale integrato: output live e
+				// fermabili dall'utente, senza bloccare l'agente in attesa (mai un vero output).
+				if (call.args.background === true || LONG_RUNNING_RE.test(command)) {
+					const term = getMgTerminal();
+					term.show(true);
+					term.sendText(command, true);
+					return `Comando avviato nel TERMINALE INTEGRATO "MGCoding" (resta in esecuzione, output dal vivo nel pannello Terminale): ${command}\nConsideralo avviato: NON attendere qui il suo output. Se è un dev server, l'app è ora raggiungibile all'URL che mostra nel terminale.`;
 				}
 				try {
 					const { stdout, stderr } = await execAsync(command, {
@@ -308,6 +370,34 @@ export async function executeTool(call: ToolCall): Promise<string> {
 			case 'update_plan': {
 				// Normalmente gestito nel loop agentico (handlePlanTool); qui solo fallback.
 				return 'Piano aggiornato.';
+			}
+			case 'ask_user': {
+				// Normalmente gestito nel loop agentico (handleAskTool); qui solo fallback.
+				return 'Domanda non posta (contesto non interattivo): procedi con l\'ipotesi più ragionevole.';
+			}
+			case 'remember': {
+				// Normalmente gestito nel loop agentico (handleRememberTool); qui solo fallback.
+				return 'Preferenza non salvata (profilo non disponibile in questo contesto).';
+			}
+			case 'delegate': {
+				// Normalmente gestito nel loop agentico (handleDelegateTool); qui solo fallback.
+				return 'Delega non disponibile in questo contesto: svolgi tu il compito con gli altri tool.';
+			}
+			case 'search_code': {
+				const query = String(call.args.query ?? '').trim();
+				if (!query) {
+					return 'Errore: search_code richiede "query".';
+				}
+				const k = typeof call.args.k === 'number' && call.args.k > 0 ? Math.min(call.args.k, 15) : 6;
+				try {
+					const hits = await codeIndex.search(query, k);
+					if (!hits.length) {
+						return 'Nessun risultato (indice vuoto o codebase non indicizzabile). Usa search_text/find_files come alternativa.';
+					}
+					return hits.map(h => `── ${h.path}:${h.start}-${h.end} (rilevanza ${(h.score * 100).toFixed(0)}%)\n${h.text}`).join('\n\n');
+				} catch (err) {
+					return `Ricerca semantica non disponibile: ${err instanceof Error ? err.message : String(err)}. Usa search_text/find_files.`;
+				}
 			}
 			case 'get_diagnostics': {
 				const sevName = (s: vscode.DiagnosticSeverity): string =>

@@ -16,16 +16,31 @@ export interface OpenAIConfig {
 
 type OpenAIPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } };
 
+/** Dati extra Gemini su un tool_call: la firma di ragionamento da ri-allegare in cronologia. */
+type GoogleExtra = { google: { thought_signature: string } };
+
 interface OpenAIMessage {
 	role: string;
 	content: string | null | OpenAIPart[];
-	tool_calls?: { id: string; type: 'function'; function: { name: string; arguments: string } }[];
+	tool_calls?: { id: string; type: 'function'; function: { name: string; arguments: string }; extra_content?: GoogleExtra }[];
 	tool_call_id?: string;
+}
+
+/** Estrae la thought_signature di Gemini da un oggetto (tool_call o delta), se presente. */
+function thoughtSignature(obj: unknown): string | undefined {
+	const sig = (obj as { extra_content?: { google?: { thought_signature?: unknown } } })?.extra_content?.google?.thought_signature;
+	return typeof sig === 'string' && sig ? sig : undefined;
 }
 
 export class OpenAIProvider implements LLMProvider {
 	readonly id = 'openai';
 	readonly label = 'OpenAI-compatibile';
+
+	/**
+	 * Firme di ragionamento (thought_signature) di Gemini, indicizzate per id del tool_call.
+	 * Gemini le richiede su OGNI functionCall rispedito in cronologia, altrimenti risponde 400.
+	 */
+	private readonly toolSignatures = new Map<string, string>();
 
 	constructor(
 		private readonly getApiKey: () => Promise<string | undefined>,
@@ -163,7 +178,18 @@ export class OpenAIProvider implements LLMProvider {
 				out.push({
 					role: 'assistant',
 					content: text || null,
-					...(toolUses.length ? { tool_calls: toolUses.map(tu => ({ id: tu.id, type: 'function' as const, function: { name: tu.name, arguments: JSON.stringify(tu.input ?? {}) } })) } : {})
+					...(toolUses.length ? {
+						tool_calls: toolUses.map(tu => {
+							const sig = this.toolSignatures.get(tu.id);
+							return {
+								id: tu.id,
+								type: 'function' as const,
+								function: { name: tu.name, arguments: JSON.stringify(tu.input ?? {}) },
+								// Gemini esige la firma su ogni functionCall rispedito (altrimenti 400).
+								...(sig ? { extra_content: { google: { thought_signature: sig } } } : {})
+							};
+						})
+					} : {})
 				});
 			} else {
 				const toolResults = m.content.filter(b => b.type === 'tool_result') as { tool_use_id: string; content: string }[];
@@ -198,6 +224,8 @@ export class OpenAIProvider implements LLMProvider {
 		let sawTool = false;
 		// indice openai tool_call -> indice "anthropic" (>=1) e se è stato aperto
 		const opened = new Map<number, number>();
+		// indice openai tool_call -> id assegnato al blocco (per indicizzare la firma)
+		const openedId = new Map<number, string>();
 		let nextIdx = 1;
 
 		for await (const evt of this.postStream({ model: cfg.model, messages, tools }, params.signal)) {
@@ -220,8 +248,16 @@ export class OpenAIProvider implements LLMProvider {
 					if (aidx === undefined) {
 						aidx = nextIdx++;
 						opened.set(oi, aidx);
-						yield { type: 'content_block_start', index: aidx, content_block: { type: 'tool_use', id: tc.id || `call_${aidx}`, name: tc.function?.name || 'tool' } };
+						const newId: string = tc.id || `call_${aidx}`;
+						openedId.set(oi, newId);
+						yield { type: 'content_block_start', index: aidx, content_block: { type: 'tool_use', id: newId, name: tc.function?.name || 'tool' } };
 						sawTool = true;
+					}
+					const id = openedId.get(oi);
+					// Gemini: memorizza la thought_signature per ri-allegarla nei turni successivi.
+					const sig = thoughtSignature(tc) ?? thoughtSignature(delta);
+					if (sig && id) {
+						this.toolSignatures.set(id, sig);
 					}
 					if (tc.function?.arguments) {
 						yield { type: 'content_block_delta', index: aidx, delta: { type: 'input_json_delta', partial_json: tc.function.arguments } };

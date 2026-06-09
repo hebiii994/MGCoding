@@ -7,30 +7,65 @@ import { ProviderRegistry } from '../llm/registry';
 import { AnthropicBlock, AnthropicMessage, ChatMessage, LLMProvider, parseDataUrl } from '../llm/types';
 import { getMcpManager } from '../mcp/mcpClient';
 import { beginCheckpoint } from '../edit/checkpoint';
-import { parseToolCall, TOOL_RE } from '../util/parsing';
+import { parseToolCall, parseAllToolCalls, extractShellCommands, TOOL_RE } from '../util/parsing';
 import { buildSystemPrompt, complete, streamChat } from './agent';
-import { anthropicBuiltinTools, executeTool, ToolCall, TOOL_SPECS } from './tools';
+import { anthropicBuiltinTools, errorsForPaths, executeTool, ToolCall, TOOL_SPECS } from './tools';
 
 const MAX_ITERATIONS = 30;
 
 /** Tool senza effetti collaterali: eseguibili in parallelo nello stesso turno. */
-const READ_ONLY_TOOLS = new Set(['read_file', 'list_dir', 'find_files', 'search_text', 'get_diagnostics']);
+const READ_ONLY_TOOLS = new Set(['read_file', 'list_dir', 'find_files', 'search_text', 'search_code', 'get_diagnostics']);
+
+/** Tool che modificano file (per la verifica automatica). */
+const WRITE_TOOLS = new Set(['write_file', 'apply_patch']);
+/** Numero massimo di giri di auto-correzione dopo la verifica. */
+const MAX_VERIFY_ROUNDS = 2;
+
+/**
+ * Verifica automatica: dopo le modifiche, raccoglie gli ERRORI dei language server sui file
+ * toccati. Ritorna un messaggio di correzione (o '' se è tutto pulito o disabilitata).
+ */
+async function autoVerify(changed: Set<string>): Promise<string> {
+	if (!changed.size || !vscode.workspace.getConfiguration('mgcoding').get<boolean>('autoVerify', true)) {
+		return '';
+	}
+	// Lascia ai language server il tempo di analizzare i file appena scritti.
+	await new Promise(r => setTimeout(r, 1200));
+	const errs = await errorsForPaths([...changed]);
+	if (!errs) {
+		return '';
+	}
+	return `[Verifica automatica] Dopo le tue modifiche i language server segnalano questi ERRORI da correggere:\n${errs}\n\nCorreggi questi errori (leggi i file se serve) e poi concludi.`;
+}
 
 function toolSystemPrompt(): string {
 	const specs = [...TOOL_SPECS, ...(getMcpManager()?.toolSpecs() ?? [])];
 	const list = specs.map(t => `- ${t.name}: ${t.description} args: ${t.args}`).join('\n');
-	return `Puoi usare dei tool per agire sul progetto.
-Quando vuoi usare un tool, rispondi ESCLUSIVAMENTE con un blocco di codice così (un solo tool per volta):
+	return `Puoi AGIRE sul progetto SOLO tramite i tool: per eseguire un'azione (leggere/scrivere file, lanciare comandi) DEVI emettere un blocco tool, non descriverla.
+Quando usi un tool, rispondi ESCLUSIVAMENTE con UN blocco così e nient'altro (un solo tool per messaggio), poi FERMATI e ASPETTA:
 \`\`\`mg-tool
 {"tool": "<nome>", "args": { ... }}
 \`\`\`
-Dopo che ti avrò fornito il risultato del tool, continua il ragionamento o usa un altro tool.
-Quando hai completato il compito, rispondi normalmente in Markdown SENZA blocchi mg-tool.
+REGOLE FERREE:
+- Per le AZIONI (write_file, apply_patch, run_command) emetti UN SOLO tool per messaggio, poi interrompi e aspetta il risultato.
+- Per INDAGARE puoi emettere PIÙ blocchi di SOLA LETTURA insieme nello stesso messaggio (read_file, list_dir, search_text, find_files, search_code, get_diagnostics) — verranno eseguiti tutti in una volta: sfruttalo per leggere più file/cartelle in un colpo solo invece di un turno per file.
+- NON inventare MAI l'output di un tool (es. l'output di run_command): te lo fornirò io. Non scrivere finti log di successo.
+- Per "avvia/esegui/installa/crea" DEVI usare run_command/write_file: VIETATO limitarti a spiegare o a scrivere i comandi in un blocco di testo. Se scrivi "esegui questi comandi" SBAGLI: eseguili tu col tool.
+- Quando il compito è COMPLETO, rispondi in Markdown SENZA blocchi mg-tool.
+
+ESEMPIO. Richiesta: "avvia l'app". Risposta corretta (e nient'altro):
+\`\`\`mg-tool
+{"tool": "run_command", "args": {"command": "npm install"}}
+\`\`\`
+(poi, ricevuto il risultato, al messaggio dopo:)
+\`\`\`mg-tool
+{"tool": "run_command", "args": {"command": "npm run dev"}}
+\`\`\`
 
 Tool disponibili:
 ${list}
 
-Usa percorsi relativi alla radice del workspace. Sii prudente con run_command.`;
+Usa percorsi relativi alla radice del workspace.`;
 }
 
 export interface AgentCallbacks {
@@ -45,12 +80,50 @@ export interface AgentCallbacks {
 	onStreamCancel?(): void;
 	/** Piano di lavoro a step aggiornato dall'agente (tool update_plan). */
 	onPlan?(steps: PlanStep[]): void;
+	/** Domanda con opzioni all'utente (tool ask_user): risolve con la risposta scelta. */
+	onAsk?(question: string, options: string[], multiSelect: boolean): Promise<string>;
+	/** Memorizza un fatto/preferenza nel profilo utente attivo (tool remember). */
+	onRemember?(fact: string): Promise<void>;
+	/** Comunica il modello scelto dal router AutoModel per questo turno. */
+	onModel?(model: string): void;
 }
 
 export interface PlanStep {
 	text: string;
 	status?: 'pending' | 'in_progress' | 'done';
 }
+
+/** Rileva quando il modello ANNUNCIA un'azione (es. "sto controllando X") senza poi agire. */
+const ANNOUNCE_RE = /\b(sto (?:controllando|analizzando|verificando|cercando|esaminando|leggendo|preparando|implementando|creando|scrivendo|aprendo|eseguendo)|adesso (?:controllo|verifico|leggo|implemento|procedo|eseguo)|ora (?:controllo|verifico|leggo|procedo)|procedo (?:a|con|ad)\b|lasciami (?:controllare|verificare|leggere|dare)|sto per |i['’]?m (?:going to|checking|analyzing|looking)|let me (?:check|look|analyze|read))/i;
+const CONCLUDE_RE = /\b(fatto|completato|in sintesi|riepilogo|conclus|ecco (?:il|la|i|le|qui)|in conclusione|done|summary)\b/i;
+
+/** Rileva quando il modello SCRIVE comandi/istruzioni invece di eseguirli con i tool. */
+const SHELL_INSTRUCTION_RE = /```[\s\S]*?\b(npm|yarn|pnpm|bun|pip|python|node|git|vite|next|cargo|go run|make|dotnet|mvn|gradle|\.\/)\b[\s\S]*?```|esegui questi comandi|nel terminale|uno alla volta|npm (install|run|start)|yarn (dev|install)/i;
+
+/** True se il testo annuncia/descrive un'azione (o scrive comandi) ma non l'ha eseguita. */
+function looksLikeUnfulfilledAnnouncement(text: string): boolean {
+	const t = text.trim();
+	if (!t || CONCLUDE_RE.test(t)) {
+		return false;
+	}
+	return ANNOUNCE_RE.test(t) || SHELL_INSTRUCTION_RE.test(t);
+}
+
+/** Messaggio di "nudge" iniettato per far agire davvero il modello. */
+const NUDGE_MESSAGE = '[Sistema] NON hai usato alcuno strumento: hai solo descritto o scritto i comandi. Questo è sbagliato. ESEGUILI TU ADESSO con i tool, UNO alla volta. Ad esempio per installare/avviare emetti SUBITO e SOLO:\n```mg-tool\n{"tool": "run_command", "args": {"command": "npm install"}}\n```\nNiente spiegazioni, niente blocchi di shell: solo il blocco mg-tool del primo comando.';
+
+/** Schema per il tool calling rigoroso (Ollama format/grammar): azione sempre ben formata. */
+const TOOL_ACTION_SCHEMA = {
+	type: 'object',
+	properties: {
+		reasoning: { type: 'string' },
+		tool: { type: 'string' },
+		args: { type: 'object' }
+	},
+	required: ['tool', 'reasoning']
+};
+/** Istruzione aggiunta al system prompt in modalità strutturata. */
+const STRUCTURED_INSTRUCTION = '\n\nRISPONDI SEMPRE con un oggetto JSON {"reasoning": "...", "tool": "<nome_tool o respond>", "args": {...}}. Per usare un tool metti il suo nome in "tool" e i parametri in "args". Per dare la risposta finale all\'utente usa "tool":"respond" e metti il testo in "args":{"message":"..."}. Un solo tool per volta.';
 
 /** Intercetta il tool update_plan: aggiorna il piano in UI senza passare da executeTool. */
 function handlePlanTool(name: string, input: unknown, cb: AgentCallbacks): string | undefined {
@@ -63,6 +136,82 @@ function handlePlanTool(name: string, input: unknown, cb: AgentCallbacks): strin
 		: [];
 	cb.onPlan?.(steps);
 	return `Piano aggiornato (${steps.length} step).`;
+}
+
+/**
+ * Intercetta il tool ask_user: mostra una domanda con opzioni cliccabili e attende la
+ * scelta dell'utente, restituendola come risultato del tool. Stile Kiro.
+ */
+async function handleAskTool(name: string, input: unknown, cb: AgentCallbacks): Promise<string | undefined> {
+	if (name !== 'ask_user') {
+		return undefined;
+	}
+	const question = String((input as { question?: unknown })?.question ?? '').trim();
+	const rawOpts = (input as { options?: unknown })?.options;
+	const options = Array.isArray(rawOpts) ? rawOpts.map(o => String(o)).filter(o => o.trim()) : [];
+	const multiSelect = !!(input as { multiSelect?: unknown })?.multiSelect;
+	if (!question || options.length === 0) {
+		return 'Errore: ask_user richiede "question" (testo) e "options" (lista non vuota di risposte).';
+	}
+	if (!cb.onAsk) {
+		return 'Non posso porre domande in questo contesto: procedi con l\'ipotesi più ragionevole.';
+	}
+	const answer = await cb.onAsk(question, options, multiSelect);
+	return `Risposta dell'utente: ${answer}`;
+}
+
+/** Intercetta il tool remember: salva una preferenza duratura nel profilo utente attivo. */
+async function handleRememberTool(name: string, input: unknown, cb: AgentCallbacks): Promise<string | undefined> {
+	if (name !== 'remember') {
+		return undefined;
+	}
+	const fact = String((input as { fact?: unknown })?.fact ?? '').trim();
+	if (!fact) {
+		return 'Errore: remember richiede "fact" (la preferenza da ricordare).';
+	}
+	if (!cb.onRemember) {
+		return 'Memoria non disponibile in questo contesto.';
+	}
+	await cb.onRemember(fact);
+	return `Memorizzato nel profilo utente: ${fact}`;
+}
+
+/**
+ * Esegue un SUBAGENT focalizzato: un giro d'agente isolato (storico proprio, niente streaming
+ * in UI) per un singolo sottocompito, restituendo un report conciso del risultato.
+ */
+async function runDelegated(registry: ProviderRegistry, provider: LLMProvider, task: string, signal: AbortSignal | undefined, depth: number): Promise<string> {
+	const messages: ChatMessage[] = [{ role: 'user', content: task }];
+	let finalText = '';
+	const tools: string[] = [];
+	const cb: AgentCallbacks = {
+		onAssistantText: t => { finalText = t; },
+		onToolStart: c => { tools.push(c.tool); },
+		onToolResult: () => { /* non inoltrato all'orchestratore */ }
+	};
+	if (typeof provider.streamAgent === 'function') {
+		await runNativeAgent(registry, provider, messages, cb, signal, undefined, depth + 1);
+	} else {
+		await runJsonAgent(registry, provider, messages, cb, signal, undefined, depth + 1);
+	}
+	const used = tools.length ? `\n[subagent · tool: ${[...new Set(tools)].join(', ')}]` : '';
+	return `${finalText.trim() || '(nessun risultato testuale)'}${used}`;
+}
+
+/** Intercetta il tool delegate: affida un sottocompito a un subagent (un livello di profondità). */
+async function handleDelegateTool(name: string, input: unknown, registry: ProviderRegistry, provider: LLMProvider, signal: AbortSignal | undefined, depth: number): Promise<string | undefined> {
+	if (name !== 'delegate') {
+		return undefined;
+	}
+	if (depth >= 1) {
+		return 'Un subagent non può delegare ulteriormente: svolgi tu direttamente il compito.';
+	}
+	const task = String((input as { task?: unknown })?.task ?? '').trim();
+	if (!task) {
+		return 'Errore: delegate richiede "task" (il sottocompito da svolgere).';
+	}
+	const ctx = String((input as { context?: unknown })?.context ?? '').trim();
+	return await runDelegated(registry, provider, ctx ? `${task}\n\nContesto:\n${ctx}` : task, signal, depth);
 }
 
 /**
@@ -79,28 +228,41 @@ export async function runAgent(
 	systemExtra?: string
 ): Promise<void> {
 	beginCheckpoint();
-	const hint = [...messages].reverse().find(m => m.role === 'user')?.content;
+	const lastUser = [...messages].reverse().find(m => m.role === 'user');
+	const hint = lastUser?.content;
 	const provider = registry.pickProvider(hint);
-	// Percorso preferito: tool-use NATIVO. Claude/OpenAI sempre; per Ollama si usa il
-	// nativo se l'utente lo forza col toggle OPPURE (automatico) se il modello dichiara
-	// di supportare i tool — così i modelli capaci non usano il fragile protocollo testuale.
-	let ollamaNative = true;
-	if (provider.id === 'ollama') {
-		const cfg = vscode.workspace.getConfiguration('mgcoding');
-		if (cfg.get<boolean>('ollama.nativeTools', false)) {
-			ollamaNative = true;
-		} else {
-			try {
-				ollamaNative = await registry.ollamaModelSupportsTools(cfg.get<string>('ollama.model', ''));
-			} catch {
-				ollamaNative = false;
+	// AutoModel: se attivo e il provider è Ollama, scegli il modello adatto alla richiesta.
+	registry.setOllamaModelOverride(undefined);
+	if (provider.id === 'ollama' && vscode.workspace.getConfiguration('mgcoding').get<boolean>('ollama.autoModel', false)) {
+		try {
+			const hasImages = !!lastUser?.images?.length;
+			const chosen = await registry.chooseOllamaModel(hint, hasImages);
+			if (chosen) {
+				registry.setOllamaModelOverride(chosen);
+				cb.onModel?.(chosen);
 			}
+		} catch {
+			// routing best-effort
 		}
 	}
-	if (typeof provider.streamAgent === 'function' && ollamaNative) {
-		return runNativeAgent(provider, messages, cb, signal, systemExtra);
+	// Claude/OpenAI: tool-use NATIVO sempre. Per OLLAMA, di default si usa il PROTOCOLLO
+	// TESTUALE: molti modelli (es. i *coder*) dichiarano la capability "tools" ma poi emettono
+	// la chiamata come TESTO JSON invece che come tool-call nativa → sul percorso nativo non
+	// verrebbe eseguita. Il protocollo testuale invece la riconosce ed esegue. I tool nativi
+	// per Ollama restano un opt-in esplicito (toggle "Tool nativi").
+	let ollamaNative = true;
+	if (provider.id === 'ollama') {
+		ollamaNative = vscode.workspace.getConfiguration('mgcoding').get<boolean>('ollama.nativeTools', false);
 	}
-	return runJsonAgent(registry, provider, messages, cb, signal, systemExtra);
+	try {
+		if (typeof provider.streamAgent === 'function' && ollamaNative) {
+			await runNativeAgent(registry, provider, messages, cb, signal, systemExtra, 0);
+		} else {
+			await runJsonAgent(registry, provider, messages, cb, signal, systemExtra, 0);
+		}
+	} finally {
+		registry.setOllamaModelOverride(undefined);
+	}
 }
 
 /**
@@ -113,15 +275,70 @@ async function runJsonAgent(
 	messages: ChatMessage[],
 	cb: AgentCallbacks,
 	signal?: AbortSignal,
-	systemExtra?: string
+	systemExtra?: string,
+	depth = 0
 ): Promise<void> {
 	const sys = systemExtra ? `${toolSystemPrompt()}\n\n${systemExtra}` : toolSystemPrompt();
 	const streaming = typeof cb.onStreamDelta === 'function';
 	const callCounts = new Map<string, number>();
+	let sawAnyTool = false;
+	let nudges = 0;
+	let shellRuns = 0;
+	const changed = new Set<string>();
+	let verifyRounds = 0;
+
+	// Esegue un tool gestendo i casi speciali (ask/remember/delegate/plan) o quelli reali.
+	const execOne = async (toolName: string, args: Record<string, unknown>): Promise<string> =>
+		(await handleAskTool(toolName, args, cb))
+		?? (await handleRememberTool(toolName, args, cb))
+		?? (await handleDelegateTool(toolName, args, registry, provider, signal, depth))
+		?? handlePlanTool(toolName, args, cb)
+		?? await executeTool({ tool: toolName, args });
+
+	// Tool calling RIGOROSO (Ollama): output vincolato a uno schema → niente JSON spazzatura.
+	const structuredOllama = provider.id === 'ollama'
+		&& vscode.workspace.getConfiguration('mgcoding').get<boolean>('ollama.structuredTools', false)
+		&& typeof (provider as { chatStructured?: unknown }).chatStructured === 'function';
 
 	for (let i = 0; i < MAX_ITERATIONS; i++) {
 		if (signal?.aborted) {
 			return;
+		}
+
+		// --- Percorso RIGOROSO (Ollama structured): output vincolato a schema JSON ---
+		if (structuredOllama) {
+			try {
+				const raw = await (provider as unknown as { chatStructured(s: string | undefined, m: { role: string; content: string }[], schema: object, sig?: AbortSignal): Promise<string> })
+					.chatStructured(sys + STRUCTURED_INSTRUCTION, messages.map(m => ({ role: m.role, content: m.content })), TOOL_ACTION_SCHEMA, signal);
+				const parsed = JSON.parse(raw) as { reasoning?: string; tool?: string; args?: Record<string, unknown> };
+				messages.push({ role: 'assistant', content: raw });
+				const tool = String(parsed.tool ?? '').trim();
+				const reasoning = String(parsed.reasoning ?? '').trim();
+				if (!tool || /^(respond|final|none|answer|done)$/i.test(tool)) {
+					const finalText = reasoning || String((parsed.args as { message?: unknown } | undefined)?.message ?? '');
+					cb.onAssistantText(finalText);
+					if (verifyRounds < MAX_VERIFY_ROUNDS) {
+						const verify = await autoVerify(changed);
+						if (verify) { verifyRounds++; changed.clear(); cb.onToolStart({ tool: 'verifica', args: {} }); cb.onToolResult(verify); messages.push({ role: 'user', content: verify }); continue; }
+					}
+					return;
+				}
+				sawAnyTool = true;
+				if (reasoning) {
+					cb.onAssistantText(reasoning);
+				}
+				const args = (parsed.args && typeof parsed.args === 'object') ? parsed.args : {};
+				if (WRITE_TOOLS.has(tool) && typeof args.path === 'string') {
+					changed.add(args.path);
+				}
+				cb.onToolStart({ tool, args });
+				const result = await execOne(tool, args);
+				cb.onToolResult(result);
+				messages.push({ role: 'user', content: `Risultato del tool ${tool}:\n${result}` });
+				continue;
+			} catch {
+				// In caso di errore (schema/parse/connessione) ricadi sul percorso testuale.
+			}
 		}
 
 		let reply: string;
@@ -132,7 +349,8 @@ async function runJsonAgent(
 			reply = await complete(registry, messages, sys, signal, provider);
 		}
 
-		const call = parseToolCall(reply);
+		const calls = parseAllToolCalls(reply);
+		const call = calls[0];
 
 		if (!call) {
 			if (streaming) {
@@ -141,7 +359,45 @@ async function runJsonAgent(
 				cb.onAssistantText(reply);
 			}
 			messages.push({ role: 'assistant', content: reply });
+			// Se il modello ha SCRITTO comandi da terminale invece di chiamare il tool,
+			// eseguili noi (così "scrivere il comando" = eseguirlo, niente giro sprecato).
+			const shellCmds = extractShellCommands(reply);
+			if (shellCmds.length && shellRuns < 5) {
+				shellRuns++;
+				sawAnyTool = true;
+				const parts: string[] = [];
+				for (const cmd of shellCmds.slice(0, 4)) {
+					cb.onToolStart({ tool: 'run_command', args: { command: cmd } });
+					const r = await executeTool({ tool: 'run_command', args: { command: cmd } });
+					cb.onToolResult(r);
+					parts.push(`Risultato del comando "${cmd}":\n${r}`);
+				}
+				messages.push({ role: 'user', content: `${parts.join('\n\n')}\n\n(Ho eseguito io i comandi che avevi scritto: NON riscriverli. Prosegui in base al risultato reale qui sopra.)` });
+				continue;
+			}
+			// Nudge: ha annunciato un'azione ma non ha usato tool → invitalo a farlo davvero.
+			if (!sawAnyTool && nudges < 2 && looksLikeUnfulfilledAnnouncement(reply)) {
+				nudges++;
+				messages.push({ role: 'user', content: NUDGE_MESSAGE });
+				continue;
+			}
+			// Auto-verifica: se ha modificato file, controlla gli errori e fagli correggere.
+			if (verifyRounds < MAX_VERIFY_ROUNDS) {
+				const verify = await autoVerify(changed);
+				if (verify) {
+					verifyRounds++;
+					changed.clear();
+					cb.onToolStart({ tool: 'verifica', args: {} });
+					cb.onToolResult(verify);
+					messages.push({ role: 'user', content: verify });
+					continue;
+				}
+			}
 			return;
+		}
+		sawAnyTool = true;
+		if (WRITE_TOOLS.has(call.tool) && call.args.path) {
+			changed.add(String(call.args.path));
 		}
 
 		// È una tool-call: in streaming annulliamo la bolla mostrata (conteneva il JSON del tool)
@@ -155,6 +411,19 @@ async function runJsonAgent(
 		}
 		messages.push({ role: 'assistant', content: reply });
 
+		// BATCH: se il modello ha emesso PIÙ tool di sola lettura nello stesso messaggio,
+		// eseguili tutti insieme (in parallelo) → molti meno turni nelle fasi di indagine.
+		if (calls.length > 1 && calls.every(c => READ_ONLY_TOOLS.has(c.tool))) {
+			const results = await Promise.all(calls.map(async c => {
+				cb.onToolStart(c);
+				const r = await executeTool({ tool: c.tool, args: c.args });
+				cb.onToolResult(r);
+				return `Risultato del tool ${c.tool} (${JSON.stringify(c.args)}):\n${r}`;
+			}));
+			messages.push({ role: 'user', content: results.join('\n\n') });
+			continue;
+		}
+
 		// Guard anti-loop: i modelli deboli ripetono la stessa chiamata all'infinito.
 		const sig = `${call.tool}:${JSON.stringify(call.args)}`;
 		const n = (callCounts.get(sig) ?? 0) + 1;
@@ -165,7 +434,11 @@ async function runJsonAgent(
 		}
 
 		cb.onToolStart(call);
-		const result = handlePlanTool(call.tool, call.args, cb) ?? await executeTool(call);
+		const result = (await handleAskTool(call.tool, call.args, cb))
+			?? (await handleRememberTool(call.tool, call.args, cb))
+			?? (await handleDelegateTool(call.tool, call.args, registry, provider, signal, depth))
+			?? handlePlanTool(call.tool, call.args, cb)
+			?? await executeTool(call);
 		cb.onToolResult(result);
 		const hint = n >= 3 ? `\n\n[AVVISO: hai già chiamato ${call.tool} con questi stessi argomenti ${n} volte. Cambia approccio (altro tool/argomenti) oppure, se hai le informazioni, procedi o concludi.]` : '';
 		messages.push({ role: 'user', content: `Risultato del tool ${call.tool}:\n${result}${hint}` });
@@ -191,18 +464,39 @@ interface AccBlock {
  * e noi rispondiamo con tool_result.
  */
 async function runNativeAgent(
+	registry: ProviderRegistry,
 	provider: LLMProvider,
 	history: ChatMessage[],
 	cb: AgentCallbacks,
 	signal?: AbortSignal,
-	systemExtra?: string
+	systemExtra?: string,
+	depth = 0
 ): Promise<void> {
 	const system = await buildSystemPrompt(systemExtra);
-	const tools = [...anthropicBuiltinTools(), ...(getMcpManager()?.anthropicTools() ?? [])];
+	// Un subagent (depth>0) non espone il tool delegate, per evitare ricorsione.
+	const tools = [...anthropicBuiltinTools().filter(t => depth === 0 || t.name !== 'delegate'), ...(getMcpManager()?.anthropicTools() ?? [])];
 	const streaming = typeof cb.onStreamDelta === 'function';
 	const callCounts = new Map<string, number>();
+	let sawAnyTool = false;
+	let nudges = 0;
+	let textFallbacks = 0;
+	let shellRuns = 0;
+	const changed = new Set<string>();
+	let verifyRounds = 0;
 	// Esegue un tool con guard anti-loop (modelli che ripetono la stessa chiamata).
 	const runToolGuarded = async (name: string, input: unknown): Promise<string> => {
+		const ask = await handleAskTool(name, input, cb);
+		if (ask !== undefined) {
+			return ask;
+		}
+		const mem = await handleRememberTool(name, input, cb);
+		if (mem !== undefined) {
+			return mem;
+		}
+		const del = await handleDelegateTool(name, input, registry, provider, signal, depth);
+		if (del !== undefined) {
+			return del;
+		}
 		const plan = handlePlanTool(name, input, cb);
 		if (plan !== undefined) {
 			return plan;
@@ -321,6 +615,29 @@ async function runNativeAgent(
 		const toolUses = assistantContent.filter((b): b is Extract<AnthropicBlock, { type: 'tool_use' }> => b.type === 'tool_use');
 
 		if (stopReason !== 'tool_use' || toolUses.length === 0) {
+			// FALLBACK: alcuni modelli (es. coder) scrivono la tool-call come TESTO invece di
+			// chiamarla nativamente. Se nel testo c'è una tool-call valida e nota, eseguila
+			// davvero (così non "racconta" e non inventa l'output).
+			const textCall = parseToolCall(textAcc);
+			const isKnownTool = !!textCall && (TOOL_SPECS.some(t => t.name === textCall.tool)
+				|| ['ask_user', 'remember', 'delegate'].includes(textCall.tool)
+				|| !!getMcpManager()?.hasTool(textCall.tool));
+			if (textCall && isKnownTool && textFallbacks < 8) {
+				textFallbacks++;
+				sawAnyTool = true;
+				if (streaming) {
+					cb.onStreamCancel?.();
+				}
+				cb.onToolStart({ tool: textCall.tool, args: textCall.args });
+				const result = await runToolGuarded(textCall.tool, textCall.args);
+				cb.onToolResult(result);
+				const p = (textCall.args as { path?: unknown }).path;
+				if (WRITE_TOOLS.has(textCall.tool) && typeof p === 'string') {
+					changed.add(p);
+				}
+				messages.push({ role: 'user', content: [{ type: 'text', text: `Risultato REALE del tool ${textCall.tool}:\n${result}\n(Non inventare l'output: usa questo.)` }] });
+				continue;
+			}
 			// Risposta finale.
 			if (streaming) {
 				cb.onStreamEnd?.();
@@ -328,8 +645,42 @@ async function runNativeAgent(
 				cb.onAssistantText(textAcc);
 			}
 			history.push({ role: 'assistant', content: textAcc });
+			// Se il modello ha SCRITTO comandi da terminale invece di chiamarli, eseguili noi.
+			const shellCmds = extractShellCommands(textAcc);
+			if (shellCmds.length && shellRuns < 5) {
+				shellRuns++;
+				sawAnyTool = true;
+				const parts: string[] = [];
+				for (const cmd of shellCmds.slice(0, 4)) {
+					cb.onToolStart({ tool: 'run_command', args: { command: cmd } });
+					const r = await runToolGuarded('run_command', { command: cmd });
+					cb.onToolResult(r);
+					parts.push(`Risultato del comando "${cmd}":\n${r}`);
+				}
+				messages.push({ role: 'user', content: [{ type: 'text', text: `${parts.join('\n\n')}\n\n(Ho eseguito io i comandi che avevi scritto: NON riscriverli. Prosegui in base al risultato reale.)` }] });
+				continue;
+			}
+			// Nudge: ha annunciato un'azione ma non ha usato tool → invitalo a farlo davvero.
+			if (!sawAnyTool && nudges < 2 && looksLikeUnfulfilledAnnouncement(textAcc)) {
+				nudges++;
+				messages.push({ role: 'user', content: [{ type: 'text', text: NUDGE_MESSAGE }] });
+				continue;
+			}
+			// Auto-verifica: se ha modificato file, controlla gli errori e fagli correggere.
+			if (verifyRounds < MAX_VERIFY_ROUNDS) {
+				const verify = await autoVerify(changed);
+				if (verify) {
+					verifyRounds++;
+					changed.clear();
+					cb.onToolStart({ tool: 'verifica', args: {} });
+					cb.onToolResult(verify);
+					messages.push({ role: 'user', content: [{ type: 'text', text: verify }] });
+					continue;
+				}
+			}
 			return;
 		}
+		sawAnyTool = true;
 
 		// Chiude la bolla di testo (vuota -> annulla; con testo -> mantiene).
 		if (streaming) {
@@ -361,6 +712,10 @@ async function runNativeAgent(
 				cb.onToolStart({ tool: tu.name, args: tu.input });
 				const result = await runToolGuarded(tu.name, tu.input);
 				cb.onToolResult(result);
+				const p = (tu.input as { path?: unknown })?.path;
+				if (WRITE_TOOLS.has(tu.name) && typeof p === 'string') {
+					changed.add(p);
+				}
 				resultBlocks.push({ type: 'tool_result', tool_use_id: tu.id, content: result });
 			}
 		}

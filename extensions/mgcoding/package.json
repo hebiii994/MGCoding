@@ -3,7 +3,7 @@
 	"publisher": "mgcoding",
 	"displayName": "MGCoding",
 	"description": "Agente di sviluppo spec-driven (Specs, Steering, Hooks, MCP) con LLM locale o Claude.",
-	"version": "0.6.2",
+	"version": "0.8.0",
 	"license": "MIT",
 	"engines": {
 		"vscode": "^1.5.0"
@@ -85,7 +85,7 @@
 			},
 			{
 				"command": "mgcoding.guidedSetup",
-				"title": "MGCoding: Configurazione guidata"
+				"title": "MGCoding: Configurazione guidata (provider e API key)"
 			},
 			{
 				"command": "mgcoding.specOpenRequirements",
@@ -156,6 +156,81 @@
 			{
 				"command": "mgcoding.toggleNativeTools",
 				"title": "MGCoding: Tool nativi Ollama on/off"
+			},
+			{
+				"command": "mgcoding.testMicrophone",
+				"title": "MGCoding: Test microfono"
+			},
+			{
+				"command": "mgcoding.switchProfile",
+				"title": "MGCoding: Profilo utente (cambia/crea)"
+			},
+			{
+				"command": "mgcoding.editProfile",
+				"title": "MGCoding: Modifica/ripulisci preferenze profilo"
+			},
+			{
+				"command": "mgcoding.manageModels",
+				"title": "MGCoding: Gestione modelli Ollama (scarica/cancella)"
+			},
+			{
+				"command": "mgcoding.recommendModel",
+				"title": "MGCoding: Consigliami un modello (VRAM/uso)"
+			},
+			{
+				"command": "mgcoding.buildIndex",
+				"title": "MGCoding: Crea/aggiorna indice del codice (RAG)",
+				"icon": "$(database)"
+			},
+			{
+				"command": "mgcoding.openGuide",
+				"title": "MGCoding: Guida (documentazione)",
+				"icon": "$(book)"
+			},
+			{
+				"command": "mgcoding.openWalkthrough",
+				"title": "MGCoding: Tour iniziale (guida introduttiva)"
+			},
+			{
+				"command": "mgcoding.gitCommitMessage",
+				"title": "MGCoding: Genera messaggio di commit",
+				"icon": "$(sparkle)"
+			},
+			{
+				"command": "mgcoding.gitExplainDiff",
+				"title": "MGCoding: Spiega le modifiche (diff)"
+			},
+			{
+				"command": "mgcoding.explainSelection",
+				"title": "MGCoding: Spiega il codice"
+			},
+			{
+				"command": "mgcoding.refactorSelection",
+				"title": "MGCoding: Refactor del codice"
+			},
+			{
+				"command": "mgcoding.generateTests",
+				"title": "MGCoding: Genera test"
+			},
+			{
+				"command": "mgcoding.addComments",
+				"title": "MGCoding: Aggiungi commenti"
+			},
+			{
+				"command": "mgcoding.fixWithAI",
+				"title": "MGCoding: Correggi con MGCoding"
+			},
+			{
+				"command": "mgcoding.gitPrDescription",
+				"title": "MGCoding: Genera descrizione Pull Request"
+			},
+			{
+				"command": "mgcoding.selectMicrophone",
+				"title": "MGCoding: Seleziona microfono"
+			},
+			{
+				"command": "mgcoding.downloadSttModel",
+				"title": "MGCoding: Scarica modello vocale migliore (Whisper)"
 			},
 			{
 				"command": "mgcoding.connectTelegram",
@@ -281,7 +356,71 @@
 				"when": "editorTextFocus"
 			}
 		],
+		"walkthroughs": [
+			{
+				"id": "mgcodingGettingStarted",
+				"title": "Inizia con MGCoding",
+				"description": "Configura il modello, indicizza il codice e prova agente, voce e Spec.",
+				"steps": [
+					{
+						"id": "mg.setup",
+						"title": "Configura un modello",
+						"description": "Scegli il provider (locale o cloud) e inserisci la API key.\n[Configurazione guidata](command:mgcoding.guidedSetup)",
+						"media": { "markdown": "walkthrough/setup.md" },
+						"completionEvents": ["onCommand:mgcoding.guidedSetup"]
+					},
+					{
+						"id": "mg.chat",
+						"title": "Apri la chat",
+						"description": "Parla col tuo codice in modalità Vibe o Spec.\n[Apri la chat](command:mgcoding.openChat)",
+						"media": { "markdown": "walkthrough/chat.md" },
+						"completionEvents": ["onCommand:mgcoding.openChat"]
+					},
+					{
+						"id": "mg.index",
+						"title": "Indicizza il codice (RAG)",
+						"description": "Crea l'indice semantico per risposte più centrate.\n[Crea indice](command:mgcoding.buildIndex)",
+						"media": { "markdown": "walkthrough/index.md" },
+						"completionEvents": ["onCommand:mgcoding.buildIndex"]
+					},
+					{
+						"id": "mg.voice",
+						"title": "Prova la voce",
+						"description": "Detta a voce o usa la conversazione hands-free.\n[Seleziona microfono](command:mgcoding.selectMicrophone)",
+						"media": { "markdown": "walkthrough/voice.md" },
+						"completionEvents": ["onCommand:mgcoding.selectMicrophone", "onCommand:mgcoding.testMicrophone"]
+					},
+					{
+						"id": "mg.guide",
+						"title": "Scopri tutto il resto",
+						"description": "Git, Telegram, profili, azioni dal codice e altro.\n[Apri la guida](command:mgcoding.openGuide)",
+						"media": { "markdown": "walkthrough/guide.md" },
+						"completionEvents": ["onCommand:mgcoding.openGuide"]
+					}
+				]
+			}
+		],
+		"submenus": [
+			{
+				"id": "mgcoding.editorMenu",
+				"label": "MGCoding"
+			}
+		],
 		"menus": {
+			"editor/context": [
+				{
+					"submenu": "mgcoding.editorMenu",
+					"group": "1_modification",
+					"when": "editorTextFocus"
+				}
+			],
+			"mgcoding.editorMenu": [
+				{ "command": "mgcoding.inlineEdit", "group": "1@1" },
+				{ "command": "mgcoding.explainSelection", "group": "1@2" },
+				{ "command": "mgcoding.refactorSelection", "group": "1@3" },
+				{ "command": "mgcoding.addComments", "group": "1@4" },
+				{ "command": "mgcoding.generateTests", "group": "1@5" }
+			],
 			"commandPalette": [
 				{
 					"command": "mgcoding.revealSpec",
@@ -347,6 +486,13 @@
 					"group": "navigation@5"
 				}
 			],
+			"scm/title": [
+				{
+					"command": "mgcoding.gitCommitMessage",
+					"when": "scmProvider == git",
+					"group": "navigation"
+				}
+			],
 			"view/title": [
 				{
 					"command": "mgcoding.newSpec",
@@ -362,6 +508,16 @@
 					"command": "mgcoding.refreshSpecs",
 					"when": "view == mgcoding.specs",
 					"group": "navigation@2"
+				},
+				{
+					"command": "mgcoding.buildIndex",
+					"when": "view == mgcoding.specs",
+					"group": "navigation@4"
+				},
+				{
+					"command": "mgcoding.openGuide",
+					"when": "view == mgcoding.specs",
+					"group": "navigation@5"
 				},
 				{
 					"command": "mgcoding.newHook",
@@ -488,15 +644,95 @@
 					"default": "",
 					"description": "API key per l'endpoint STT (lascia vuoto per server locale senza chiave)."
 				},
+				"mgcoding.stt.language": {
+					"type": "string",
+					"default": "it",
+					"description": "Lingua forzata per la trascrizione vocale (codice ISO, es. 'it', 'en'). Usa 'auto' per il rilevamento automatico (meno affidabile su frasi brevi)."
+				},
 				"mgcoding.stt.autoSend": {
 					"type": "boolean",
 					"default": false,
 					"description": "Invia automaticamente il messaggio dopo la trascrizione vocale."
 				},
+				"mgcoding.stt.inputDevice": {
+					"type": "string",
+					"default": "",
+					"description": "Nome esatto del microfono da usare per la registrazione (come appare nelle Impostazioni audio di Windows). Lascia vuoto per usare il dispositivo di registrazione predefinito del sistema."
+				},
+				"mgcoding.stt.thresholdPct": {
+					"type": "number",
+					"default": 2,
+					"description": "Soglia di silenzio (percentuale) per fermare la registrazione a fine voce. Alzala (es. 3-4) se in ambiente rumoroso non si ferma mai; abbassala (es. 1) se taglia mentre parli piano."
+				},
+				"mgcoding.stt.maxSeconds": {
+					"type": "number",
+					"default": 15,
+					"description": "Durata massima di una singola registrazione vocale (secondi): allo scadere la registrazione si chiude e viene trascritta comunque."
+				},
 				"mgcoding.telegram.autoApprove": {
 					"type": "boolean",
 					"default": false,
 					"description": "Consenti all'agente, quando comandato da Telegram (da remoto), di modificare file ed eseguire comandi SENZA conferma sul PC. Lascialo disattivato per sicurezza: da remoto le azioni che richiedono conferma verranno saltate."
+				},
+				"mgcoding.telegram.mirror": {
+					"type": "boolean",
+					"default": true,
+					"description": "Rispecchia su Telegram i messaggi e le azioni della chat usata sul PC, così puoi seguire da remoto cosa sta succedendo."
+				},
+				"mgcoding.context.autoCompact": {
+					"type": "boolean",
+					"default": true,
+					"description": "Quando la conversazione diventa lunga, riassume automaticamente i messaggi più vecchi in un unico riepilogo (tiene gli ultimi verbatim) per ridurre token, costo e latenza."
+				},
+				"mgcoding.context.compactAtTokens": {
+					"type": "number",
+					"default": 16000,
+					"description": "Soglia di token stimati oltre la quale la conversazione viene riassunta."
+				},
+				"mgcoding.context.keepMessages": {
+					"type": "number",
+					"default": 8,
+					"description": "Numero di messaggi recenti mantenuti testualmente quando si riassume la conversazione."
+				},
+				"mgcoding.autoVerify": {
+					"type": "boolean",
+					"default": true,
+					"description": "Dopo che l'agente modifica dei file, controlla automaticamente gli errori dei language server sui file toccati e glieli fa correggere (fino a 2 giri) prima di concludere."
+				},
+				"mgcoding.ollama.temperature": {
+					"type": "number",
+					"default": 0.2,
+					"description": "Temperatura dei modelli Ollama: bassa (0–0.2) consigliata per i task con tool/codice (meno errori e JSON malformato)."
+				},
+				"mgcoding.ollama.structuredTools": {
+					"type": "boolean",
+					"default": false,
+					"description": "Tool calling RIGOROSO per Ollama: vincola l'output del modello a uno schema JSON (grammar di llama.cpp) così le chiamate ai tool sono sempre valide — niente comandi scritti come testo né output inventati. Più affidabile, ma disattiva lo streaming dei token su quei turni. Consigliato coi modelli locali poco affidabili."
+				},
+				"mgcoding.ollama.autoModel": {
+					"type": "boolean",
+					"default": false,
+					"description": "AutoModel: con provider Ollama, sceglie automaticamente il modello installato più adatto alla richiesta (vision per le immagini, reasoning, coding, leggero per richieste brevi) e cambia da solo tra un messaggio e l'altro. Attivabile anche col toggle nella barra della chat."
+				},
+				"mgcoding.index.embedModel": {
+					"type": "string",
+					"default": "nomic-embed-text",
+					"description": "Modello Ollama usato per gli embedding dell'indice semantico del codice (RAG). Installalo con 'ollama pull nomic-embed-text'. Cambiando modello l'indice va ricreato."
+				},
+				"mgcoding.index.maxFileKB": {
+					"type": "number",
+					"default": 200,
+					"description": "Dimensione massima (KB) dei file da includere nell'indice semantico del codice."
+				},
+				"mgcoding.index.autoUpdate": {
+					"type": "boolean",
+					"default": true,
+					"description": "Aggiorna automaticamente l'indice del codice già esistente (in modo incrementale) all'avvio e dopo i salvataggi dei file. Non crea l'indice da zero: la prima creazione resta manuale (pulsante/comando)."
+				},
+				"mgcoding.index.autoContext": {
+					"type": "boolean",
+					"default": true,
+					"description": "Inietta automaticamente nel prompt gli estratti di codice più rilevanti dall'indice (RAG), così anche i modelli che non usano i tool 'vedono' il codice giusto. Richiede un indice creato."
 				},
 				"mgcoding.voice.lang": {
 					"type": "string",
@@ -598,7 +834,13 @@
 				"mgcoding.claude.thinkingBudget": {
 					"type": "number",
 					"default": 2048,
-					"description": "Budget di token per il ragionamento di Claude (quando thinking è attivo)."
+					"description": "Budget di token per il ragionamento di Claude (solo modelli vecchi che usano extended thinking; ignorato dai modelli con adaptive thinking come Opus 4.7/4.8)."
+				},
+				"mgcoding.claude.effort": {
+					"type": "string",
+					"enum": ["low", "medium", "high", "xhigh", "max"],
+					"default": "high",
+					"description": "Livello di 'effort' per i modelli Claude con adaptive thinking (Opus 4.6+/Sonnet 4.6): controlla quanto ragiona/agisce. 'high'/'xhigh' consigliati per coding; 'max' solo Opus."
 				},
 				"mgcoding.ollama.endpoint": {
 					"type": "string",

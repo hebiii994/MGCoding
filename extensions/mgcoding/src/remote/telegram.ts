@@ -6,6 +6,7 @@
 import * as vscode from 'vscode';
 import { ProviderRegistry } from '../llm/registry';
 import { runAgent } from '../agent/agentLoop';
+import { ProfileStore } from '../profile/profiles';
 import { setRemoteMode } from '../agent/tools';
 import { ChatMessage } from '../llm/types';
 import { splitThink } from '../util/parsing';
@@ -27,10 +28,14 @@ export class TelegramBridge {
 	private busy = false;
 	private history: ChatMessage[] = [];
 
+	private readonly profiles: ProfileStore;
+
 	constructor(
 		private readonly registry: ProviderRegistry,
 		private readonly memento: vscode.Memento
-	) { }
+	) {
+		this.profiles = new ProfileStore(this.memento);
+	}
 
 	private chatId(): string | undefined {
 		return this.memento.get<string>(CHAT_ID_KEY) || undefined;
@@ -123,14 +128,22 @@ export class TelegramBridge {
 		const cfg = vscode.workspace.getConfiguration('mgcoding');
 		setRemoteMode(true, cfg.get<boolean>('telegram.autoApprove', false));
 		this.history.push({ role: 'user', content: text });
+		// Profilo per-persona: ogni chat Telegram ha il proprio profilo (auto-apprendimento).
+		const id = this.chatId();
+		if (id) {
+			await this.profiles.ensure(`tg-${id}`, `Telegram ${id}`);
+			await this.profiles.setActive(`tg-${id}`);
+		}
+		const systemExtra = this.profiles.contextBlock() || undefined;
 		let answer = '';
 		const tools: string[] = [];
 		try {
 			await runAgent(this.registry, this.history, {
 				onAssistantText: t => { answer += (answer ? '\n' : '') + t; },
 				onToolStart: c => { tools.push(c.tool); },
-				onToolResult: () => { /* non inoltrato per non intasare */ }
-			});
+				onToolResult: () => { /* non inoltrato per non intasare */ },
+				onRemember: fact => this.profiles.appendFact(this.profiles.activeId(), fact)
+			}, undefined, systemExtra);
 		} catch (e) {
 			await this.send('⚠️ Errore: ' + (e instanceof Error ? e.message : String(e)));
 			return;
@@ -148,6 +161,24 @@ export class TelegramBridge {
 		if (id) {
 			await this.sendTo(id, text);
 		}
+	}
+
+	/**
+	 * Rispecchia su Telegram un evento della chat del PC (messaggio utente, risposta o
+	 * azione dell'agente), così da seguire da remoto cosa accade. Disattivabile con
+	 * l'impostazione mgcoding.telegram.mirror. Non inoltra durante un turno avviato da
+	 * Telegram stesso (busy) per evitare doppioni.
+	 */
+	async mirror(role: 'user' | 'assistant' | 'tool', text: string): Promise<void> {
+		const id = this.chatId();
+		if (!id || !this.running || this.busy) {
+			return;
+		}
+		if (!vscode.workspace.getConfiguration('mgcoding').get<boolean>('telegram.mirror', true)) {
+			return;
+		}
+		const icon = role === 'user' ? '🧑 PC' : role === 'assistant' ? '🤖' : '🔧';
+		await this.sendTo(id, `${icon} ${text}`.slice(0, 3900));
 	}
 
 	private async sendTo(chatId: string, text: string): Promise<void> {

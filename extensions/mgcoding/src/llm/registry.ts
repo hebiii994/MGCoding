@@ -58,16 +58,19 @@ export class ProviderRegistry implements vscode.Disposable {
 					maxTokens: c.get<number>('claude.maxTokens', 8192),
 					thinking: c.get<boolean>('claude.thinking', false),
 					thinkingAuto: c.get<boolean>('claude.thinkingAuto', true),
-					thinkingBudget: c.get<number>('claude.thinkingBudget', 2048)
+					thinkingBudget: c.get<number>('claude.thinkingBudget', 2048),
+					effort: c.get<string>('claude.effort', 'high')
 				};
 			}
 		);
 		this.ollama = new OllamaProvider(() => {
 			const c = vscode.workspace.getConfiguration('mgcoding');
 			return {
+				// modelOverride: impostato dal router AutoModel per il singolo turno.
 				endpoint: c.get<string>('ollama.endpoint', 'http://localhost:11434'),
-				model: c.get<string>('ollama.model', 'qwen2.5-coder:14b'),
-				think: c.get<boolean>('ollama.think', false)
+				model: this.ollamaModelOverride ?? c.get<string>('ollama.model', 'qwen2.5-coder:14b'),
+				think: c.get<boolean>('ollama.think', false),
+				temperature: c.get<number>('ollama.temperature', 0.2)
 			};
 		});
 		this.openai = new OpenAIProvider(
@@ -116,6 +119,84 @@ export class ProviderRegistry implements vscode.Disposable {
 		const heavy = /refactor|architett|design|implementa|\bspec\b|multipl|test|debug|ottimizz|migrazion|intero|tutti i file|codebase|refactoring/i;
 		const isHeavy = !!hint && (hint.length > 600 || heavy.test(hint));
 		return this.byId(isHeavy ? c.get<string>('route.heavy', 'claude') : c.get<string>('route.light', 'ollama'));
+	}
+
+	/** Override temporaneo del modello Ollama (router AutoModel), valido per il turno. */
+	private ollamaModelOverride?: string;
+	setOllamaModelOverride(model?: string): void {
+		this.ollamaModelOverride = model;
+	}
+
+	/** Modello Ollama effettivo: override del router se presente, altrimenti l'impostazione. */
+	currentOllamaModel(): string {
+		return this.ollamaModelOverride ?? vscode.workspace.getConfiguration('mgcoding').get<string>('ollama.model', '');
+	}
+
+	/**
+	 * AutoModel: sceglie tra i modelli Ollama installati il più adatto alla richiesta.
+	 * Euristica locale: vision se ci sono immagini, poi reasoning, coding, leggero.
+	 * Ritorna undefined se non c'è una scelta migliore del modello attuale.
+	 */
+	async chooseOllamaModel(hint: string | undefined, hasImages: boolean): Promise<string | undefined> {
+		let installed: string[];
+		try {
+			installed = await this.ollama.listModels();
+		} catch {
+			return undefined;
+		}
+		if (installed.length < 2) {
+			return undefined;
+		}
+		const h = (hint ?? '').toLowerCase();
+		const paramSize = (m: string): number => {
+			const n = m.match(/(\d+(?:\.\d+)?)\s*b\b/);
+			return n ? parseFloat(n[1]) : 99;
+		};
+		// 1) Immagini → modello vision.
+		if (hasImages) {
+			for (const m of installed) {
+				if (await this.ollama.supportsVision(m).catch(() => false)) {
+					return m;
+				}
+			}
+		}
+		const action = /avvia|esegui|installa|lancia|crea|implementa|scriv|corregg|aggiung|refactor|genera|costruisci|modific|build|run|start|fix|debug|test/;
+		const reasoning = /perch[eé]|ragiona|spiega|progett|architett|analizz|confront|strategia|why|design|valuta|pro e contro/;
+		const coding = /codice|funzione|classe|bug|file|metodo|api|compil|codebase|stack|code|function|class/;
+		const isAction = action.test(h);
+		const isShort = h.length > 0 && h.length < 60 && !isAction;
+		const byName = (re: RegExp): string | undefined => installed.find(m => re.test(m.toLowerCase()));
+		const REASON_ONLY = /r1|reason/; // modelli che non gestiscono bene i tool: evitali per le azioni
+		const firstToolCapable = async (avoidReasonOnly: boolean): Promise<string | undefined> => {
+			for (const m of installed) {
+				if (avoidReasonOnly && REASON_ONLY.test(m.toLowerCase())) {
+					continue;
+				}
+				if (await this.ollama.supportsTools(m).catch(() => false)) {
+					return m;
+				}
+			}
+			return undefined;
+		};
+		// 2) Azione o coding → serve un modello che USI i tool: preferisci un coder, poi un
+		//    tool-capable; EVITA i reasoning-only (r1): inventano l'output dei comandi.
+		if (isAction || coding.test(h)) {
+			const cdr = installed.find(m => /coder|codestral|codegemma|code/.test(m.toLowerCase()) && !REASON_ONLY.test(m.toLowerCase()));
+			if (cdr) { return cdr; }
+			const tc = await firstToolCapable(true);
+			if (tc) { return tc; }
+		}
+		// 3) Ragionamento PURO (nessuna azione) → modello reasoning.
+		if (reasoning.test(h) && !isAction) {
+			const r = byName(/r1|deepseek|qwen3|phi|magistral/);
+			if (r) { return r; }
+		}
+		// 4) Richiesta breve/semplice → il modello più leggero installato.
+		if (isShort) {
+			const light = [...installed].sort((a, b) => paramSize(a) - paramSize(b))[0];
+			if (light) { return light; }
+		}
+		return undefined;
 	}
 
 	listOllamaModels(): Promise<string[]> {
@@ -214,7 +295,7 @@ export class ProviderRegistry implements vscode.Disposable {
 			{ label: 'Ollama (locale)', detail: 'Modelli in locale, nessuna chiave', target: 'ollama' },
 			{ label: 'LM Studio (locale)', detail: 'Server locale OpenAI-compatibile', target: 'preset', presetId: 'lmstudio' }
 		];
-		const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Configurazione guidata: quale modello/servizio vuoi usare?', ignoreFocusOut: true });
+		const pick = await vscode.window.showQuickPick(items, { title: 'Configurazione provider e API key', placeHolder: 'Scegli il servizio: ti chiederò qui la API key (Gemini, ChatGPT, Claude…)', ignoreFocusOut: true });
 		if (!pick) {
 			return;
 		}

@@ -59,13 +59,60 @@ export class WhisperEngine {
 	}
 
 	private modelPath(): string {
-		// Primo file .bin nella cartella bin (es. ggml-base.bin).
+		// Sceglie il modello .bin PIÙ GRANDE presente (small/medium > base) per la migliore
+		// accuratezza; così basta scaricare un modello più capace per usarlo in automatico.
 		try {
-			const m = fs.readdirSync(this.binDir).find(f => f.endsWith('.bin'));
-			return m ? path.join(this.binDir, m) : '';
+			const bins = fs.readdirSync(this.binDir).filter(f => f.endsWith('.bin'));
+			if (!bins.length) {
+				return '';
+			}
+			const largest = bins
+				.map(f => ({ f, size: fs.statSync(path.join(this.binDir, f)).size }))
+				.sort((a, b) => b.size - a.size)[0].f;
+			return path.join(this.binDir, largest);
 		} catch {
 			return '';
 		}
+	}
+
+	/** Ferma il server (verrà riavviato al prossimo uso con il modello attuale/aggiornato). */
+	private restart(): void {
+		try { this.proc?.kill(); } catch { /* */ }
+		this.proc = undefined;
+		this.port = 0;
+	}
+
+	/**
+	 * Scarica un modello Whisper migliore (ggml-<name>.bin) da HuggingFace in bin/ e riavvia
+	 * il server così da usarlo. name es. 'small', 'medium', 'large-v3-turbo'.
+	 */
+	async downloadModel(name: string, onProgress: (pct: number) => void, signal?: AbortSignal): Promise<void> {
+		const file = `ggml-${name}.bin`;
+		const dest = path.join(this.binDir, file);
+		const url = `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${file}`;
+		const res = await fetch(url, { redirect: 'follow', signal });
+		if (!res.ok || !res.body) {
+			throw new Error(`Download non riuscito (HTTP ${res.status}) per ${file}.`);
+		}
+		const total = Number(res.headers.get('content-length') ?? 0);
+		const tmp = `${dest}.part`;
+		const out = fs.createWriteStream(tmp);
+		const reader = res.body.getReader();
+		let received = 0;
+		for (; ;) {
+			const { done, value } = await reader.read();
+			if (done) {
+				break;
+			}
+			out.write(Buffer.from(value));
+			received += value.length;
+			if (total > 0) {
+				onProgress(Math.floor((received / total) * 100));
+			}
+		}
+		await new Promise<void>((resolve, reject) => out.end((err?: Error | null) => (err ? reject(err) : resolve())));
+		fs.renameSync(tmp, dest);
+		this.restart();
 	}
 
 	/** True se il motore è incluso nel pacchetto (binario + modello presenti). */
@@ -106,7 +153,19 @@ export class WhisperEngine {
 	private recProc?: ChildProcess;
 
 	private soxPath(): string {
-		return path.join(this.binDir, 'sox', process.platform === 'win32' ? 'sox.exe' : 'sox');
+		const bundled = path.join(this.binDir, 'sox', process.platform === 'win32' ? 'sox.exe' : 'sox');
+		if (fs.existsSync(bundled)) {
+			return bundled;
+		}
+		// macOS/Linux: usa SoX di sistema (es. Homebrew) se non è bundlato.
+		if (process.platform !== 'win32') {
+			for (const p of ['/opt/homebrew/bin/sox', '/usr/local/bin/sox', '/usr/bin/sox']) {
+				if (fs.existsSync(p)) {
+					return p;
+				}
+			}
+		}
+		return bundled;
 	}
 
 	/** True se il recorder (SoX) è incluso. */
@@ -115,20 +174,34 @@ export class WhisperEngine {
 	}
 
 	/**
-	 * Registra dal microfono di default in un WAV 16kHz mono, fermandosi da solo dopo
-	 * una pausa (VAD di SoX). Ritorna il percorso del WAV, o undefined se non ha catturato voce.
-	 * @param maxSeconds limite di sicurezza (kill).
+	 * Registra dal microfono in un WAV 16kHz mono. Di default si ferma da solo dopo una
+	 * pausa (VAD di SoX). Con `fixedSeconds` registra una durata fissa (utile per test).
+	 * Ritorna il percorso del WAV, o undefined se non ha catturato nulla.
 	 */
-	recordToWav(maxSeconds = 60): Promise<string | undefined> {
+	recordToWav(opts?: { device?: string; maxSeconds?: number; thresholdPct?: number; fixedSeconds?: number }): Promise<string | undefined> {
+		const maxSeconds = opts?.maxSeconds ?? 15;
+		const device = (opts?.device || '').trim();
+		const thr = `${opts?.thresholdPct ?? 2}%`;
 		return new Promise(resolve => {
 			if (!this.canRecord()) {
 				resolve(undefined);
 				return;
 			}
 			const out = path.join(os.tmpdir(), `mg-rec-${Date.now()}.wav`);
-			// silence 1 0.1 3%  → inizia quando rileva voce; 1 1.5 3% → ferma dopo 1.5s di silenzio.
-			const args = ['-t', 'waveaudio', '-d', '-r', '16000', '-c', '1', '-b', '16', out,
-				'silence', '1', '0.1', '3%', '1', '1.5', '3%'];
+			// Driver audio per piattaforma: Windows=waveaudio, macOS=coreaudio, Linux=alsa.
+			const driver = process.platform === 'win32' ? 'waveaudio' : process.platform === 'darwin' ? 'coreaudio' : 'alsa';
+			// Sorgente: device specifico se indicato, altrimenti il default di sistema (-d).
+			const src = device ? ['-t', driver, device] : ['-t', driver, '-d'];
+			// Ricetta robusta (VAD):
+			//  - start gate a `thr`: ATTENDE la voce prima di registrare (così non cattura il
+			//    silenzio iniziale fermandosi subito → niente più [BLANK_AUDIO] in hands-free).
+			//  - stop dopo `trail`s sotto soglia (fine voce).
+			//  - `trim 0 maxSeconds`: cap pulito → SoX esce e finalizza il WAV da solo (niente
+			//    kill a metà che lasciava file corrotti).
+			const tail = opts?.fixedSeconds
+				? ['trim', '0', String(opts.fixedSeconds)]
+				: ['silence', '1', '0.1', thr, '1', '1.5', thr, 'trim', '0', String(maxSeconds)];
+			const args = [...src, '-r', '16000', '-c', '1', '-b', '16', out, ...tail];
 			let done = false;
 			const finish = (val: string | undefined): void => { if (!done) { done = true; resolve(val); } };
 			let p: ChildProcess;
@@ -139,7 +212,8 @@ export class WhisperEngine {
 				return;
 			}
 			this.recProc = p;
-			const timer = setTimeout(() => { try { p.kill(); } catch { /* */ } }, maxSeconds * 1000);
+			// Solo rete di sicurezza: il cap `trim` dovrebbe far uscire SoX prima di questo.
+			const timer = setTimeout(() => { try { p.kill(); } catch { /* */ } }, (maxSeconds + 5) * 1000);
 			p.on('error', () => { clearTimeout(timer); this.recProc = undefined; finish(undefined); });
 			p.on('exit', () => {
 				clearTimeout(timer);

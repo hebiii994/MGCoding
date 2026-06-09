@@ -58,12 +58,12 @@ function ensureUpdateUi(context: vscode.ExtensionContext): void {
 	}
 }
 
-/** Mostra il messaggio con le opzioni di aggiornamento (in-app su Windows). */
+/** Mostra il messaggio con le opzioni di aggiornamento (in-app su Windows e macOS). */
 async function promptUpdate(): Promise<void> {
 	if (!pendingRelease) {
 		return;
 	}
-	const canInApp = process.platform === 'win32' && !!pendingRelease.downloadUrl;
+	const canInApp = (process.platform === 'win32' || process.platform === 'darwin') && !!pendingRelease.downloadUrl;
 	const primary = canInApp ? 'Aggiorna ora' : 'Scarica dal browser';
 	const choice = await vscode.window.showInformationMessage(
 		`È disponibile MGCoding ${pendingRelease.tag} (hai v${pendingRelease.current}).`,
@@ -71,7 +71,11 @@ async function promptUpdate(): Promise<void> {
 		'Note di rilascio'
 	);
 	if (choice === 'Aggiorna ora') {
-		await downloadAndInstall();
+		if (process.platform === 'darwin') {
+			await downloadAndInstallMac();
+		} else {
+			await downloadAndInstall();
+		}
 	} else if (choice === 'Scarica dal browser') {
 		await vscode.env.openExternal(vscode.Uri.parse(pendingRelease.downloadUrl ?? pendingRelease.htmlUrl));
 	} else if (choice === 'Note di rilascio') {
@@ -79,15 +83,8 @@ async function promptUpdate(): Promise<void> {
 	}
 }
 
-/** Scarica l'installer dentro l'app (con avanzamento) e lo avvia, poi chiude MGCoding. */
-async function downloadAndInstall(): Promise<void> {
-	if (!pendingRelease?.downloadUrl) {
-		return;
-	}
-	const url = pendingRelease.downloadUrl;
-	const tag = pendingRelease.tag;
-	const dest = path.join(os.tmpdir(), `MGCodingSetup-${tag}.exe`);
-
+/** Scarica un file mostrando l'avanzamento. Ritorna true se completato. */
+async function downloadWithProgress(url: string, dest: string, tag: string): Promise<boolean> {
 	try {
 		await vscode.window.withProgress(
 			{ location: vscode.ProgressLocation.Notification, title: `Scaricamento MGCoding ${tag}`, cancellable: false },
@@ -119,12 +116,55 @@ async function downloadAndInstall(): Promise<void> {
 				await new Promise<void>((resolve, reject) => out.end((err?: Error | null) => (err ? reject(err) : resolve())));
 			}
 		);
+		return true;
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
 		const fallback = await vscode.window.showErrorMessage(`Download non riuscito (${msg}).`, 'Apri pagina release');
-		if (fallback) {
+		if (fallback && pendingRelease) {
 			await vscode.env.openExternal(vscode.Uri.parse(pendingRelease.htmlUrl));
 		}
+		return false;
+	}
+}
+
+/**
+ * Aggiornamento su macOS: scarica il .dmg, lo monta e guida l'utente a trascinare
+ * MGCoding.app in Applicazioni. (L'auto-sostituzione mentre l'app gira è inaffidabile
+ * su macOS per via di Gatekeeper, quindi si usa il flusso semi-automatico.)
+ */
+async function downloadAndInstallMac(): Promise<void> {
+	if (!pendingRelease?.downloadUrl) {
+		return;
+	}
+	const tag = pendingRelease.tag;
+	const dest = path.join(os.tmpdir(), `MGCoding-${tag}.dmg`);
+	if (!(await downloadWithProgress(pendingRelease.downloadUrl, dest, tag))) {
+		return;
+	}
+	const go = await vscode.window.showInformationMessage(
+		`MGCoding ${tag} è stato scaricato. Apro il disco: trascina MGCoding nella cartella Applicazioni (sostituendo la versione attuale), poi riavvia l'app.`,
+		{ modal: true },
+		'Apri il disco'
+	);
+	if (go !== 'Apri il disco') {
+		return;
+	}
+	try {
+		execFileSync('open', [dest], { stdio: 'ignore' });
+	} catch {
+		await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(dest));
+	}
+}
+
+/** Scarica l'installer dentro l'app (con avanzamento) e lo avvia, poi chiude MGCoding. */
+async function downloadAndInstall(): Promise<void> {
+	if (!pendingRelease?.downloadUrl) {
+		return;
+	}
+	const tag = pendingRelease.tag;
+	const dest = path.join(os.tmpdir(), `MGCodingSetup-${tag}.exe`);
+
+	if (!(await downloadWithProgress(pendingRelease.downloadUrl, dest, tag))) {
 		return;
 	}
 
@@ -142,8 +182,7 @@ async function downloadAndInstall(): Promise<void> {
 	// dal processo di MGCoding (lo spawn "detached" veniva invece ucciso alla chiusura
 	// dell'app perché Electron mette i figli in un job). Lo script attende la chiusura,
 	// installa in silenzio e riapre l'app aggiornata.
-	const exePath = process.execPath;
-	const exeName = exePath.split(/[\\/]/).pop() ?? 'MGCoding.exe';
+	const exeName = process.execPath.split(/[\\/]/).pop() ?? 'MGCoding.exe';
 	const batPath = path.join(os.tmpdir(), `mgcoding-update-${tag}.bat`);
 	const taskName = 'MGCodingUpdate';
 	// Percorso completo a schtasks (robusto anche se System32 non è nel PATH).
@@ -171,10 +210,11 @@ async function downloadAndInstall(): Promise<void> {
 		':install',
 		`echo Installazione in corso... >> "${logPath}"`,
 		'echo Installazione in corso, attendere qualche minuto...',
+		// NB: in /SILENT l'installer Inno RILANCIA GIÀ l'app da solo (sezione [Run],
+		// ShouldRunAfterUpdate=True). NON aggiungere qui un altro avvio, altrimenti si
+		// aprono DUE finestre (una vuota + una col workspace).
 		`"${dest}" /SILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL >> "${logPath}" 2>&1`,
 		`echo Exit code installer: %errorlevel% >> "${logPath}"`,
-		'echo Riavvio di MGCoding...',
-		`start "" "${exePath}"`,
 		`"${schtasks}" /Delete /F /TN ${taskName} >NUL 2>&1`,
 		// Auto-eliminazione pulita (evita il messaggio "batch file cannot be found").
 		'(goto) 2>nul & del "%~f0"'
@@ -240,8 +280,10 @@ export async function checkForUpdates(context: vscode.ExtensionContext, manual: 
 		return;
 	}
 
-	// Aggiornamento disponibile: memorizza, mostra il badge persistente e proponi l'aggiornamento.
-	const asset = release.assets.find(a => /Setup.*\.exe$/i.test(a.name)) ?? release.assets[0];
+	// Aggiornamento disponibile: scegli l'asset adatto alla piattaforma.
+	const asset = process.platform === 'darwin'
+		? (release.assets.find(a => /arm64.*\.dmg$/i.test(a.name)) ?? release.assets.find(a => /\.dmg$/i.test(a.name)))
+		: (release.assets.find(a => /Setup.*\.exe$/i.test(a.name)) ?? release.assets[0]);
 	pendingRelease = { tag: release.tag_name, current, downloadUrl: asset?.browser_download_url, htmlUrl: release.html_url };
 
 	if (updateBar) {

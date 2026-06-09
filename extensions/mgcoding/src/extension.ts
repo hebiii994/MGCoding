@@ -7,6 +7,7 @@ import { runAgent } from './agent/agentLoop';
 import { ChatViewProvider } from './chat/chatViewProvider';
 import { registerDiffApproval } from './edit/diffApproval';
 import { inlineEdit } from './edit/inlineEdit';
+import { explainSelection, refactorSelection, generateTests, addComments, fixWithAI, MgCodeActionProvider } from './edit/codeActions';
 import { hasCheckpoint, revertCheckpoint, registerCheckpointDiff, openCheckpointDiffs } from './edit/checkpoint';
 import { ChatMessage } from './llm/types';
 import { createSampleHook, Hook, HookManager, HooksTreeProvider, toggleHook } from './hooks/hooks';
@@ -18,6 +19,25 @@ import { checkForUpdates } from './update/updater';
 import { initAnalytics, track, toggleAnalytics } from './analytics/analytics';
 import { registerAutocomplete } from './complete/autocomplete';
 import { TelegramBridge } from './remote/telegram';
+import { manageModels, recommendModel, pullModel } from './llm/ollamaManage';
+import { codeIndex } from './index/codeIndex';
+import { generateCommitMessage, explainDiff, prDescription } from './git/git';
+
+/** Scarica (pull) il modello di embedding in Ollama mostrando l'avanzamento. */
+async function ensureEmbedModel(model: string): Promise<void> {
+	await vscode.window.withProgress(
+		{ location: vscode.ProgressLocation.Notification, title: `Scarico ${model}`, cancellable: true },
+		async (progress, token) => {
+			const ctrl = new AbortController();
+			token.onCancellationRequested(() => ctrl.abort());
+			let last = 0;
+			await pullModel(model, (pct, status) => {
+				progress.report({ increment: Math.max(0, pct - last), message: `${status}${pct ? ` ${pct}%` : ''}` });
+				last = pct;
+			}, ctrl.signal);
+		}
+	);
+}
 import { createSpec, runSpecTask, runSpecTasks, runSpecTasksParallel, SpecsTreeProvider, SpecTasksCodeLensProvider, toggleSpecTask } from './specs/specs';
 import { initSteering, SteeringTreeProvider } from './steering/steering';
 
@@ -120,6 +140,41 @@ export function activate(context: vscode.ExtensionContext): void {
 	const TELEGRAM_SECRET = 'mgcoding.telegram.token';
 	const telegram = new TelegramBridge(registry, context.globalState);
 	context.subscriptions.push({ dispose: () => telegram.dispose() });
+	// Rispecchia la chat del PC su Telegram (per seguire da remoto cosa accade).
+	chat.setMirror((role, text) => void telegram.mirror(role, text));
+
+	// Tour iniziale: alla prima apertura mostra il walkthrough di benvenuto (una sola volta).
+	if (!context.globalState.get<boolean>('mgcoding.walkthroughShown')) {
+		void context.globalState.update('mgcoding.walkthroughShown', true);
+		setTimeout(() => void vscode.commands.executeCommand('mgcoding.openWalkthrough'), 1500);
+	}
+
+	// Auto-aggiornamento incrementale dell'indice RAG: aggiorna (NON crea da zero) un indice
+	// già esistente all'avvio e dopo i salvataggi, con debounce per non martellare Ollama.
+	if (vscode.workspace.workspaceFolders?.length) {
+		let idxTimer: NodeJS.Timeout | undefined;
+		const scheduleIndexUpdate = (delay: number): void => {
+			if (!vscode.workspace.getConfiguration('mgcoding').get<boolean>('index.autoUpdate', true)) {
+				return;
+			}
+			if (idxTimer) {
+				clearTimeout(idxTimer);
+			}
+			idxTimer = setTimeout(async () => {
+				try {
+					await codeIndex.load();
+					if (codeIndex.isReady()) {
+						await codeIndex.build();
+					}
+				} catch {
+					// best-effort: ignora (es. Ollama non raggiungibile)
+				}
+			}, delay);
+		};
+		scheduleIndexUpdate(8000);
+		context.subscriptions.push(vscode.workspace.onDidSaveTextDocument(() => scheduleIndexUpdate(25000)));
+		context.subscriptions.push({ dispose: () => { if (idxTimer) { clearTimeout(idxTimer); } } });
+	}
 	void context.secrets.get(TELEGRAM_SECRET).then(tok => {
 		if (tok) {
 			void telegram.start(tok);
@@ -179,8 +234,74 @@ export function activate(context: vscode.ExtensionContext): void {
 		}),
 		vscode.commands.registerCommand('mgcoding.setApiKey', () => registry.setApiKey()),
 		vscode.commands.registerCommand('mgcoding.setOpenAIKey', () => registry.setOpenAIKey()),
+		vscode.commands.registerCommand('mgcoding.testMicrophone', () => chat.testMicrophone()),
+		vscode.commands.registerCommand('mgcoding.switchProfile', () => chat.switchProfile()),
+		vscode.commands.registerCommand('mgcoding.editProfile', () => chat.editProfile()),
+		vscode.commands.registerCommand('mgcoding.selectMicrophone', () => chat.selectMicrophone()),
+		vscode.commands.registerCommand('mgcoding.downloadSttModel', () => chat.downloadSttModel()),
+		vscode.commands.registerCommand('mgcoding.manageModels', () => manageModels()),
+		vscode.commands.registerCommand('mgcoding.recommendModel', () => recommendModel()),
+		vscode.commands.registerCommand('mgcoding.gitCommitMessage', () => generateCommitMessage(registry)),
+		vscode.commands.registerCommand('mgcoding.gitExplainDiff', () => explainDiff(registry)),
+		vscode.commands.registerCommand('mgcoding.gitPrDescription', () => prDescription(registry)),
+		vscode.commands.registerCommand('mgcoding.buildIndex', async () => {
+			const runBuild = async (): Promise<number> => await vscode.window.withProgress(
+				{ location: vscode.ProgressLocation.Notification, title: 'Indicizzo il workspace (RAG)', cancellable: true },
+				async (progress, token) => {
+					const ctrl = new AbortController();
+					token.onCancellationRequested(() => ctrl.abort());
+					let last = 0;
+					return codeIndex.build((done, total, label) => {
+						const pct = total ? Math.floor((done / total) * 100) : 0;
+						progress.report({ increment: Math.max(0, pct - last), message: `${label} ${done}/${total}` });
+						last = pct;
+					}, ctrl.signal);
+				}
+			);
+			try {
+				const n = await runBuild();
+				vscode.window.showInformationMessage(`Indice creato: ${n} frammenti.`);
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				// Modello di embedding mancante → offri di scaricarlo e riprova.
+				if (/non installato|not found|no such model|HTTP 404/i.test(msg)) {
+					const model = vscode.workspace.getConfiguration('mgcoding').get<string>('index.embedModel', 'nomic-embed-text');
+					const go = await vscode.window.showWarningMessage(
+						`Per l'indice serve il modello di embedding "${model}", non installato in Ollama.`,
+						'Scarica ora'
+					);
+					if (go === 'Scarica ora') {
+						try {
+							await ensureEmbedModel(model);
+							const n = await runBuild();
+							vscode.window.showInformationMessage(`Indice creato: ${n} frammenti.`);
+						} catch (e) {
+							vscode.window.showErrorMessage(`Download/indicizzazione non riuscita: ${e instanceof Error ? e.message : String(e)}`);
+						}
+					}
+					return;
+				}
+				vscode.window.showErrorMessage(`Indicizzazione non riuscita: ${msg}`);
+			}
+		}),
+		vscode.commands.registerCommand('mgcoding.openGuide', async () => {
+			const uri = vscode.Uri.joinPath(context.extensionUri, 'GUIDA-UTENTE.md');
+			try {
+				await vscode.commands.executeCommand('markdown.showPreview', uri);
+			} catch {
+				// fallback: apri il file come documento
+				await vscode.window.showTextDocument(uri);
+			}
+		}),
+		vscode.commands.registerCommand('mgcoding.openWalkthrough', () => vscode.commands.executeCommand('workbench.action.openWalkthrough', `${context.extension.id}#mgcodingGettingStarted`, false)),
 		vscode.commands.registerCommand('mgcoding.openChat', () => vscode.commands.executeCommand('mgcoding.chat.focus')),
 		vscode.commands.registerCommand('mgcoding.inlineEdit', () => inlineEdit(registry)),
+		vscode.commands.registerCommand('mgcoding.explainSelection', () => explainSelection(registry)),
+		vscode.commands.registerCommand('mgcoding.refactorSelection', () => refactorSelection(registry)),
+		vscode.commands.registerCommand('mgcoding.generateTests', () => generateTests(registry)),
+		vscode.commands.registerCommand('mgcoding.addComments', () => addComments(registry)),
+		vscode.commands.registerCommand('mgcoding.fixWithAI', (uri?: vscode.Uri, range?: vscode.Range, messages?: string[]) => fixWithAI(registry, uri, range, messages)),
+		vscode.languages.registerCodeActionsProvider('*', new MgCodeActionProvider(), { providedCodeActionKinds: MgCodeActionProvider.kinds }),
 		vscode.commands.registerCommand('mgcoding.checkUpdates', () => checkForUpdates(context, true)),
 		vscode.commands.registerCommand('mgcoding.viewChanges', () => openCheckpointDiffs()),
 		vscode.commands.registerCommand('mgcoding.revertChanges', async () => {

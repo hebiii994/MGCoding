@@ -15,6 +15,10 @@ import { RunReporter } from '../run/runView';
 import { WhisperEngine } from '../stt/whisperEngine';
 import { ProviderRegistry } from '../llm/registry';
 import { ChatMessage } from '../llm/types';
+import { ProfileStore } from '../profile/profiles';
+import { codeIndex } from '../index/codeIndex';
+import * as os from 'os';
+import { execFile } from 'child_process';
 
 interface ProviderOption {
 	id: string;
@@ -89,6 +93,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	private specQueue: { title: string; desc: string }[] = [];
 	/** Motore Whisper incluso (auto-avviato) per lo STT senza server esterno. */
 	private readonly whisper: WhisperEngine;
+	/** Profili utente con auto-apprendimento (multi-persona). */
+	private readonly profiles: ProfileStore;
+	/** Conteggio turni utente dall'ultimo consolidamento del profilo. */
+	private turnsSinceConsolidate = 0;
+	/** Mirror opzionale degli eventi della chat verso un canale esterno (es. Telegram). */
+	private mirror?: (role: 'user' | 'assistant' | 'tool', text: string) => void;
 	private readonly disposables: vscode.Disposable[] = [];
 
 	constructor(
@@ -97,6 +107,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		private readonly memento: vscode.Memento
 	) {
 		this.whisper = new WhisperEngine(vscode.Uri.joinPath(extensionUri, 'bin').fsPath);
+		this.profiles = new ProfileStore(this.memento);
+		void this.ensureDefaultProfile();
 		this.sessions = this.memento.get<Session[]>('mgcoding.sessions', []);
 		this.activeId = this.memento.get<string>('mgcoding.activeSession', '');
 		if (this.sessions.length === 0) {
@@ -145,6 +157,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 					this.post({ type: 'changes', count: changedCount() });
 					break;
 				case 'send':
+					// Se l'agente sta aspettando una risposta a una domanda (ask_user), il testo
+					// scritto la risolve invece di iniziare un nuovo turno.
+					if (this.askResolver && msg.text && msg.text.trim()) {
+						this.askResolver(msg.text.trim());
+						break;
+					}
 					if (msg.text || (msg.images && msg.images.length)) {
 						await this.handleSend(msg.text ?? '', msg.images);
 					}
@@ -206,6 +224,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 						await this.sendState();
 					}
 					break;
+				case 'toggleAutoModel':
+					{
+						const cfg = vscode.workspace.getConfiguration('mgcoding');
+						await cfg.update('ollama.autoModel', !cfg.get<boolean>('ollama.autoModel', false), vscode.ConfigurationTarget.Global);
+						await this.sendState();
+					}
+					break;
 				case 'pickContext':
 					await this.pickContext();
 					break;
@@ -217,6 +242,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 					break;
 				case 'stopRecording':
 					this.whisper.stopRecording();
+					break;
+				case 'askAnswer':
+					this.askResolver?.((msg as { answer?: string }).answer ?? '');
+					break;
+				case 'switchProfile':
+					await this.switchProfile();
+					break;
+				case 'manageModels':
+					await vscode.commands.executeCommand('mgcoding.manageModels');
+					break;
+				case 'openGuide':
+					await vscode.commands.executeCommand('mgcoding.openGuide');
+					break;
+				case 'openWalkthrough':
+					await vscode.commands.executeCommand('mgcoding.openWalkthrough');
 					break;
 				case 'guidedSetup':
 					await vscode.commands.executeCommand('mgcoding.guidedSetup');
@@ -281,7 +321,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		});
 	}
 
-	private async buildState(): Promise<{ current: string; options: ProviderOption[]; sessions: { id: string; title: string }[]; activeId: string; mode: ChatMode; autopilot: boolean; tokens: number; nativeTools: boolean; voiceLang: string }> {
+	private async buildState(): Promise<{ current: string; options: ProviderOption[]; sessions: { id: string; title: string }[]; activeId: string; mode: ChatMode; autopilot: boolean; tokens: number; nativeTools: boolean; voiceLang: string; profile: string; autoModel: boolean }> {
 		const c = vscode.workspace.getConfiguration('mgcoding');
 		const claudeModel = c.get<string>('claude.model', 'claude-opus-4-8');
 		const ollamaModel = c.get<string>('ollama.model', 'qwen2.5-coder:14b');
@@ -325,7 +365,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			autopilot: c.get<boolean>('autoApprove', false),
 			tokens: Math.round(chars / 4),
 			nativeTools: c.get<boolean>('ollama.nativeTools', false),
-			voiceLang: c.get<string>('voice.lang', 'it-IT')
+			voiceLang: c.get<string>('voice.lang', 'it-IT'),
+			profile: this.profiles.active()?.name ?? '',
+			autoModel: c.get<boolean>('ollama.autoModel', false)
 		};
 	}
 
@@ -377,6 +419,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		form.append('file', new Blob([buf], { type: 'audio/wav' }), filename);
 		form.append('model', c.get<string>('stt.model', 'whisper-1'));
 		form.append('response_format', 'json');
+		// Forza la lingua (auto-detect su clip corte è inaffidabile). 'auto' = lascia decidere.
+		const lang = c.get<string>('stt.language', 'it');
+		if (lang && lang !== 'auto') {
+			form.append('language', lang);
+		}
+		form.append('temperature', '0');
 		const headers: Record<string, string> = {};
 		const key = c.get<string>('stt.apiKey', '').trim();
 		if (key) {
@@ -396,7 +444,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		} catch {
 			// non-JSON: testo grezzo
 		}
-		return text.trim();
+		// Rimuove i marcatori non-vocali di Whisper (es. [BLANK_AUDIO], [MUSIC], (silence)).
+		text = text.replace(/\[(?:blank_audio|music|silence|inaudible|noise|applause|laughter)\]/gi, '')
+			.replace(/\((?:silence|inaudible|music|noise)\)/gi, '')
+			.trim();
+		return text;
 	}
 
 	/** Registra dal microfono (SoX, FUORI dal webview), trascrive e restituisce il testo. */
@@ -407,7 +459,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			return;
 		}
 		this.post({ type: 'micState', state: 'recording' });
-		const wav = await this.whisper.recordToWav(60);
+		const sc = vscode.workspace.getConfiguration('mgcoding');
+		const wav = await this.whisper.recordToWav({
+			device: sc.get<string>('stt.inputDevice', ''),
+			thresholdPct: sc.get<number>('stt.thresholdPct', 2),
+			maxSeconds: sc.get<number>('stt.maxSeconds', 15)
+		});
 		if (!wav) {
 			// nessuna voce catturata: in conversazione, riprende ad ascoltare
 			this.post({ type: 'micState', state: 'idle' });
@@ -425,6 +482,298 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			this.post({ type: 'sttResult', text: '', autoSend: false, mode });
 		} finally {
 			this.post({ type: 'micState', state: 'idle' });
+			try { fs.unlinkSync(wav); } catch { /* */ }
+		}
+	}
+
+	/** Resolver in attesa della risposta dell'utente a una domanda ask_user dell'agente. */
+	private askResolver?: (answer: string) => void;
+
+	/**
+	 * Mostra una domanda con opzioni cliccabili in chat e attende la scelta dell'utente
+	 * (o una risposta libera). Usato dal tool ask_user dell'agente (stile Kiro).
+	 */
+	private askUser(question: string, options: string[], multiSelect: boolean): Promise<string> {
+		this.post({ type: 'ask', question, options, multiSelect });
+		return new Promise<string>(resolve => {
+			let settled = false;
+			const done = (answer: string): void => { if (!settled) { settled = true; this.askResolver = undefined; resolve(answer); } };
+			this.askResolver = done;
+			// Se il turno viene annullato, sblocca l'attesa.
+			this.abort?.signal.addEventListener('abort', () => done('(nessuna risposta: operazione annullata)'), { once: true });
+		});
+	}
+
+	/** Imposta un mirror degli eventi della chat (usato per inoltrarli a Telegram). */
+	setMirror(fn: (role: 'user' | 'assistant' | 'tool', text: string) => void): void {
+		this.mirror = fn;
+	}
+
+	/**
+	 * Gestione contesto: se la conversazione è troppo lunga, riassume i messaggi più vecchi
+	 * in un unico "Riepilogo" e tiene gli ultimi verbatim. Riduce token, costo e latenza nelle
+	 * sessioni lunghe ed evita il context overflow. Compatta in modo persistente la sessione.
+	 */
+	private async compactIfNeeded(session: Session): Promise<void> {
+		const c = vscode.workspace.getConfiguration('mgcoding');
+		if (!c.get<boolean>('context.autoCompact', true)) {
+			return;
+		}
+		const maxTokens = c.get<number>('context.compactAtTokens', 16000);
+		const keep = Math.max(4, c.get<number>('context.keepMessages', 8));
+		const chars = session.messages.reduce((n, m) => n + m.content.length, 0);
+		if (chars / 4 < maxTokens || session.messages.length <= keep + 2) {
+			return;
+		}
+		const head = session.messages.slice(0, session.messages.length - keep);
+		const tail = session.messages.slice(session.messages.length - keep);
+		const convo = head.map(m => `${m.role === 'user' ? 'Utente' : 'Assistente'}: ${m.content}`).join('\n').slice(0, 14000);
+		const sys = 'Riassumi questa conversazione per poterla continuare senza perdere il filo. Mantieni: obiettivi/richieste, decisioni prese, vincoli, file e funzioni toccati, preferenze dell\'utente e stato attuale del lavoro (cosa fatto / cosa manca). Conciso ma completo, in italiano. Rispondi SOLO con il riassunto.';
+		try {
+			const summary = (await streamPure(this.registry, [{ role: 'user', content: convo }], sys, () => { /* no stream */ })).trim();
+			if (summary) {
+				session.messages = [{ role: 'user', content: `[Riepilogo della conversazione precedente]\n${summary}` }, ...tail];
+				this.post({ type: 'compacted' });
+			}
+		} catch {
+			// compaction best-effort: in caso di errore si prosegue con lo storico intero
+		}
+	}
+
+	/**
+	 * RAG nel contesto: se l'indice è pronto, recupera gli estratti di codice più pertinenti
+	 * alla richiesta e li restituisce come blocco da iniettare nel system prompt (così anche i
+	 * modelli che non chiamano i tool "vedono" il codice giusto). '' se non disponibile.
+	 */
+	private async buildAutoContext(query: string): Promise<string> {
+		const q = query.trim();
+		if (q.length < 8 || !vscode.workspace.getConfiguration('mgcoding').get<boolean>('index.autoContext', true)) {
+			return '';
+		}
+		try {
+			await codeIndex.load();
+			if (!codeIndex.isReady()) {
+				return '';
+			}
+			const hits = await codeIndex.search(q, 4);
+			const good = hits.filter(h => h.score > 0.35);
+			if (!good.length) {
+				return '';
+			}
+			const blocks = good.map(h => `── ${h.path}:${h.start}-${h.end}\n${h.text.slice(0, 800)}`).join('\n\n');
+			return `## Contesto dal codebase (recuperato automaticamente, potenzialmente rilevante)\n${blocks}\n\nUsa questi estratti se pertinenti; verifica con read_file prima di modificare.`;
+		} catch {
+			return '';
+		}
+	}
+
+	/** Crea il profilo predefinito (nome utente del SO) al primo avvio. */
+	private async ensureDefaultProfile(): Promise<void> {
+		if (this.profiles.list().length === 0) {
+			await this.profiles.create(os.userInfo().username || 'Io');
+		}
+	}
+
+	/** Salva una preferenza nel profilo attivo e lo segnala in chat. */
+	private async rememberFact(fact: string): Promise<void> {
+		const id = this.profiles.activeId();
+		if (!id) {
+			return;
+		}
+		await this.profiles.appendFact(id, fact);
+		this.post({ type: 'remembered', fact });
+	}
+
+	/**
+	 * Consolidamento automatico: ogni N turni riassume la conversazione recente in
+	 * preferenze durature e le fonde nel profilo attivo (dedup) via un passaggio LLM.
+	 */
+	private async maybeConsolidateProfile(session: Session): Promise<void> {
+		this.turnsSinceConsolidate++;
+		if (this.turnsSinceConsolidate < 6) {
+			return;
+		}
+		this.turnsSinceConsolidate = 0;
+		const profile = this.profiles.active();
+		if (!profile) {
+			return;
+		}
+		const recent = session.messages.slice(-16)
+			.map(m => `${m.role === 'user' ? 'Utente' : 'Assistente'}: ${m.content}`)
+			.join('\n')
+			.slice(0, 6000);
+		const sys = `Estrai SOLO le preferenze PERSONALI e TRASVERSALI dell'utente, valide in QUALSIASI progetto (lingua preferita, come si chiama, come vuole le risposte, linguaggi/framework/stile preferiti in generale, sistema operativo, convenzioni ricorrenti).
+NON salvare MAI dettagli legati al progetto/workspace corrente: niente nomi di progetto o repository, niente descrizioni di cosa sta costruendo ora, niente nomi di file/funzioni/feature specifiche. Quelli NON sono preferenze.
+Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la più recente). Rispondi con un elenco puntato conciso in italiano, una preferenza per riga con "- ". Se non c'è nulla di nuovo, ripeti l'elenco esistente invariato.`;
+		const input = `Preferenze già note:\n${profile.facts || '(nessuna)'}\n\nConversazione recente:\n${recent}`;
+		try {
+			const out = await streamPure(this.registry, [{ role: 'user', content: input }], sys, () => { /* no stream */ });
+			const facts = out.split('\n').map(l => l.trim()).filter(l => l.startsWith('-')).slice(0, 40).join('\n');
+			if (facts) {
+				await this.profiles.setFacts(profile.id, facts);
+			}
+		} catch {
+			// consolidamento best-effort: ignora errori
+		}
+	}
+
+	/** Comando: scegli/crea/rinomina il profilo (persona) attivo. */
+	async switchProfile(): Promise<void> {
+		const items: (vscode.QuickPickItem & { id?: string; action?: string })[] = this.profiles.list().map(p => ({
+			label: (p.id === this.profiles.activeId() ? '$(check) ' : '$(account) ') + p.name,
+			description: p.facts ? `${p.facts.split('\n').filter(Boolean).length} preferenze` : 'nessuna preferenza',
+			id: p.id
+		}));
+		items.push({ label: '$(add) Nuovo profilo…', action: 'new' });
+		items.push({ label: '$(edit) Modifica/ripulisci preferenze del profilo attivo…', action: 'edit' });
+		const pick = await vscode.window.showQuickPick(items, { title: 'Profilo utente attivo', placeHolder: 'Scegli la persona, creane una nuova o ripulisci le preferenze' });
+		if (!pick) {
+			return;
+		}
+		if (pick.action === 'edit') {
+			await this.editProfile();
+			return;
+		}
+		if (pick.action === 'new') {
+			const name = await vscode.window.showInputBox({ title: 'Nuovo profilo', prompt: 'Nome della persona' });
+			if (name?.trim()) {
+				const p = await this.profiles.create(name.trim());
+				await this.profiles.setActive(p.id);
+			}
+		} else if (pick.id) {
+			await this.profiles.setActive(pick.id);
+		}
+		await this.sendState();
+	}
+
+	/** Mostra le preferenze del profilo attivo e permette di rimuoverle (o svuotarle tutte). */
+	async editProfile(): Promise<void> {
+		const p = this.profiles.active();
+		if (!p) {
+			void vscode.window.showInformationMessage('Nessun profilo utente attivo.');
+			return;
+		}
+		const facts = p.facts.split('\n').map(s => s.replace(/^[-*]\s*/, '').trim()).filter(Boolean);
+		if (!facts.length) {
+			void vscode.window.showInformationMessage(`Il profilo "${p.name}" non ha preferenze salvate.`);
+			return;
+		}
+		const toRemove = await vscode.window.showQuickPick(
+			facts.map(f => ({ label: f })),
+			{ canPickMany: true, title: `Preferenze di ${p.name}`, placeHolder: 'Seleziona le preferenze da RIMUOVERE, poi premi Invio (selezionale tutte per svuotare). Esc per annullare.' }
+		);
+		if (!toRemove || toRemove.length === 0) {
+			return;
+		}
+		const remove = new Set(toRemove.map(i => i.label));
+		const kept = facts.filter(f => !remove.has(f)).map(f => `- ${f}`).join('\n');
+		await this.profiles.setFacts(p.id, kept);
+		void vscode.window.showInformationMessage(`Rimosse ${remove.size} preferenze dal profilo "${p.name}".`);
+		await this.sendState();
+	}
+
+	/** Elenca i nomi dei dispositivi audio (best-effort, Windows via PowerShell). */
+	private listAudioDeviceNames(): Promise<string[]> {
+		if (process.platform !== 'win32') {
+			return Promise.resolve([]);
+		}
+		return new Promise(resolve => {
+			execFile('powershell', ['-NoProfile', '-Command', 'Get-CimInstance Win32_SoundDevice | Select-Object -ExpandProperty Name'],
+				{ timeout: 8000, windowsHide: true }, (err, stdout) => {
+					if (err || !stdout) {
+						resolve([]);
+						return;
+					}
+					const names = [...new Set(stdout.split(/\r?\n/).map(s => s.trim()).filter(Boolean))];
+					resolve(names);
+				});
+		});
+	}
+
+	/**
+	 * Permette di scegliere il microfono (imposta mgcoding.stt.inputDevice) e poi esegue
+	 * un test di 4s per verificare che catturi la voce. Su Windows propone i dispositivi
+	 * rilevati + gli indici SoX; "Predefinito" usa il dispositivo di sistema.
+	 */
+	async selectMicrophone(): Promise<void> {
+		const names = await this.listAudioDeviceNames();
+		type Item = vscode.QuickPickItem & { device: string };
+		const items: Item[] = [
+			{ label: '$(check) Predefinito di sistema', device: '' },
+			...names.map((n): Item => ({ label: `$(mic) ${n}`, device: n })),
+			{ label: 'Indice SoX 0', description: 'se i nomi non funzionano', device: '0' },
+			{ label: 'Indice SoX 1', device: '1' },
+			{ label: 'Indice SoX 2', device: '2' },
+			{ label: 'Indice SoX 3', device: '3' }
+		];
+		const pick = await vscode.window.showQuickPick(items, {
+			title: 'Seleziona microfono',
+			placeHolder: 'Scegli un dispositivo; poi faccio un test di 4 secondi'
+		});
+		if (!pick) {
+			return;
+		}
+		await vscode.workspace.getConfiguration('mgcoding').update('stt.inputDevice', pick.device, vscode.ConfigurationTarget.Global);
+		await this.testMicrophone();
+	}
+
+	/** Scarica un modello Whisper più accurato (per migliorare la trascrizione, anche IT). */
+	async downloadSttModel(): Promise<void> {
+		type Item = vscode.QuickPickItem & { name: string };
+		const items: Item[] = [
+			{ label: 'small', description: '~466 MB', detail: 'Buon compromesso: molto più preciso del base, anche in italiano.', name: 'small' },
+			{ label: 'medium', description: '~1.5 GB', detail: 'Ancora più accurato; serve più RAM/CPU.', name: 'medium' },
+			{ label: 'large-v3-turbo', description: '~1.6 GB', detail: 'Massima qualità, veloce per la sua taglia.', name: 'large-v3-turbo' }
+		];
+		const pick = await vscode.window.showQuickPick(items, { title: 'Scarica un modello vocale (Whisper) migliore', placeHolder: 'Più grande = più accurato (anche per l\'italiano)' });
+		if (!pick) {
+			return;
+		}
+		try {
+			await vscode.window.withProgress(
+				{ location: vscode.ProgressLocation.Notification, title: `Scarico il modello vocale ${pick.name}`, cancellable: true },
+				async (progress, token) => {
+					const ctrl = new AbortController();
+					token.onCancellationRequested(() => ctrl.abort());
+					let last = 0;
+					await this.whisper.downloadModel(pick.name, pct => { progress.report({ increment: Math.max(0, pct - last), message: `${pct}%` }); last = pct; }, ctrl.signal);
+				}
+			);
+			void vscode.window.showInformationMessage(`Modello vocale "${pick.name}" scaricato e attivo. Riprova la dettatura.`);
+		} catch (err) {
+			void vscode.window.showErrorMessage(`Download non riuscito: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
+	/**
+	 * Diagnostica microfono: registra una durata fissa (default 4s, niente VAD) e prova a
+	 * trascrivere, mostrando l'esito. Aiuta a capire se il device di input è quello giusto.
+	 */
+	async testMicrophone(): Promise<void> {
+		if (!this.whisper.canRecord()) {
+			void vscode.window.showErrorMessage('Registratore vocale (SoX) non incluso in questa build.');
+			return;
+		}
+		const sc = vscode.workspace.getConfiguration('mgcoding');
+		const device = sc.get<string>('stt.inputDevice', '');
+		const wav = await vscode.window.withProgress(
+			{ location: vscode.ProgressLocation.Notification, title: `Test microfono${device ? ` ("${device}")` : ' (device di default)'}: parla per 4 secondi…` },
+			() => this.whisper.recordToWav({ fixedSeconds: 4, device, maxSeconds: 8 })
+		);
+		if (!wav) {
+			void vscode.window.showWarningMessage('Nessun audio catturato. Il microfono di default potrebbe essere sbagliato o muto. Imposta "mgcoding.stt.inputDevice" con il nome esatto del dispositivo (Impostazioni audio di Windows).');
+			return;
+		}
+		try {
+			const text = (await this.transcribeBuffer(fs.readFileSync(wav), 'audio.wav')).trim();
+			if (text) {
+				void vscode.window.showInformationMessage(`Microfono OK. Ho sentito: "${text}"`);
+			} else {
+				void vscode.window.showWarningMessage('Audio catturato ma trascrizione vuota: prova a parlare più forte/vicino, o abbassa "mgcoding.stt.thresholdPct".');
+			}
+		} catch (err) {
+			void vscode.window.showErrorMessage(`Trascrizione non riuscita: ${err instanceof Error ? err.message : String(err)}`);
+		} finally {
 			try { fs.unlinkSync(wav); } catch { /* */ }
 		}
 	}
@@ -563,22 +912,30 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			userMsg.images = images.slice(0, 4);
 		}
 		session.messages.push(userMsg);
+		this.mirror?.('user', text || '(immagine)');
 		this.post({ type: 'busy', value: true });
+		// Comprime lo storico se troppo lungo (token/costo/latenza) prima di interrogare l'LLM.
+		await this.compactIfNeeded(session);
 		// Intestazione di turno con avatar + steering inclusi (trasparenza stile Kiro).
 		const steering = await listSteeringNames();
 		this.post({ type: 'steeringChips', names: steering });
 		this.abort = new AbortController();
-		const systemExtra = VIBE_MODE_PROMPT;
+		const autoCtx = await this.buildAutoContext(text);
+		const systemExtra = [VIBE_MODE_PROMPT, this.profiles.contextBlock(), autoCtx].filter(Boolean).join('\n\n');
+		let streamBuf = '';
 		try {
 			await runAgent(this.registry, session.messages, {
-				onStreamStart: () => this.post({ type: 'streamStart' }),
-				onStreamDelta: t => this.post({ type: 'streamDelta', text: t }),
-				onStreamEnd: () => this.post({ type: 'streamEnd' }),
+				onStreamStart: () => { streamBuf = ''; this.post({ type: 'streamStart' }); },
+				onStreamDelta: t => { streamBuf += t; this.post({ type: 'streamDelta', text: t }); },
+				onStreamEnd: () => { if (streamBuf.trim()) { this.mirror?.('assistant', streamBuf.trim()); } this.post({ type: 'streamEnd' }); },
 				onStreamCancel: () => this.post({ type: 'streamCancel' }),
-				onAssistantText: t => this.post({ type: 'assistant', text: t }),
-				onToolStart: call => this.post({ type: 'tool', name: call.tool, args: JSON.stringify(call.args) }),
+				onAssistantText: t => { this.mirror?.('assistant', t); this.post({ type: 'assistant', text: t }); },
+				onToolStart: call => { this.mirror?.('tool', call.tool); this.post({ type: 'tool', name: call.tool, args: JSON.stringify(call.args) }); },
 				onToolResult: r => this.post({ type: 'toolResult', text: r }),
-				onPlan: steps => this.post({ type: 'plan', steps })
+				onPlan: steps => this.post({ type: 'plan', steps }),
+				onAsk: (question, options, multiSelect) => this.askUser(question, options, multiSelect),
+				onRemember: fact => this.rememberFact(fact),
+				onModel: model => this.post({ type: 'modelChosen', model })
 			}, this.abort.signal, systemExtra);
 		} catch (err) {
 			this.post({ type: 'error', text: err instanceof Error ? err.message : String(err) });
@@ -586,6 +943,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			this.abort = undefined;
 			this.post({ type: 'busy', value: false });
 			this.post({ type: 'changes', count: changedCount() });
+			await this.maybeConsolidateProfile(session);
 			await this.save();
 			await this.sendState();
 		}
@@ -1014,7 +1372,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		if (!spec || !root) {
 			return;
 		}
-		await vscode.commands.executeCommand('mgcoding.runSpecTasks', { uri: vscode.Uri.joinPath(root, spec.slug) });
+		const specUri = vscode.Uri.joinPath(root, spec.slug);
+		// Se l'utente ha abilitato il parallelismo (tasks.parallel > 1), esegui i task in
+		// "wave" come subagent indipendenti; altrimenti esecuzione sequenziale classica.
+		const parallel = vscode.workspace.getConfiguration('mgcoding').get<number>('tasks.parallel', 1);
+		if (parallel > 1) {
+			await vscode.commands.executeCommand('mgcoding.runSpecTasksParallel', vscode.Uri.joinPath(specUri, 'tasks.md'));
+		} else {
+			await vscode.commands.executeCommand('mgcoding.runSpecTasks', { uri: specUri });
+		}
 	}
 
 	dispose(): void {
@@ -1074,6 +1440,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	.steering-chip { font-size: 11px; padding: 2px 8px; border-radius: 10px; white-space: nowrap; background: color-mix(in srgb, var(--mg-accent) 14%, transparent); border: 1px solid color-mix(in srgb, var(--mg-accent) 32%, transparent); }
 	body.busy .mg-avatar { animation: mgavatar 1.2s ease-in-out infinite; }
 	@keyframes mgavatar { 0%,100% { transform: scale(1); } 50% { transform: scale(1.15); } }
+	#working { display: none; align-items: center; gap: 8px; align-self: flex-start; margin: 2px 2px 4px; padding: 6px 10px; font-size: 0.9em; opacity: 0.85; }
+	body.busy #working { display: flex; }
+	#working .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--mg-accent); animation: mgwork 1s infinite ease-in-out; }
+	@keyframes mgwork { 0%,100% { opacity: 0.3; transform: scale(0.8); } 50% { opacity: 1; transform: scale(1.1); } }
+	#working .wt { font-weight: 600; }
+	#working .ws { opacity: 0.7; }
+	.ask-card { align-self: stretch; background: var(--vscode-textBlockQuote-background); border: 1px solid color-mix(in srgb, var(--mg-accent) 40%, transparent); border-radius: 8px; padding: 10px 12px; margin: 4px 0; }
+	.ask-card.answered { opacity: 0.75; }
+	.ask-q { font-weight: 600; margin-bottom: 8px; }
+	.ask-opts { display: flex; flex-wrap: wrap; gap: 6px; }
+	.ask-opt { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: 1px solid var(--vscode-input-border, #5a5a5a); border-radius: 8px; padding: 5px 12px; font-size: 12.5px; cursor: pointer; }
+	.ask-opt:hover:not(:disabled) { border-color: var(--mg-accent); }
+	.ask-opt.sel { background: color-mix(in srgb, var(--mg-accent) 22%, transparent); border-color: var(--mg-accent); }
+	.ask-opt:disabled { cursor: default; }
+	.ask-confirm { margin-top: 8px; background: var(--mg-accent); color: #06210f; font-weight: 700; border: none; border-radius: 8px; padding: 5px 14px; cursor: pointer; }
+	.ask-free { margin-top: 8px; font-size: 11px; opacity: 0.6; }
+	.ask-chosen { margin-top: 8px; font-weight: 600; color: var(--mg-accent); }
+	.remember-note { align-self: flex-start; font-size: 11.5px; opacity: 0.7; font-style: italic; margin: 2px 2px; }
 	.plan-card { align-self: stretch; background: var(--vscode-textBlockQuote-background); border-left: 3px solid var(--mg-accent); border-radius: 6px; padding: 7px 10px; margin: 4px 0; }
 	.plan-card .plan-title { font-weight: 600; font-size: 0.85em; opacity: 0.8; margin-bottom: 5px; text-transform: uppercase; letter-spacing: 0.03em; }
 	.plan-step { display: flex; align-items: flex-start; gap: 7px; padding: 2px 0; font-size: 0.92em; }
@@ -1101,6 +1485,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	.reason { margin-bottom: 6px; font-size: 0.85em; opacity: 0.85; }
 	.speak-btn { display: inline-block; margin-top: 4px; background: transparent; border: none; color: var(--vscode-foreground); opacity: 0.45; cursor: pointer; font-size: 12px; padding: 0 2px; }
 	.speak-btn:hover { opacity: 1; }
+	.msg-footer { display: flex; align-items: center; gap: 10px; margin-top: 6px; font-size: 11px; opacity: 0.6; }
+	.msg-elapsed { white-space: nowrap; }
+	.msg-copy { margin-left: auto; background: transparent; border: none; color: var(--vscode-foreground); opacity: 0.8; cursor: pointer; font-size: 11px; padding: 2px 4px; border-radius: 4px; }
+	.msg-copy:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground, rgba(127,127,127,0.18)); }
 	.reason summary { cursor: pointer; opacity: 0.8; }
 	.reason-body { margin-top: 4px; padding: 6px 8px; border-left: 2px solid var(--vscode-panel-border); white-space: pre-wrap; font-family: var(--vscode-editor-font-family); opacity: 0.8; max-height: 240px; overflow: auto; }
 	#changes { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; margin: 0 8px 6px; padding: 7px 10px; border: 1px solid var(--mg-accent); border-radius: 10px; background: color-mix(in srgb, var(--mg-accent) 12%, transparent); font-size: 12px; }
@@ -1120,7 +1508,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	#stop { display: none; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
 	body.busy #stop { display: flex; }
 	body.busy #send { display: none; }
-	#row { display: flex; align-items: center; gap: 4px; padding: 0 2px; }
+	#row { display: flex; flex-direction: column; gap: 6px; padding: 0 2px; }
+	.row-line { display: flex; align-items: center; gap: 4px; }
 	.iconbtn { flex: 0 0 auto; width: 28px; height: 28px; padding: 0; display: flex; align-items: center; justify-content: center; background: transparent; color: var(--vscode-foreground); border: none; border-radius: 7px; cursor: pointer; opacity: 0.75; font-size: 14px; }
 	.iconbtn:hover { background: var(--vscode-toolbar-hoverBackground, rgba(127,127,127,0.18)); opacity: 1; }
 	.iconbtn.rec { color: var(--vscode-errorForeground); opacity: 1; animation: mgpulse 1s infinite; }
@@ -1131,7 +1520,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	#ctxpie { flex: 0 0 auto; display: flex; align-items: center; margin-left: 2px; }
 	#ctxpie svg { display: block; }
 	.spacer { flex: 1 1 auto; }
-	#model-dd { position: relative; flex: 0 1 auto; min-width: 0; max-width: 52%; }
+	#model-dd { position: relative; flex: 1 1 auto; min-width: 0; max-width: 100%; }
 	#model-btn { display: flex; align-items: center; gap: 4px; width: 100%; min-width: 0; background: transparent; color: var(--vscode-foreground); border: none; border-radius: 7px; padding: 4px 6px; font-size: 12px; opacity: 0.85; cursor: pointer; }
 	#model-btn:hover { background: var(--vscode-toolbar-hoverBackground, rgba(127,127,127,0.18)); opacity: 1; }
 	#model-cur { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1167,6 +1556,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		<button class="modebtn" id="mode-spec" title="Spec-driven">Spec</button>
 	</div>
 	<div id="log"></div>
+	<div id="working"><span class="dot"></span><span class="wt">MGCoding sta lavorando</span><span class="ws"></span></div>
 	<div id="changes" style="display:none">
 		<span id="changes-label"></span>
 		<span class="spacer"></span>
@@ -1183,22 +1573,85 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			</div>
 		</div>
 		<div id="row">
-			<button class="iconbtn" id="hash" title="Aggiungi contesto (file)">#</button>
-			<button class="iconbtn" id="attach" title="Allega immagine">📎</button>
-			<button class="iconbtn" id="mic" title="Detta a voce (STT)">🎤</button>
-			<button class="iconbtn" id="convo" title="Conversazione vocale a mani libere (parla e ascolta la risposta)">🎧</button>
-			<span id="ctxpie" title="Contesto utilizzato"></span>
-			<span class="spacer"></span>
-			<div id="model-dd">
-				<button id="model-btn" title="Modello / provider"><span id="model-cur">…</span><span class="caret">▾</span></button>
-				<div id="model-menu"></div>
+			<div class="row-line">
+				<button class="iconbtn" id="hash" title="Aggiungi contesto (file)">#</button>
+				<button class="iconbtn" id="attach" title="Allega immagine">📎</button>
+				<button class="iconbtn" id="mic" title="Detta a voce (STT)">🎤</button>
+				<button class="iconbtn" id="convo" title="Conversazione vocale a mani libere (parla e ascolta la risposta)">🎧</button>
+				<button class="iconbtn" id="profile" title="Profilo utente attivo (clic per cambiare/creare)">👤</button>
+				<span id="ctxpie" title="Contesto utilizzato"></span>
+				<span class="spacer"></span>
+				<button class="toggle" id="automodel" title="AutoModel: sceglie da solo il modello Ollama adatto alla richiesta"><span class="knob"></span><span>AutoModel</span></button>
+				<button class="toggle" id="auto" title="Autopilot: esegue senza conferme"><span class="knob"></span><span>Autopilot</span></button>
 			</div>
-			<button class="toggle" id="auto" title="Autopilot: esegue senza conferme"><span class="knob"></span><span>Autopilot</span></button>
+			<div class="row-line">
+				<div id="model-dd">
+					<button id="model-btn" title="Modello / provider"><span id="model-cur">…</span><span class="caret">▾</span></button>
+					<div id="model-menu"></div>
+				</div>
+			</div>
 		</div>
 	</div>
 <script nonce="${nonce}">
 	var vscode = acquireVsCodeApi();
 	var log = document.getElementById('log');
+	var workingSubEl = document.querySelector('#working .ws');
+	function workSub(t) { if (workingSubEl) { workingSubEl.textContent = t || ''; } }
+	var mgTurnStart = 0;
+	// Domanda dell'agente con opzioni cliccabili (tool ask_user, stile Kiro).
+	function renderAsk(question, options, multiSelect) {
+		var card = document.createElement('div');
+		card.className = 'ask-card';
+		var q = document.createElement('div');
+		q.className = 'ask-q';
+		q.textContent = question;
+		card.appendChild(q);
+		var opts = document.createElement('div');
+		opts.className = 'ask-opts';
+		card.appendChild(opts);
+		var picked = {};
+		function answer(text) {
+			card.classList.add('answered');
+			Array.prototype.forEach.call(opts.querySelectorAll('button'), function (b) { b.disabled = true; });
+			if (confirmBtn) { confirmBtn.disabled = true; }
+			var chosen = document.createElement('div');
+			chosen.className = 'ask-chosen';
+			chosen.textContent = '\\u2713 ' + text;
+			card.appendChild(chosen);
+			vscode.postMessage({ type: 'askAnswer', answer: text });
+		}
+		(options || []).forEach(function (opt) {
+			var b = document.createElement('button');
+			b.className = 'ask-opt';
+			b.textContent = opt;
+			b.addEventListener('click', function () {
+				if (multiSelect) {
+					picked[opt] = !picked[opt];
+					b.classList.toggle('sel', picked[opt]);
+				} else {
+					answer(opt);
+				}
+			});
+			opts.appendChild(b);
+		});
+		var confirmBtn = null;
+		if (multiSelect) {
+			confirmBtn = document.createElement('button');
+			confirmBtn.className = 'ask-confirm';
+			confirmBtn.textContent = 'Conferma';
+			confirmBtn.addEventListener('click', function () {
+				var sel = Object.keys(picked).filter(function (k) { return picked[k]; });
+				answer(sel.length ? sel.join(', ') : '(nessuna opzione scelta)');
+			});
+			card.appendChild(confirmBtn);
+		}
+		var free = document.createElement('div');
+		free.className = 'ask-free';
+		free.textContent = 'Oppure scrivi una risposta libera qui sotto e invia.';
+		card.appendChild(free);
+		log.appendChild(card);
+		log.scrollTop = log.scrollHeight;
+	}
 	var input = document.getElementById('input');
 	var sendBtn = document.getElementById('send');
 	var modelBtn = document.getElementById('model-btn');
@@ -1237,6 +1690,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		}
 	});
 	var autoBtn = document.getElementById('auto');
+	var autoModelBtn = document.getElementById('automodel');
+	autoModelBtn.addEventListener('click', function () { vscode.postMessage({ type: 'toggleAutoModel' }); });
+	var profileBtn = document.getElementById('profile');
+	profileBtn.addEventListener('click', function () { vscode.postMessage({ type: 'switchProfile' }); });
 	var ctxPie = document.getElementById('ctxpie');
 	var CTX_WINDOW = 128000;
 	function renderCtxPie(tokens) {
@@ -1332,6 +1789,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		b.addEventListener('click', function () { speak(getText()); });
 		msgEl.appendChild(b);
 	}
+	// Footer della risposta: tempo trascorso + pulsante copia (stile Kiro). Ritorna lo span tempo.
+	function addMsgFooter(msgEl, getText) {
+		var f = document.createElement('div'); f.className = 'msg-footer';
+		var t = document.createElement('span'); t.className = 'msg-elapsed';
+		var copy = document.createElement('button'); copy.className = 'msg-copy'; copy.title = 'Copia messaggio'; copy.textContent = '\\u29C9 Copia';
+		copy.addEventListener('click', function () {
+			var txt = getText();
+			if (navigator.clipboard) { navigator.clipboard.writeText(txt); }
+			var old = copy.textContent; copy.textContent = '\\u2713 Copiato'; setTimeout(function () { copy.textContent = old; }, 1200);
+		});
+		f.appendChild(t); f.appendChild(copy);
+		msgEl.appendChild(f);
+		return t;
+	}
+	function fmtElapsed(ms) { var s = ms / 1000; return s < 60 ? ('\\u23F1 ' + s.toFixed(1) + 's') : ('\\u23F1 ' + Math.floor(s / 60) + 'm ' + Math.round(s % 60) + 's'); }
 	function esc(t) { return t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 	function mdToHtml(src) {
 		var blocks = [];
@@ -1397,7 +1869,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		gf.appendChild(gfh); gf.appendChild(ul);
 		var setup = document.createElement('button'); setup.className = 'setup-link'; setup.textContent = '\\u2699 Configura un modello';
 		setup.addEventListener('click', function () { vscode.postMessage({ type: 'guidedSetup' }); });
-		w.appendChild(icon); w.appendChild(title); w.appendChild(sub); w.appendChild(cards); w.appendChild(gf); w.appendChild(setup);
+		var guide = document.createElement('button'); guide.className = 'setup-link'; guide.textContent = '\\uD83D\\uDCD6 Apri la guida';
+		guide.addEventListener('click', function () { vscode.postMessage({ type: 'openGuide' }); });
+		var tour = document.createElement('button'); tour.className = 'setup-link'; tour.textContent = '\\uD83D\\uDE80 Tour iniziale';
+		tour.addEventListener('click', function () { vscode.postMessage({ type: 'openWalkthrough' }); });
+		w.appendChild(icon); w.appendChild(title); w.appendChild(sub); w.appendChild(cards); w.appendChild(gf); w.appendChild(setup); w.appendChild(guide); w.appendChild(tour);
 		log.appendChild(w);
 	}
 	function ensureCleared() { var e = log.querySelector('.empty'); if (e) { log.innerHTML = ''; } }
@@ -1410,8 +1886,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		var ans = document.createElement('div'); ans.className = 'answer';
 		el.appendChild(reason); el.appendChild(ans);
 		addSpeakBtn(el, function () { return ans.textContent; });
+		var elapsed = addMsgFooter(el, function () { return ans.textContent; });
 		log.appendChild(el); log.scrollTop = log.scrollHeight;
-		return { el: el, reason: reason, rbody: rbody, ans: ans, raw: '' };
+		return { el: el, reason: reason, rbody: rbody, ans: ans, raw: '', elapsed: elapsed };
 	}
 	function renderAssistant(obj) {
 		var parts = splitThink(obj.raw);
@@ -1424,7 +1901,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	function addStatic(cls, text) {
 		ensureCleared();
 		var el = document.createElement('div'); el.className = 'msg ' + cls;
-		if (cls === 'assistant') { var a = document.createElement('div'); a.className = 'answer'; a.innerHTML = mdToHtml(text); el.appendChild(a); attachCodeTools(a); addSpeakBtn(el, function () { return a.textContent; }); }
+		if (cls === 'assistant') { var a = document.createElement('div'); a.className = 'answer'; a.innerHTML = mdToHtml(text); el.appendChild(a); attachCodeTools(a); addSpeakBtn(el, function () { return a.textContent; }); var elp = addMsgFooter(el, function () { return a.textContent; }); if (mgTurnStart) { elp.textContent = fmtElapsed(Date.now() - mgTurnStart); } }
 		else { el.textContent = text; }
 		log.appendChild(el); log.scrollTop = log.scrollHeight;
 		return el;
@@ -1560,6 +2037,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 				if (o.id === current) { modelCur.textContent = o.label; }
 			})(options[i]);
 		}
+		// In fondo: gestione modelli Ollama (scarica/cancella).
+		var sep2 = document.createElement('div'); sep2.className = 'menu-sep'; modelMenu.appendChild(sep2);
+		var mng = document.createElement('div'); mng.className = 'menu-toggle';
+		mng.innerHTML = '\\u2699\\uFE0F Gestione modelli Ollama\\u2026';
+		mng.title = 'Scarica nuovi modelli o cancella quelli inutili';
+		mng.addEventListener('click', function (e) { e.stopPropagation(); modelMenu.classList.remove('open'); vscode.postMessage({ type: 'manageModels' }); });
+		modelMenu.appendChild(mng);
 	}
 	sessionSel.addEventListener('change', function () { vscode.postMessage({ type: 'switchSession', id: sessionSel.value }); });
 	hashBtn.addEventListener('click', function () { vscode.postMessage({ type: 'pickContext' }); });
@@ -1672,7 +2156,30 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			var wcards = log.querySelectorAll('.welcome .card');
 			for (var wc = 0; wc < wcards.length; wc++) { wcards[wc].className = 'card' + (wcards[wc].getAttribute('data-mode') === currentMode ? ' active' : ''); }
 			autoBtn.className = 'toggle' + (m.state.autopilot ? ' on' : '');
+			if (autoModelBtn) { autoModelBtn.className = 'toggle' + (m.state.autoModel ? ' on' : ''); }
 			renderCtxPie(m.state.tokens || 0);
+			if (profileBtn) { profileBtn.title = m.state.profile ? ('Profilo attivo: ' + m.state.profile + ' (clic per cambiare)') : 'Profilo utente (clic per creare)'; }
+		}
+		else if (m.type === 'remembered') {
+			var note = document.createElement('div');
+			note.className = 'remember-note';
+			note.textContent = '\\uD83D\\uDCDD Memorizzato nel profilo: ' + m.fact;
+			log.appendChild(note);
+			log.scrollTop = log.scrollHeight;
+		}
+		else if (m.type === 'modelChosen') {
+			var mnote = document.createElement('div');
+			mnote.className = 'remember-note';
+			mnote.textContent = '\\u21BB Modello: ' + m.model;
+			log.appendChild(mnote);
+			log.scrollTop = log.scrollHeight;
+		}
+		else if (m.type === 'compacted') {
+			var cnote = document.createElement('div');
+			cnote.className = 'remember-note';
+			cnote.textContent = '\\uD83D\\uDDDC\\uFE0F Conversazione riassunta per restare leggera';
+			log.appendChild(cnote);
+			log.scrollTop = log.scrollHeight;
 		}
 		else if (m.type === 'insertRef') {
 			var p = input.selectionStart || input.value.length;
@@ -1691,15 +2198,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 				}
 			}
 		}
-		else if (m.type === 'streamStart') { current = makeAssistant(); }
+		else if (m.type === 'streamStart') { current = makeAssistant(); workSub('· sto scrivendo…'); }
 		else if (m.type === 'streamDelta') { if (current) { current.raw += m.text; renderAssistant(current); } }
-		else if (m.type === 'streamEnd') { var _et = current ? current.raw : ''; current = null; if (mgHandsFree && _et) { speakThenListen(_et); } }
+		else if (m.type === 'streamEnd') { if (current && current.elapsed && mgTurnStart) { current.elapsed.textContent = fmtElapsed(Date.now() - mgTurnStart); } var _et = current ? current.raw : ''; current = null; if (mgHandsFree && _et) { speakThenListen(_et); } }
 		else if (m.type === 'streamCancel') { if (current) { current.el.remove(); current = null; } }
 		else if (m.type === 'assistant') { addStatic('assistant', m.text); if (mgHandsFree && m.text) { speakThenListen(m.text); } }
-		else if (m.type === 'tool') { lastToolResult = addTool(m.name, m.args); }
+		else if (m.type === 'tool') { lastToolResult = addTool(m.name, m.args); workSub('· ' + m.name); }
 		else if (m.type === 'toolResult') { if (lastToolResult) { lastToolResult.textContent = m.text; log.scrollTop = log.scrollHeight; } }
 		else if (m.type === 'error') { addStatic('error', '⚠ ' + m.text); }
-		else if (m.type === 'busy') { document.body.classList.toggle('busy', m.value); }
+		else if (m.type === 'busy') { document.body.classList.toggle('busy', m.value); if (m.value) { mgTurnStart = Date.now(); } else { workSub(''); } }
 		else if (m.type === 'changes') { renderChanges(m.count || 0); }
 		else if (m.type === 'sttResult') {
 			if (m.text) { input.value = (input.value ? input.value + ' ' : '') + m.text; autoGrow(); input.focus(); if (m.autoSend) { send(); } }
@@ -1711,6 +2218,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			micBtn.classList.toggle('stt-busy', m.state === 'transcribing');
 		}
 		else if (m.type === 'plan') { renderPlan(m.steps); }
+		else if (m.type === 'ask') { renderAsk(m.question, m.options, m.multiSelect); }
 		else if (m.type === 'steeringChips') { renderSteeringChips(m.names); planCard = null; }
 		else if (m.type === 'specActions') { renderSpecActions(m.phase); }
 		else if (m.type === 'specModeChoose') { renderSpecModeChoose(); }

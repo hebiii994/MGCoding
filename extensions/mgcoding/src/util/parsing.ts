@@ -24,18 +24,8 @@ export interface InternalHook {
 /** Regex per il blocco tool nel protocollo testuale (mg-tool o json). */
 export const TOOL_RE = /```(?:mg-tool|json)?\s*([\s\S]*?)```/;
 
-/** Estrae una tool-call accettando {tool,args} (mg-tool) o {name,arguments} (function-call). */
-export function parseToolCall(text: string): ParsedToolCall | undefined {
-	let jsonStr: string | undefined;
-	const m = TOOL_RE.exec(text);
-	if (m) {
-		jsonStr = m[1].trim();
-	} else if (text.trim().startsWith('{') && text.trim().endsWith('}')) {
-		jsonStr = text.trim();
-	}
-	if (!jsonStr) {
-		return undefined;
-	}
+/** Prova a interpretare una stringa JSON come tool-call. */
+function tryParseToolJson(jsonStr: string): ParsedToolCall | undefined {
 	try {
 		const obj = JSON.parse(jsonStr);
 		const name = obj.tool ?? obj.name;
@@ -47,6 +37,65 @@ export function parseToolCall(text: string): ParsedToolCall | undefined {
 		// JSON malformato
 	}
 	return undefined;
+}
+
+/** Estrae una tool-call accettando {tool,args} (mg-tool) o {name,arguments} (function-call). */
+export function parseToolCall(text: string): ParsedToolCall | undefined {
+	const m = TOOL_RE.exec(text);
+	if (m) {
+		return tryParseToolJson(m[1].trim());
+	}
+	if (text.trim().startsWith('{') && text.trim().endsWith('}')) {
+		return tryParseToolJson(text.trim());
+	}
+	return undefined;
+}
+
+/** Estrae TUTTE le tool-call presenti nel testo (più blocchi), in ordine. */
+export function parseAllToolCalls(text: string): ParsedToolCall[] {
+	const out: ParsedToolCall[] = [];
+	const re = /```(?:mg-tool|json)?\s*([\s\S]*?)```/g;
+	let m: RegExpExecArray | null;
+	while ((m = re.exec(text)) !== null) {
+		const c = tryParseToolJson(m[1].trim());
+		if (c) {
+			out.push(c);
+		}
+	}
+	if (out.length === 0) {
+		const single = parseToolCall(text);
+		if (single) {
+			out.push(single);
+		}
+	}
+	return out;
+}
+
+/** Comandi (primo token) che è sicuro auto-eseguire se il modello li scrive come testo. */
+const SAFE_CMD = /^(npm|npx|yarn|pnpm|bun|node|deno|python3?|pip3?|git|vite|tsc|tsx|cargo|go|make|dotnet|mvn|gradle|\.\/gradlew|ng|next|nest|jest|vitest|eslint|prettier|php|composer|ruby|rails|bundle|dir|ls|cat|type)\b/i;
+
+/**
+ * Estrae comandi da terminale scritti come blocchi di codice (shell), così se il modello li
+ * "scrive" invece di chiamarli col tool possiamo eseguirli comunque. Solo comandi in whitelist.
+ */
+export function extractShellCommands(text: string): string[] {
+	const out: string[] = [];
+	const re = /```(bash|sh|shell|zsh|console|powershell|cmd|terminal)?\s*([\s\S]*?)```/gi;
+	let m: RegExpExecArray | null;
+	while ((m = re.exec(text)) !== null) {
+		const lang = (m[1] || '').toLowerCase();
+		// Salta i blocchi di codice sorgente (js/ts/json/html…): solo shell o senza lingua.
+		if (lang && !['bash', 'sh', 'shell', 'zsh', 'console', 'powershell', 'cmd', 'terminal'].includes(lang)) {
+			continue;
+		}
+		for (let line of m[2].split('\n')) {
+			line = line.trim().replace(/^[$#>]\s+/, ''); // togli prompt tipo "$ "
+			if (line && !line.startsWith('#') && SAFE_CMD.test(line)) {
+				out.push(line);
+			}
+		}
+	}
+	return out;
 }
 
 /** Combina una cartella base opzionale con un glob. */

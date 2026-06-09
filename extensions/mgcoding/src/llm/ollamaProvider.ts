@@ -10,6 +10,8 @@ export interface OllamaConfig {
 	endpoint: string;
 	model: string;
 	think?: boolean;
+	/** Temperatura bassa per i task agentici (riduce JSON spazzatura/allucinazioni). */
+	temperature?: number;
 }
 
 interface OllamaMessage {
@@ -57,6 +59,27 @@ export class OllamaProvider implements LLMProvider {
 	/** Cache delle capability per modello (per non interrogare /api/show ogni volta). */
 	private readonly toolCapCache = new Map<string, boolean>();
 
+	/**
+	 * Chiamata NON-stream con output VINCOLATO a uno JSON schema (grammar di llama.cpp via
+	 * Ollama format): il risultato è garantito conforme allo schema. Ritorna il testo (JSON).
+	 */
+	async chatStructured(system: string | undefined, messages: { role: string; content: string }[], schema: object, signal?: AbortSignal): Promise<string> {
+		const cfg = this.getConfig();
+		const endpoint = cfg.endpoint.replace(/\/$/, '');
+		const msgs = [...(system ? [{ role: 'system', content: system }] : []), ...messages];
+		const res = await fetch(`${endpoint}/api/chat`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ model: cfg.model, messages: msgs, format: schema, options: { temperature: cfg.temperature ?? 0.2 }, stream: false }),
+			signal
+		});
+		if (!res.ok) {
+			throw new LLMError(`Ollama ha risposto ${res.status}`);
+		}
+		const data = await res.json() as { message?: { content?: string } };
+		return data.message?.content ?? '';
+	}
+
 	/** True se il modello dichiara di supportare il tool-use nativo (da /api/show). */
 	async supportsTools(model: string): Promise<boolean> {
 		const cached = this.toolCapCache.get(model);
@@ -77,6 +100,34 @@ export class OllamaProvider implements LLMProvider {
 			const data = await res.json() as { capabilities?: string[] };
 			const ok = Array.isArray(data.capabilities) && data.capabilities.includes('tools');
 			this.toolCapCache.set(model, ok);
+			return ok;
+		} catch {
+			return false;
+		}
+	}
+
+	/** Cache delle capability vision per modello. */
+	private readonly visionCapCache = new Map<string, boolean>();
+
+	/** True se il modello dichiara di supportare input multimodali (immagini), da /api/show. */
+	async supportsVision(model: string): Promise<boolean> {
+		const cached = this.visionCapCache.get(model);
+		if (cached !== undefined) {
+			return cached;
+		}
+		const endpoint = this.getConfig().endpoint.replace(/\/$/, '');
+		try {
+			const res = await fetch(`${endpoint}/api/show`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ model, name: model })
+			});
+			if (!res.ok) {
+				return false;
+			}
+			const data = await res.json() as { capabilities?: string[] };
+			const ok = Array.isArray(data.capabilities) && data.capabilities.includes('vision');
+			this.visionCapCache.set(model, ok);
 			return ok;
 		} catch {
 			return false;
@@ -128,18 +179,20 @@ export class OllamaProvider implements LLMProvider {
 
 	async *stream(req: LLMRequest): AsyncIterable<string> {
 		const cfg = this.getConfig();
+		// Invia immagini solo se il modello supporta la vision, altrimenti Ollama risponde 400.
+		const allowImages = await this.supportsVision(cfg.model);
 		const messages = [
 			...(req.system ? [{ role: 'system', content: req.system }] : []),
 			...req.messages.map(m => {
 				const msg: { role: string; content: string; images?: string[] } = { role: m.role, content: m.content };
-				if (m.images?.length) {
+				if (allowImages && m.images?.length) {
 					msg.images = m.images.map(d => parseDataUrl(d)?.data).filter((x): x is string => !!x);
 				}
 				return msg;
 			})
 		];
 		let thinkOpen = false;
-		for await (const evt of this.postNdjson({ model: cfg.model, messages, ...(cfg.think ? { think: true } : {}) }, req.signal)) {
+		for await (const evt of this.postNdjson({ model: cfg.model, messages, options: { temperature: cfg.temperature ?? 0.2 }, ...(cfg.think ? { think: true } : {}) }, req.signal)) {
 			if (evt.error) {
 				throw new LLMError(`Ollama error: ${evt.error}`);
 			}
@@ -166,7 +219,7 @@ export class OllamaProvider implements LLMProvider {
 	}
 
 	/** Converte i messaggi in formato Anthropic nel formato /api/chat di Ollama. */
-	private toOllamaMessages(system: string | undefined, messages: AnthropicMessage[]): OllamaMessage[] {
+	private toOllamaMessages(system: string | undefined, messages: AnthropicMessage[], allowImages = true): OllamaMessage[] {
 		const out: OllamaMessage[] = [];
 		if (system) {
 			out.push({ role: 'system', content: system });
@@ -194,7 +247,7 @@ export class OllamaProvider implements LLMProvider {
 						.map(b => (b as { source?: { data?: string } }).source?.data)
 						.filter((x): x is string => !!x);
 					const msg: OllamaMessage = { role: 'user', content: text };
-					if (images.length) {
+					if (allowImages && images.length) {
 						msg.images = images;
 					}
 					out.push(msg);
@@ -207,14 +260,15 @@ export class OllamaProvider implements LLMProvider {
 	/** Streaming agentico con tool-use NATIVO di Ollama, emesso nel formato eventi Anthropic. */
 	async *streamAgent(params: AgentStreamParams): AsyncIterable<AnthropicStreamEvent> {
 		const cfg = this.getConfig();
-		const messages = this.toOllamaMessages(params.system, params.messages);
+		const allowImages = await this.supportsVision(cfg.model);
+		const messages = this.toOllamaMessages(params.system, params.messages, allowImages);
 		const tools = params.tools.map(t => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } }));
 
 		let textStarted = false;
 		let toolIndex = 0;
 		let sawTool = false;
 
-		for await (const evt of this.postNdjson({ model: cfg.model, messages, tools }, params.signal)) {
+		for await (const evt of this.postNdjson({ model: cfg.model, messages, tools, options: { temperature: cfg.temperature ?? 0.2 } }, params.signal)) {
 			if (evt.error) {
 				throw new LLMError(`Ollama error: ${evt.error}`);
 			}

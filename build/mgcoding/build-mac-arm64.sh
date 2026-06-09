@@ -15,7 +15,10 @@ set -euo pipefail
 # Verifica rapida:
 command -v node >/dev/null || { echo "ERRORE: Node.js non trovato. Installa Node 24.x."; exit 1; }
 command -v python3 >/dev/null || { echo "ERRORE: python3 non trovato. brew install python"; exit 1; }
+command -v cmake >/dev/null || { echo "ERRORE: cmake non trovato (serve per whisper STT). brew install cmake"; exit 1; }
+command -v git >/dev/null || { echo "ERRORE: git non trovato."; exit 1; }
 xcode-select -p >/dev/null 2>&1 || { echo "ERRORE: Xcode CLT mancanti. Esegui: xcode-select --install"; exit 1; }
+command -v sox >/dev/null || echo "AVVISO: 'sox' non trovato: la voce/STT non funzionerà finché non esegui 'brew install sox'."
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
@@ -26,6 +29,14 @@ echo "==> arch:  $(uname -m)  (atteso: arm64)"
 # --- Dipendenze -------------------------------------------------------------
 echo "==> Installazione dipendenze (npm ci)…"
 npm ci
+
+# --- Moduli nativi per l'ABI di Electron (sqlite3, node-pty, …) -------------
+echo "==> Ricompilo i moduli nativi per Electron…"
+node build/mgcoding/rebuild-natives.mjs || echo "AVVISO: rebuild-natives non riuscito; continuo."
+
+# --- Motore STT (whisper.cpp compilato + modello) in extensions/mgcoding/bin
+echo "==> Preparo il motore vocale (whisper.cpp)…"
+node build/mgcoding/fetch-stt.mjs || echo "AVVISO: fetch-stt non riuscito; la voce sarà disattivata."
 
 # --- Compilazione estensione mgcoding --------------------------------------
 echo "==> Compilo l'estensione mgcoding…"

@@ -44,8 +44,55 @@ async function download(url, dest) {
 	await pipeline(Readable.fromWeb(res.body), createWriteStream(dest));
 }
 
+/** Trova ricorsivamente il primo file con uno dei nomi dati. */
+function findFile(dir, names) {
+	for (const e of readdirSync(dir, { withFileTypes: true })) {
+		const p = join(dir, e.name);
+		if (e.isDirectory()) {
+			const found = findFile(p, names);
+			if (found) { return found; }
+		} else if (names.includes(e.name)) {
+			return p;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * macOS: whisper.cpp non pubblica binari prebuilt del server, quindi lo compiliamo da
+ * sorgente (static, così il binario è autonomo). Servono git e cmake (brew install cmake).
+ * Il recorder microfono su macOS usa SoX di sistema (brew install sox), non bundlato.
+ */
+function buildWhisperMac() {
+	const serverOut = join(binDir, 'whisper-server');
+	if (existsSync(serverOut)) { console.log('[fetch-stt] whisper-server (mac) già presente.'); return; }
+	const src = join(tmpdir(), 'mg-whisper-src');
+	const build = join(src, 'build');
+	rmSync(src, { recursive: true, force: true });
+	console.log('[fetch-stt] clono whisper.cpp…');
+	execFileSync('git', ['clone', '--depth', '1', '--branch', WHISPER_VERSION, 'https://github.com/ggml-org/whisper.cpp', src], { stdio: 'inherit' });
+	console.log('[fetch-stt] compilo whisper.cpp (cmake)… (qualche minuto)');
+	execFileSync('cmake', ['-S', src, '-B', build, '-DCMAKE_BUILD_TYPE=Release', '-DBUILD_SHARED_LIBS=OFF', '-DWHISPER_BUILD_TESTS=OFF'], { stdio: 'inherit' });
+	execFileSync('cmake', ['--build', build, '--config', 'Release', '-j'], { stdio: 'inherit' });
+	const bin = findFile(build, ['whisper-server', 'server']);
+	if (!bin) { throw new Error('whisper-server non trovato dopo la build.'); }
+	copyFileSync(bin, serverOut);
+	execFileSync('chmod', ['+x', serverOut]);
+	console.log('[fetch-stt] whisper-server (mac) compilato in bin/.');
+}
+
 async function main() {
 	mkdirSync(binDir, { recursive: true });
+
+	if (process.platform === 'darwin') {
+		// 1) Server whisper.cpp (compilato da sorgente).
+		buildWhisperMac();
+		// 2) Modello.
+		await download(MODEL_URL, join(binDir, MODEL_FILE));
+		// 3) Recorder: su macOS si usa SoX di Homebrew (brew install sox) — fallback nel codice.
+		console.log('[fetch-stt] completato (macOS). NB: per la voce serve "brew install sox".');
+		return;
+	}
 
 	// 1) Binario del server + DLL (estratto dallo zip della release con `tar`, che su
 	//    Windows 10+/macOS/Linux gestisce anche gli zip).

@@ -35,6 +35,8 @@ export interface ClaudeConfig {
 	/** Attiva l'extended thinking nel percorso agentico (tool-use) anche se "thinking" è off. */
 	thinkingAuto?: boolean;
 	thinkingBudget?: number;
+	/** Livello di "effort" per i modelli con adaptive thinking (low|medium|high|xhigh|max). */
+	effort?: string;
 }
 
 export class ClaudeProvider implements LLMProvider {
@@ -143,8 +145,16 @@ export class ClaudeProvider implements LLMProvider {
 		// Extended thinking nel percorso agentico: attivo se richiesto esplicitamente
 		// o in automatico (thinkingAuto), perché ragionare aiuta molto nei task con tool.
 		if (cfg.thinking || cfg.thinkingAuto) {
-			const budget = Math.min(cfg.thinkingBudget ?? 2048, Math.max(1024, maxTokens - 1024));
-			body.thinking = { type: 'enabled', budget_tokens: budget };
+			// I modelli recenti (Opus 4.6+/Sonnet 4.6, e OBBLIGATORIO su Opus 4.7/4.8) usano
+			// l'adaptive thinking + output_config.effort; il vecchio {type:'enabled',budget_tokens}
+			// dà 400 su Opus 4.7/4.8. I modelli più vecchi usano ancora enabled+budget.
+			if (/opus-4-(?:[6-9])|opus-4-1\d|sonnet-4-(?:[6-9])/.test(cfg.model)) {
+				body.thinking = { type: 'adaptive' };
+				body.output_config = { effort: cfg.effort ?? 'high' };
+			} else {
+				const budget = Math.min(cfg.thinkingBudget ?? 2048, Math.max(1024, maxTokens - 1024));
+				body.thinking = { type: 'enabled', budget_tokens: budget };
+			}
 		}
 		yield* this.postStream(body, params.signal);
 	}

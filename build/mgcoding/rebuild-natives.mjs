@@ -11,11 +11,36 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { execFileSync } from 'child_process';
-import { readFileSync, existsSync } from 'fs';
+import { readFileSync, existsSync, mkdirSync, copyFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+
+/**
+ * Su Windows, node-pty richiede a runtime i binari ConPTY di Microsoft
+ * (conpty.dll + OpenConsole.exe) in build/Release/conpty/. @electron/rebuild ricompila
+ * solo il .node e NON li ripristina: senza, il terminale fallisce con
+ * "Cannot find conpty.dll". Li copiamo dalle prebuilds incluse (estensione copilot).
+ */
+function restoreConpty() {
+	if (process.platform !== 'win32') {
+		return;
+	}
+	const arch = process.arch === 'arm64' ? 'win32-arm64' : 'win32-x64';
+	const src = join(root, 'extensions', 'copilot', 'node_modules', '@github', 'copilot', 'prebuilds', arch, 'conpty');
+	const dest = join(root, 'node_modules', 'node-pty', 'build', 'Release', 'conpty');
+	const files = ['conpty.dll', 'OpenConsole.exe'];
+	if (!files.every(f => existsSync(join(src, f)))) {
+		console.warn(`[mgcoding] ATTENZIONE: binari ConPTY non trovati in ${src}; il terminale potrebbe non avviarsi.`);
+		return;
+	}
+	mkdirSync(dest, { recursive: true });
+	for (const f of files) {
+		copyFileSync(join(src, f), join(dest, f));
+	}
+	console.log('[mgcoding] Binari ConPTY ripristinati per node-pty (terminale).');
+}
 
 // Versione target di Electron presa da .npmrc (target=...).
 function electronTarget() {
@@ -39,5 +64,7 @@ execFileSync(
 	['--yes', '@electron/rebuild@latest', '-v', target, '-f', '--only', MODULES.join(','), '--arch', process.arch],
 	{ cwd: root, stdio: 'inherit' }
 );
+
+restoreConpty();
 
 console.log('[mgcoding] Moduli nativi ricompilati. Ora puoi buildare l\'installer.');
