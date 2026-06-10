@@ -184,9 +184,14 @@ export class HookManager implements vscode.Disposable {
 		this.output = vscode.window.createOutputChannel('MGCoding Hooks');
 		this.disposables.push(this.output);
 
-		this.disposables.push(vscode.workspace.onDidSaveTextDocument(doc => this.fire('onSave', doc.uri)));
-		this.disposables.push(vscode.workspace.onDidCreateFiles(e => e.files.forEach(u => this.fire('onCreate', u))));
-		this.disposables.push(vscode.workspace.onDidDeleteFiles(e => e.files.forEach(u => this.fire('onDelete', u))));
+		// FileSystemWatcher invece degli eventi editor: cattura TUTTE le modifiche, comprese
+		// le scritture dell'AGENTE (via fs API), che NON passano da onDidSaveTextDocument —
+		// prima gli hook non scattavano mai sui file toccati dall'agente.
+		const fsWatcher = vscode.workspace.createFileSystemWatcher('**/*');
+		fsWatcher.onDidChange(u => this.fireFile('onSave', u));
+		fsWatcher.onDidCreate(u => this.fireFile('onCreate', u));
+		fsWatcher.onDidDelete(u => this.fireFile('onDelete', u));
+		this.disposables.push(fsWatcher);
 
 		const watcher = vscode.workspace.createFileSystemWatcher('**/{.mg/hooks/*.json,.kiro/hooks/*}');
 		const reload = () => { void this.reload(); this.onChanged(); };
@@ -210,11 +215,63 @@ export class HookManager implements vscode.Disposable {
 		return globToRegExp(hook.filePattern).test(rel);
 	}
 
-	private async fire(event: HookEvent, uri: vscode.Uri): Promise<void> {
+	/** Cartelle/artefatti da ignorare per gli eventi file (rumore + anti-loop). */
+	private static readonly IGNORED_PATH_RE = /(^|[\\/])(node_modules|\.git|out|out-build|dist|\.build|\.vscode|\.vscode-test|Library|Temp|Logs|obj|bin|\.mg|\.kiro)([\\/]|$)/;
+
+	/** Debounce per hook: raccoglie i file per ~1.5s e poi esegue UNA volta sola (batch). */
+	private readonly pendingFires = new Map<string, { timer: ReturnType<typeof setTimeout>; uris: Map<string, vscode.Uri> }>();
+	/** Hook attualmente in esecuzione (evita sovrapposizioni dello stesso hook). */
+	private readonly runningHooks = new Set<string>();
+	/** Anti-loop: durante (e poco dopo) un hook "ask" gli eventi file vengono ignorati. */
+	private suppressFileEventsUntil = 0;
+	private inHookRun = false;
+
+	private fireFile(event: HookEvent, uri: vscode.Uri): void {
+		if (this.inHookRun || Date.now() < this.suppressFileEventsUntil) {
+			return; // modifiche prodotte da un hook in corso: non scatenare altri hook
+		}
+		const rel = vscode.workspace.asRelativePath(uri, false);
+		if (HookManager.IGNORED_PATH_RE.test(rel)) {
+			return;
+		}
 		for (const hook of this.hooks) {
 			if (hook.enabled !== false && hook.event === event && this.matches(hook, uri)) {
-				await this.execute(hook, uri);
+				this.enqueue(hook, uri);
 			}
+		}
+	}
+
+	private enqueue(hook: Hook, uri: vscode.Uri): void {
+		let entry = this.pendingFires.get(hook.name);
+		if (entry) {
+			clearTimeout(entry.timer);
+		} else {
+			entry = { timer: setTimeout(() => undefined, 0), uris: new Map() };
+			this.pendingFires.set(hook.name, entry);
+		}
+		entry.uris.set(uri.toString(), uri);
+		entry.timer = setTimeout(() => {
+			this.pendingFires.delete(hook.name);
+			void this.executeBatch(hook, [...entry!.uris.values()]);
+		}, 1500);
+	}
+
+	private async executeBatch(hook: Hook, uris: vscode.Uri[]): Promise<void> {
+		if (!uris.length || this.runningHooks.has(hook.name)) {
+			return;
+		}
+		this.runningHooks.add(hook.name);
+		try {
+			if (hook.action === 'command' && hook.command && hook.command.includes('${file}')) {
+				// ${file} nel comando → un'esecuzione per file (max 5).
+				for (const u of uris.slice(0, 5)) {
+					await this.execute(hook, u);
+				}
+				return;
+			}
+			await this.execute(hook, uris[0], uris);
+		} finally {
+			this.runningHooks.delete(hook.name);
 		}
 	}
 
@@ -226,7 +283,7 @@ export class HookManager implements vscode.Disposable {
 		}
 		for (const hook of this.hooks) {
 			if (hook.enabled !== false && hook.event === event) {
-				await this.execute(hook, root);
+				await this.executeBatch(hook, [root]);
 			}
 		}
 	}
@@ -235,13 +292,13 @@ export class HookManager implements vscode.Disposable {
 		const uri = vscode.window.activeTextEditor?.document.uri
 			?? vscode.workspace.workspaceFolders?.[0].uri;
 		if (uri) {
-			await this.execute(hook, uri);
+			await this.executeBatch(hook, [uri]);
 		}
 	}
 
-	private async execute(hook: Hook, uri: vscode.Uri): Promise<void> {
-		const rel = vscode.workspace.asRelativePath(uri, false);
-		this.output.appendLine(`\n▶ Hook "${hook.name}" (${hook.event}) su ${rel}`);
+	private async execute(hook: Hook, uri: vscode.Uri, all?: vscode.Uri[]): Promise<void> {
+		const rels = (all ?? [uri]).map(u => vscode.workspace.asRelativePath(u, false));
+		this.output.appendLine(`\n▶ Hook "${hook.name}" (${hook.event}) su ${rels.join(', ')}`);
 		this.output.show(true);
 
 		if (hook.action === 'command' && hook.command) {
@@ -252,7 +309,8 @@ export class HookManager implements vscode.Disposable {
 		}
 
 		if (hook.action === 'ask' && hook.prompt) {
-			const userPrompt = `Sei attivato da un Agent Hook ("${hook.name}") sull'evento ${hook.event}, file coinvolto: ${rel}.
+			const fileInfo = rels.length > 1 ? `file coinvolti: ${rels.join(', ')}` : `file coinvolto: ${rels[0]}`;
+			const userPrompt = `Sei attivato da un Agent Hook ("${hook.name}") sull'evento ${hook.event}, ${fileInfo}.
 
 Azione richiesta:
 ${hook.prompt}
@@ -261,27 +319,35 @@ Usa i tool (read_file/write_file/apply_patch/run_command/…) per eseguire davve
 
 			const reporter = this.getReporter?.();
 			const signal = this.newSignal?.();
-			if (reporter) {
-				// Esecuzione agentica con tool, mostrata nella chat.
-				reporter.start(`Hook: ${hook.name}`, [hook.prompt]);
-				try {
-					await runAgent(this.registry, [{ role: 'user', content: userPrompt }], {
-						onAssistantText: t => reporter.log(`🤖 ${t.slice(0, 300)}`),
-						onToolStart: c => reporter.log(`🔧 ${c.tool} ${JSON.stringify(c.args).slice(0, 160)}`),
-						onToolResult: r => reporter.log(`↳ ${r.slice(0, 200)}`)
-					}, signal);
-				} catch (err) {
-					reporter.log(`[errore] ${String(err)}`);
+			// Anti-loop: le scritture fatte DA questo hook non devono scatenare altri hook.
+			this.inHookRun = true;
+			try {
+				if (reporter) {
+					// Esecuzione agentica con tool, mostrata nella chat.
+					reporter.start(`Hook: ${hook.name}`, [hook.prompt]);
+					try {
+						await runAgent(this.registry, [{ role: 'user', content: userPrompt }], {
+							onAssistantText: t => reporter.log(`🤖 ${t.slice(0, 300)}`),
+							onToolStart: c => reporter.log(`🔧 ${c.tool} ${JSON.stringify(c.args).slice(0, 160)}`),
+							onToolResult: r => reporter.log(`↳ ${r.slice(0, 200)}`)
+						}, signal);
+					} catch (err) {
+						reporter.log(`[errore] ${String(err)}`);
+					}
+					reporter.finish(`=== Hook "${hook.name}" terminato ===`);
+				} else {
+					// Fallback: completamento semplice nel pannello Output.
+					try {
+						const reply = await complete(this.registry, [{ role: 'user', content: userPrompt }]);
+						this.output.appendLine(reply);
+					} catch (err) {
+						this.output.appendLine(`[errore] ${String(err)}`);
+					}
 				}
-				reporter.finish(`=== Hook "${hook.name}" terminato ===`);
-			} else {
-				// Fallback: completamento semplice nel pannello Output.
-				try {
-					const reply = await complete(this.registry, [{ role: 'user', content: userPrompt }]);
-					this.output.appendLine(reply);
-				} catch (err) {
-					this.output.appendLine(`[errore] ${String(err)}`);
-				}
+			} finally {
+				this.inHookRun = false;
+				// Il watcher consegna gli eventi con un po' di ritardo: finestra di grazia.
+				this.suppressFileEventsUntil = Date.now() + 3000;
 			}
 		}
 	}
