@@ -33,7 +33,20 @@ export type AnthropicBlock =
 	| { type: 'thinking'; thinking: string; signature?: string }
 	| { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
 	| { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
-	| { type: 'tool_result'; tool_use_id: string; content: string };
+	| { type: 'tool_result'; tool_use_id: string; content: string | ToolResultPart[] };
+
+/** Parte di un tool_result composito (testo + immagini, es. screenshot da tool MCP). */
+export type ToolResultPart =
+	| { type: 'text'; text: string }
+	| { type: 'image'; source: { type: 'base64'; media_type: string; data: string } };
+
+/** Estrae il solo testo dal content di un tool_result (stringa o array di parti). */
+export function toolResultText(content: string | ToolResultPart[]): string {
+	if (typeof content === 'string') {
+		return content;
+	}
+	return content.filter(p => p.type === 'text').map(p => (p as { text: string }).text).join('\n');
+}
 
 /** Spezza un data URL (data:image/png;base64,XXXX) in media_type e dati base64. */
 export function parseDataUrl(dataUrl: string): { mediaType: string; data: string } | undefined {

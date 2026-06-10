@@ -4,7 +4,7 @@
  *  tradotto da/verso il formato Anthropic per condividere lo stesso loop agentico.
  *--------------------------------------------------------------------------------------------*/
 
-import { AgentStreamParams, AnthropicMessage, AnthropicStreamEvent, LLMError, LLMProvider, LLMRequest, parseDataUrl } from './types';
+import { AgentStreamParams, AnthropicMessage, AnthropicStreamEvent, LLMError, LLMProvider, LLMRequest, parseDataUrl, ToolResultPart, toolResultText } from './types';
 
 export interface OllamaConfig {
 	endpoint: string;
@@ -234,10 +234,10 @@ export class OllamaProvider implements LLMProvider {
 				}
 				out.push(msg);
 			} else {
-				const toolResults = m.content.filter(b => b.type === 'tool_result') as { content: string }[];
+				const toolResults = m.content.filter(b => b.type === 'tool_result') as { content: string | ToolResultPart[] }[];
 				if (toolResults.length) {
 					for (const tr of toolResults) {
-						out.push({ role: 'tool', content: tr.content });
+						out.push({ role: 'tool', content: toolResultText(tr.content) });
 					}
 				} else {
 					const text = m.content.filter(b => b.type === 'text').map(b => (b as { text: string }).text).join('');
