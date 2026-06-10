@@ -135,6 +135,11 @@ export function activate(context: vscode.ExtensionContext): void {
 	// Hooks runtime
 	const hookManager = new HookManager(registry, () => hooksTree.refresh(), () => chat.runReporter(), () => chat.beginRun());
 	context.subscriptions.push(hookManager);
+	// Hook globali della chat: alla submit del prompt e a fine turno agente (fire-and-forget).
+	chat.hookEvents = {
+		promptSubmit: () => void hookManager.fireGlobal('onPromptSubmit'),
+		agentDone: () => void hookManager.fireGlobal('onAgentDone')
+	};
 
 	// Bridge Telegram (controllo da smartphone). Si avvia solo se è stato salvato un token.
 	const TELEGRAM_SECRET = 'mgcoding.telegram.token';

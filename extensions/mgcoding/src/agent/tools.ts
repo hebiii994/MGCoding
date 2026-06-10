@@ -68,6 +68,12 @@ export const TOOL_SPECS: ToolSpec[] = [
 		inputSchema: { type: 'object', properties: { id: { type: 'number', description: 'Id del processo (restituito da run_command); default: ultimo avviato' }, tailChars: { type: 'number', description: 'Quanti caratteri finali leggere (default 6000)' } } }
 	},
 	{
+		name: 'fetch_url',
+		description: 'Scarica una URL via HTTP GET (tipicamente il dev server locale, es. http://localhost:5173/) e restituisce status e corpo (testo/HTML troncato). Usalo per VERIFICARE TU che l\'app risponda davvero (non chiederlo all\'utente) e per diagnosticare pagine bianche: controlla che l\'HTML serva il <div> di mount e lo <script> dell\'entry giusto.',
+		args: '{"url": "http://localhost:5173/"}',
+		inputSchema: { type: 'object', properties: { url: { type: 'string' }, maxChars: { type: 'number', description: 'Max caratteri del corpo (default 4000)' } }, required: ['url'] }
+	},
+	{
 		name: 'apply_patch',
 		description: 'Modifica mirata di un file: sostituisce old_string (che deve esistere ed essere univoco) con new_string. Preferiscilo a write_file per file grandi.',
 		args: '{"path": "src/x.ts", "old_string": "...", "new_string": "..."}',
@@ -381,6 +387,13 @@ export async function executeTool(call: ToolCall): Promise<string> {
 				// un terminale dedicato E catturato in un buffer, così l'agente vede gli errori
 				// reali (Vite, webpack, ecc.) e può rileggerli con get_command_output.
 				if (call.args.background === true || LONG_RUNNING_RE.test(command)) {
+					// Se lo STESSO comando è già in esecuzione, non avviarne un duplicato (porte
+					// che scalano, processi zombie): ritorna l'output aggiornato di quello attivo.
+					for (const existing of [...managedProcs.values()].reverse()) {
+						if (existing.running && existing.command === command) {
+							return `GIÀ IN ESECUZIONE (id ${existing.id}): "${command}" — NON l'ho riavviato, non serve. I dev server moderni (Vite, webpack, next) hanno l'hot reload: le modifiche ai file si applicano da sole senza riavvio.\n[output recente REALE]\n${existing.buffer.slice(-4000).trim() || '(nessun output)'}`;
+						}
+					}
 					const mp = startManagedProcess(command);
 					await waitInitialOutput(mp);
 					const out = mp.buffer.trim().slice(-4000);
@@ -398,6 +411,26 @@ export async function executeTool(call: ToolCall): Promise<string> {
 					return `[stdout]\n${stdout}\n${stderr ? `[stderr]\n${stderr}` : ''}`.trim();
 				} catch (err: any) {
 					return `[errore comando] ${err?.message ?? String(err)}\n${err?.stdout ?? ''}\n${err?.stderr ?? ''}`.trim();
+				}
+			}
+			case 'fetch_url': {
+				const url = String(call.args.url ?? '').trim();
+				if (!/^https?:\/\//i.test(url)) {
+					return 'Errore: fetch_url richiede una URL http(s) completa (es. http://localhost:5173/).';
+				}
+				const maxChars = Math.min(Number(call.args.maxChars ?? 4000) || 4000, 20000);
+				try {
+					const ctrl = new AbortController();
+					const timer = setTimeout(() => ctrl.abort(), 10000);
+					const res = await fetch(url, { signal: ctrl.signal, redirect: 'follow' });
+					clearTimeout(timer);
+					const ctype = res.headers.get('content-type') ?? '';
+					const body = (!ctype || /text|json|javascript|xml|html|css/i.test(ctype))
+						? (await res.text()).slice(0, maxChars)
+						: `(contenuto binario: ${ctype})`;
+					return `HTTP ${res.status} ${res.statusText} — ${url}\ncontent-type: ${ctype}\n\n${body}`;
+				} catch (err) {
+					return `Errore fetch ${url}: ${err instanceof Error ? err.message : String(err)} (il server è in esecuzione? La porta è giusta? Controlla con get_command_output).`;
 				}
 			}
 			case 'get_command_output': {

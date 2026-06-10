@@ -11,7 +11,7 @@ import { RunReporter } from '../run/runView';
 import { resolveFeatureDirs } from '../util/paths';
 import { kiroHookToInternal } from '../util/parsing';
 
-type HookEvent = 'onSave' | 'onCreate' | 'onDelete' | 'manual';
+type HookEvent = 'onSave' | 'onCreate' | 'onDelete' | 'onPromptSubmit' | 'onAgentDone' | 'manual';
 type HookAction = 'ask' | 'command';
 
 export interface Hook {
@@ -123,6 +123,8 @@ export async function createSampleHook(): Promise<void> {
 			{ label: 'Al salvataggio file', value: 'onSave' as HookEvent },
 			{ label: 'Alla creazione file', value: 'onCreate' as HookEvent },
 			{ label: 'All\'eliminazione file', value: 'onDelete' as HookEvent },
+			{ label: 'Quando invii un messaggio in chat', value: 'onPromptSubmit' as HookEvent },
+			{ label: 'Quando l\'agente finisce un turno', value: 'onAgentDone' as HookEvent },
 			{ label: 'Manuale (bottone ▶)', value: 'manual' as HookEvent }
 		],
 		{ placeHolder: 'Quando si attiva?' }
@@ -212,6 +214,19 @@ export class HookManager implements vscode.Disposable {
 		for (const hook of this.hooks) {
 			if (hook.enabled !== false && hook.event === event && this.matches(hook, uri)) {
 				await this.execute(hook, uri);
+			}
+		}
+	}
+
+	/** Scatena gli hook "globali" senza file specifico (onPromptSubmit, onAgentDone). */
+	async fireGlobal(event: HookEvent): Promise<void> {
+		const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+		if (!root) {
+			return;
+		}
+		for (const hook of this.hooks) {
+			if (hook.enabled !== false && hook.event === event) {
+				await this.execute(hook, root);
 			}
 		}
 	}

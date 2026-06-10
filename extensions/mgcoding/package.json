@@ -3,7 +3,7 @@
 	"publisher": "mgcoding",
 	"displayName": "MGCoding",
 	"description": "Agente di sviluppo spec-driven (Specs, Steering, Hooks, MCP) con LLM locale o Claude.",
-	"version": "0.8.1",
+	"version": "0.8.2",
 	"license": "MIT",
 	"engines": {
 		"vscode": "^1.5.0"
