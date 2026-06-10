@@ -14,7 +14,7 @@ import { anthropicBuiltinTools, errorsForPaths, executeTool, ToolCall, TOOL_SPEC
 const MAX_ITERATIONS = 30;
 
 /** Tool senza effetti collaterali: eseguibili in parallelo nello stesso turno. */
-const READ_ONLY_TOOLS = new Set(['read_file', 'list_dir', 'find_files', 'search_text', 'search_code', 'get_diagnostics', 'get_command_output']);
+const READ_ONLY_TOOLS = new Set(['read_file', 'list_dir', 'find_files', 'search_text', 'search_code', 'get_diagnostics', 'get_command_output', 'fetch_url']);
 
 /** Tool che modificano file (per la verifica automatica). */
 const WRITE_TOOLS = new Set(['write_file', 'apply_patch']);
@@ -540,7 +540,8 @@ async function runNativeAgent(
 	systemExtra?: string,
 	depth = 0
 ): Promise<void> {
-	const system = await buildSystemPrompt(systemExtra);
+	const lastUserMsg = [...history].reverse().find(m => m.role === 'user');
+	const system = await buildSystemPrompt(systemExtra, lastUserMsg?.content);
 	// Un subagent (depth>0) non espone il tool delegate, per evitare ricorsione.
 	const tools = [...anthropicBuiltinTools().filter(t => depth === 0 || t.name !== 'delegate'), ...(getMcpManager()?.anthropicTools() ?? [])];
 	const streaming = typeof cb.onStreamDelta === 'function';

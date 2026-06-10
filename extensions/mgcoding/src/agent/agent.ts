@@ -14,6 +14,7 @@ Lavori sul PROGETTO aperto nel workspace dell'utente. Ogni richiesta riguarda qu
 
 ## Cosa puoi gestire (sei consapevole di queste capacità)
 - **Spec** in \`.mg/specs/<feature>/\`: requirements.md (user story + criteri EARS) → design.md (architettura) → tasks.md (checklist "- [ ]"). Adatte a funzionalità non banali. Puoi crearle/aggiornarle con write_file.
+- **Bug**: per un bug NON proporre la spec completa (sproporzionata). Se il bug merita tracciamento, crea una spec leggera con il solo \`bugfix.md\` (sezioni: Comportamento attuale, Comportamento atteso, Cosa NON toccare) e poi correggi; per bug semplici correggi e basta.
 - **Steering** in \`.mg/steering/*.md\`: regole/linee guida sempre attive del progetto (convenzioni, stack, do/don't). Se l'utente chiede "crea uno steering con X", crea un file Markdown in \`.mg/steering/\` con un titolo e regole chiare e puntate.
 - **Agent Hooks** in \`.mg/hooks/*.json\`: automazioni su eventi (onSave/onCreate/onDelete) o manuali. Puoi crearne su richiesta.
 - **Esecuzione task** delle spec e **MCP** (tool esterni) quando disponibili.
@@ -40,6 +41,13 @@ Lavori sul PROGETTO aperto nel workspace dell'utente. Ogni richiesta riguarda qu
 Hai a disposizione molte iterazioni: non fermarti a metà, porta il task a termine prima di rispondere "fatto".
 
 **Efficienza (importante)**: vai dritto al punto. NON scrivere preamboli, ringraziamenti o frasi di cortesia tra un tool e l'altro ("Grazie", "Vediamo se…", "Procedo a…"): emetti subito il tool successivo. Per DIAGNOSTICARE un problema, raccogli prima le PROVE con i tool (leggi i file rilevanti, controlla la configurazione, lancia il comando) in sequenza e SENZA commentare ogni passo, POI concludi con la causa e la correzione. Non chiedere all'utente informazioni che puoi ottenere da solo con i tool (es. "incollami l'output", "che file hai"): leggi/eseguì tu. Esempio: se un dev server dà 404, NON spiegare le possibili cause — leggi index.html, elenca src/, leggi vite.config, individua l'entry corretto e correggi.
+
+**Chiusura asciutta (importante)**: la risposta finale dice COSA hai fatto/trovato e si ferma lì. VIETATE le sezioni-template di cortesia: niente "Verifica dell'App", "Risoluzione dei Problemi", "Spero che questo ti aiuti", "Fammi sapere se…". NON chiedere all'utente di aprire il browser per verificare: verifica TU con fetch_url e riporta il risultato reale.
+
+## Dev server e verifica web
+- Un dev server avviato con run_command RESTA ATTIVO e ha l'**hot reload** (Vite/webpack/next): dopo una modifica ai file NON riavviarlo e NON rilanciare lo stesso comando — le modifiche si applicano da sole. Per controllare come sta usa get_command_output.
+- Dopo l'avvio VERIFICA tu che risponda: fetch_url sull'URL mostrato nell'output (es. http://localhost:5173/).
+- **Pagina bianca**? Procedura: 1) fetch_url sull'URL → l'HTML servito contiene il div di mount (es. \`<div id="root">\`) e lo \`<script>\` che punta all'entry GIUSTO? 2) l'entry (es. src/main.tsx) esiste e fa davvero il render (createRoot/render) sul div giusto? 3) get_command_output per errori del server; get_diagnostics sui file coinvolti. La causa è quasi sempre una di queste — trovala con le prove, non riavviare il server.
 
 **Chiedi quando serve**: se una decisione è ambigua e cambierebbe ciò che fai (linguaggio/framework, nome, struttura cartelle, quale file modificare, scelte di design), usa il tool **ask_user** con 2-4 opzioni chiare invece di assumere in silenzio. Non abusarne: chiedi solo quando l'ambiguità è reale e impatta il risultato.
 
@@ -147,9 +155,14 @@ function environmentInfo(): string {
 	return `## Ambiente\n- Sistema operativo: ${process.platform}\n- Shell di run_command: ${shell}\n- Cartella di lavoro: ${cwd}\n- I comandi devono essere NON interattivi (usa flag tipo --yes/--y; non lanciare wizard che restano in attesa di input).${winRules}`;
 }
 
-export async function buildSystemPrompt(extra?: string): Promise<string> {
-	const [project, steering, active] = await Promise.all([buildProjectContext(), buildSteeringContext(), buildActiveContext()]);
+export async function buildSystemPrompt(extra?: string, requestHint?: string): Promise<string> {
+	const [project, steering, active] = await Promise.all([buildProjectContext(), buildSteeringContext(requestHint), buildActiveContext()]);
 	return [BASE_SYSTEM, environmentInfo(), project, steering, active, extra].filter(Boolean).join('\n\n');
+}
+
+/** Ultimo messaggio utente: usato come "richiesta corrente" per lo steering auto. */
+function lastUserText(messages: ChatMessage[]): string | undefined {
+	return [...messages].reverse().find(m => m.role === 'user')?.content;
 }
 
 /** Streaming: invoca onDelta per ogni frammento di testo. */
@@ -162,7 +175,7 @@ export async function streamChat(
 	providerOverride?: LLMProvider
 ): Promise<string> {
 	const provider = providerOverride ?? registry.current();
-	const system = await buildSystemPrompt(systemExtra);
+	const system = await buildSystemPrompt(systemExtra, lastUserText(messages));
 	let full = '';
 	for await (const delta of provider.stream({ system, messages, signal })) {
 		full += delta;
@@ -206,7 +219,7 @@ export async function complete(
 	pureSystem?: boolean
 ): Promise<string> {
 	const provider = providerOverride ?? registry.current();
-	const system = pureSystem ? (systemExtra ?? '') : await buildSystemPrompt(systemExtra);
+	const system = pureSystem ? (systemExtra ?? '') : await buildSystemPrompt(systemExtra, lastUserText(messages));
 	let full = '';
 	for await (const delta of provider.stream({ system, messages, signal })) {
 		full += delta;

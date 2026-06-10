@@ -85,6 +85,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	private sessions: Session[] = [];
 	private activeId = '';
 	private abort?: AbortController;
+	/** Notifiche per gli Agent Hooks globali (onPromptSubmit / onAgentDone), impostate dall'host. */
+	hookEvents?: { promptSubmit(text: string): void; agentDone(): void };
 	/** Testo in attesa di scelta (offerta sessione Spec / prioritizzazione). */
 	private pendingSpecText = '';
 	/** Spec estratte da un messaggio multi-spec, in attesa di scelta. */
@@ -913,6 +915,7 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 		}
 		session.messages.push(userMsg);
 		this.mirror?.('user', text || '(immagine)');
+		this.hookEvents?.promptSubmit(text);
 		this.post({ type: 'busy', value: true });
 		// Comprime lo storico se troppo lungo (token/costo/latenza) prima di interrogare l'LLM.
 		await this.compactIfNeeded(session);
@@ -946,6 +949,7 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 			await this.maybeConsolidateProfile(session);
 			await this.save();
 			await this.sendState();
+			this.hookEvents?.agentDone();
 		}
 	}
 

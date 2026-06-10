@@ -6,12 +6,14 @@
 import * as vscode from 'vscode';
 import { resolveFeatureDirs } from '../util/paths';
 
-type Inclusion = 'always' | 'fileMatch' | 'manual';
+type Inclusion = 'always' | 'fileMatch' | 'manual' | 'auto';
 
 interface SteeringFile {
 	name: string;
 	inclusion: Inclusion;
 	fileMatchPattern: string[];
+	/** Per inclusion "auto": descrizione confrontata con la richiesta dell'utente. */
+	description: string;
 	body: string;
 }
 
@@ -59,7 +61,7 @@ async function readSteeringDir(dir: vscode.Uri): Promise<SteeringFile[]> {
 				.split(',')
 				.map(s => s.trim())
 				.filter(Boolean);
-			result.push({ name: fileName.replace(/\.md$/, ''), inclusion, fileMatchPattern, body });
+			result.push({ name: fileName.replace(/\.md$/, ''), inclusion, fileMatchPattern, description: meta.description ?? '', body });
 		} catch {
 			// ignora file illeggibili
 		}
@@ -90,11 +92,25 @@ export async function listSteeringNames(): Promise<string[]> {
 	return [...seen];
 }
 
+/** True se la descrizione di uno steering "auto" combacia con la richiesta dell'utente. */
+function matchesRequest(description: string, request: string): boolean {
+	if (!description || !request) {
+		return false;
+	}
+	const req = request.toLowerCase();
+	const words = description.toLowerCase().split(/[^a-zàèéìíòóùú0-9]+/).filter(w => w.length > 3);
+	if (!words.length) {
+		return false;
+	}
+	const hits = words.filter(w => req.includes(w)).length;
+	return hits >= Math.min(2, words.length);
+}
+
 /**
- * Costruisce la sezione "steering" del system prompt in base alla modalità di inclusione
- * e al file attivo.
+ * Costruisce la sezione "steering" del system prompt in base alla modalità di inclusione,
+ * al file attivo e (per inclusion "auto") alla richiesta corrente dell'utente.
  */
-export async function buildSteeringContext(): Promise<string> {
+export async function buildSteeringContext(requestHint?: string): Promise<string> {
 	const dirs = await resolveFeatureDirs('steering');
 	if (dirs.length === 0) {
 		return '';
@@ -121,6 +137,9 @@ export async function buildSteeringContext(): Promise<string> {
 		}
 		if (f.inclusion === 'fileMatch' && activePath) {
 			return f.fileMatchPattern.some(p => globToRegExp(p).test(activePath));
+		}
+		if (f.inclusion === 'auto') {
+			return matchesRequest(f.description, requestHint ?? '');
 		}
 		return false; // manual: incluso solo su richiesta esplicita
 	});
