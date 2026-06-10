@@ -3,7 +3,7 @@
 	"publisher": "mgcoding",
 	"displayName": "MGCoding",
 	"description": "Agente di sviluppo spec-driven (Specs, Steering, Hooks, MCP) con LLM locale o Claude.",
-	"version": "0.8.3",
+	"version": "0.8.4",
 	"license": "MIT",
 	"engines": {
 		"vscode": "^1.5.0"
@@ -698,6 +698,11 @@
 					"type": "boolean",
 					"default": true,
 					"description": "Dopo che l'agente modifica dei file, controlla automaticamente gli errori dei language server sui file toccati e glieli fa correggere (fino a 2 giri) prima di concludere."
+				},
+				"mgcoding.mcp.maxTools": {
+					"type": "number",
+					"default": 12,
+					"description": "Numero massimo di tool MCP esposti al modello per ogni richiesta: vengono scelti automaticamente i più pertinenti (troppi tool confondono i modelli, soprattutto quelli locali). Gli altri restano comunque richiamabili se il modello li nomina."
 				},
 				"mgcoding.ollama.temperature": {
 					"type": "number",
