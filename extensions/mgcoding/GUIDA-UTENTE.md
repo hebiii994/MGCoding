@@ -78,7 +78,9 @@ L'agente segue il metodo **esplora → pianifica → agisci → verifica**. Stru
 | `find_files` / `search_text` | cerca file e testo (per parola esatta) |
 | `search_code` | **ricerca semantica** nel workspace (vedi sezione 5) |
 | `get_diagnostics` | errori/warning dei language server |
-| `run_command` | esegue comandi (chiede conferma se non in Autopilot) |
+| `run_command` | esegue comandi (chiede conferma se non in Autopilot); i dev server (es. `npm run dev`) partono in background con **output catturato** |
+| `get_command_output` | rilegge l'output reale di un dev server/processo avviato (es. gli errori di Vite) |
+| `fetch_url` | fa GET sull'app locale per **verificare da solo** che risponda e diagnosticare le pagine bianche |
 | `update_plan` | mostra/aggiorna un piano a step in chat |
 | `ask_user` | ti fa una **domanda con opzioni cliccabili** quando una scelta è ambigua |
 | `remember` | salva una tua preferenza duratura (vedi sezione 6) |
@@ -88,6 +90,13 @@ Caratteristiche automatiche:
 
 - **Auto-verifica**: dopo che modifica dei file, controlla gli errori dei language server e
   si **auto-corregge** (fino a 2 giri) prima di concludere. Disattiva con `mgcoding.autoVerify`.
+- **Dev server sotto controllo**: l'agente vede l'output reale dei server che avvia, non li
+  riavvia inutilmente (sa che l'hot reload applica le modifiche da solo) e verifica con
+  `fetch_url` che l'app risponda davvero.
+- **Tool calling rigoroso (locali)**: con `mgcoding.ollama.structuredTools` l'output del
+  modello è vincolato a uno schema (nomi tool inclusi): niente comandi scritti come testo.
+- **Progetti Unity**: rilevati in automatico — l'agente conosce le regole (mai toccare i
+  `.meta`, scena via tool MCP, leggere la console Unity dopo le modifiche agli script).
 - **Nudge**: se annuncia un'azione ma non la esegue, viene sollecitato a farla davvero.
 - **Planner + subagent**: per task complessi fa da orchestratore e delega i pezzi indipendenti.
 - **Diff e approvazione**: le scritture mostrano un diff; approvi tu (a meno di Autopilot).
@@ -110,11 +119,35 @@ sia `.mg/` sia `.kiro/` (compatibilità).
   - A fine lavoro viene generato un **report** (cosa è stato fatto + come avviarlo).
   - Clic destro su una Spec: *Reveal in Explorer*, *Rinomina*, *Elimina*.
 - **Steering** (`.mg/steering/`): regole/linee guida persistenti iniettate nel contesto. A
-  inizio turno vedi i "chip" degli steering inclusi.
-- **Hooks** (`.mg/hooks/`): automazioni su eventi (onSave/onCreate/onDelete/manual). Compatibili
-  con i `.kiro.hook`.
-- **MCP**: server MCP (stdio) con i loro tool/resource/prompt; aggiungi/abilita dai relativi
-  comandi e dal pannello.
+  inizio turno vedi i "chip" degli steering inclusi. Modalità di inclusione (front-matter
+  `inclusion:`): `always` (default), `fileMatch` (+`fileMatchPattern`), `manual`, e **`auto`**
+  (+`description`: incluso quando la richiesta in chat combacia con la descrizione).
+- **Hooks** (`.mg/hooks/`): automazioni su eventi — `onSave`/`onCreate`/`onDelete`,
+  **`onPromptSubmit`** (quando invii un messaggio), **`onAgentDone`** (a fine turno agente,
+  es. "lancia i test"), o manuali. Compatibili con i `.kiro.hook`.
+- **Bug**: per i bug l'agente propone una spec leggera con il solo `bugfix.md`
+  (comportamento attuale / atteso / cosa non toccare) invece del trio completo.
+- **MCP**: server MCP con i loro tool/resource/prompt; aggiungi dal pannello (wizard guidato).
+  In `mcp.json` ogni server supporta: `command`+`args` (stdio) **oppure `url`** (HTTP),
+  **`env`** (variabili d'ambiente), **`timeout`** (secondi per chiamata, default 60 — utile
+  con Unity), `disabled`. Robustezza: **riconnessione automatica** se il server cade, stderr
+  nel canale Output *MGCoding MCP*, e **immagini** dei tool (es. screenshot della scena
+  Unity) passate ai modelli vision. Se i tool sono tanti, all'agente vengono esposti i più
+  pertinenti alla richiesta (`mgcoding.mcp.maxTools`, default 12).
+
+  Esempio per Unity:
+  ```json
+  {
+    "mcpServers": {
+      "unity": {
+        "command": "node",
+        "args": ["percorso/mcp-unity/build/index.js"],
+        "env": { "UNITY_PORT": "8090" },
+        "timeout": 180
+      }
+    }
+  }
+  ```
 
 ---
 
@@ -247,9 +280,11 @@ il `.dmg` (macOS). Controllo manuale: comando **`MGCoding: Controlla aggiornamen
 
 Tutte sotto `mgcoding.*` (apri *Impostazioni* e cerca "mgcoding"):
 
-- **Provider**: `provider`, `claude.model`, `ollama.endpoint`, `ollama.model`,
-  `ollama.nativeTools`, `openai.endpoint`, `openai.model`, `claude.thinkingAuto`.
-- **Agente**: `autoApprove` (Autopilot), `diffApproval`, `autoVerify`, `tasks.parallel`.
+- **Provider**: `provider`, `claude.model`, `claude.effort`, `ollama.endpoint`, `ollama.model`,
+  `ollama.nativeTools`, `ollama.structuredTools`, `ollama.temperature`, `ollama.autoModel`,
+  `openai.endpoint`, `openai.model`, `claude.thinkingAuto`.
+- **Agente**: `autoApprove` (Autopilot), `diffApproval`, `autoVerify`, `tasks.parallel`,
+  `mcp.maxTools`.
 - **Contesto**: `context.autoCompact`, `context.compactAtTokens`, `context.keepMessages`.
 - **Indice (RAG)**: `index.embedModel`, `index.maxFileKB`, `index.autoUpdate`.
 - **Voce**: `stt.inputDevice`, `stt.language`, `stt.thresholdPct`, `stt.maxSeconds`,
