@@ -155,9 +155,36 @@ function environmentInfo(): string {
 	return `## Ambiente\n- Sistema operativo: ${process.platform}\n- Shell di run_command: ${shell}\n- Cartella di lavoro: ${cwd}\n- I comandi devono essere NON interattivi (usa flag tipo --yes/--y; non lanciare wizard che restano in attesa di input).${winRules}`;
 }
 
+/** Cache del rilevamento tipo-progetto (evita stat ad ogni prompt). */
+let cachedFlavor: { value: string; at: number } | undefined;
+
+/** Rileva il tipo di progetto (es. Unity) e inietta regole specifiche nel prompt. */
+async function projectFlavorInfo(): Promise<string> {
+	if (cachedFlavor && Date.now() - cachedFlavor.at < 60000) {
+		return cachedFlavor.value;
+	}
+	const folders = vscode.workspace.workspaceFolders;
+	let value = '';
+	if (folders?.length) {
+		try {
+			await vscode.workspace.fs.stat(vscode.Uri.joinPath(folders[0].uri, 'ProjectSettings', 'ProjectVersion.txt'));
+			value = `## Progetto Unity (rilevato automaticamente)
+- Codice C# in Assets/: convenzioni Unity (PascalCase per classi e metodi pubblici, un MonoBehaviour per file con lo stesso nome del file).
+- NON toccare MAI: i file .meta (li gestisce Unity), Library/, Temp/, obj/, Logs/, ProjectSettings/ (salvo richiesta esplicita).
+- Dopo aver modificato script C#, Unity ricompila da solo (domain reload): se sono disponibili i tool MCP di Unity, LEGGI LA CONSOLE (errori di compilazione/runtime) e correggi gli errori PRIMA di concludere. Le operazioni MCP durante il reload possono richiedere tempo: riprova invece di arrenderti.
+- Per operazioni sull'Editor (scene, GameObject, componenti, asset, material) usa i tool MCP di Unity, NON comandi shell o modifiche manuali ai file di scena (.unity sono YAML fragili).
+- Se un tool restituisce uno screenshot, osservalo davvero per verificare il risultato visivo.`;
+		} catch {
+			// non è un progetto Unity
+		}
+	}
+	cachedFlavor = { value, at: Date.now() };
+	return value;
+}
+
 export async function buildSystemPrompt(extra?: string, requestHint?: string): Promise<string> {
-	const [project, steering, active] = await Promise.all([buildProjectContext(), buildSteeringContext(requestHint), buildActiveContext()]);
-	return [BASE_SYSTEM, environmentInfo(), project, steering, active, extra].filter(Boolean).join('\n\n');
+	const [project, steering, active, flavor] = await Promise.all([buildProjectContext(), buildSteeringContext(requestHint), buildActiveContext(), projectFlavorInfo()]);
+	return [BASE_SYSTEM, environmentInfo(), flavor, project, steering, active, extra].filter(Boolean).join('\n\n');
 }
 
 /** Ultimo messaggio utente: usato come "richiesta corrente" per lo steering auto. */

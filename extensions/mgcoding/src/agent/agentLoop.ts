@@ -9,7 +9,7 @@ import { getMcpManager } from '../mcp/mcpClient';
 import { beginCheckpoint } from '../edit/checkpoint';
 import { parseToolCall, parseAllToolCalls, extractShellCommands, TOOL_RE } from '../util/parsing';
 import { buildSystemPrompt, complete, streamChat } from './agent';
-import { anthropicBuiltinTools, errorsForPaths, executeTool, ToolCall, TOOL_SPECS } from './tools';
+import { anthropicBuiltinTools, errorsForPaths, executeTool, ToolCall, ToolSpec, TOOL_SPECS } from './tools';
 
 const MAX_ITERATIONS = 30;
 
@@ -46,8 +46,42 @@ async function autoVerify(changed: Set<string>): Promise<string> {
 	return `[Verifica automatica] Dopo le tue modifiche i language server segnalano questi ERRORI da correggere:\n${errs}\n\nCorreggi questi errori (leggi i file se serve) e poi concludi.`;
 }
 
-function toolSystemPrompt(): string {
-	const specs = [...TOOL_SPECS, ...(getMcpManager()?.toolSpecs() ?? [])];
+/**
+ * Seleziona i tool MCP più PERTINENTI alla richiesta corrente quando sono troppi:
+ * decine di tool confondono i modelli (soprattutto quelli locali) e gonfiano il contesto.
+ * I tool non esposti restano comunque richiamabili (hasTool li risolve lo stesso).
+ */
+function filteredMcpSpecs(hint?: string): ToolSpec[] {
+	const all = getMcpManager()?.toolSpecs() ?? [];
+	const max = Math.max(4, vscode.workspace.getConfiguration('mgcoding').get<number>('mcp.maxTools', 12));
+	if (all.length <= max) {
+		return all;
+	}
+	const req = (hint ?? '').toLowerCase();
+	const words = req.split(/[^a-zàèéìíòóùú0-9_]+/).filter(w => w.length > 3);
+	const score = (s: ToolSpec): number => {
+		const text = `${s.name} ${s.description}`.toLowerCase();
+		let n = 0;
+		for (const w of words) {
+			if (text.includes(w)) {
+				n++;
+			}
+		}
+		// Se l'utente nomina il server (es. "unity"), tutti i suoi tool salgono di priorità.
+		const server = s.name.split('__')[0].toLowerCase();
+		if (server && req.includes(server)) {
+			n += 3;
+		}
+		return n;
+	};
+	const scored = all.map(s => ({ s, n: score(s) }));
+	const hits = scored.filter(x => x.n > 0).sort((a, b) => b.n - a.n).map(x => x.s);
+	const rest = scored.filter(x => x.n === 0).map(x => x.s);
+	return [...hits, ...rest].slice(0, max);
+}
+
+function toolSystemPrompt(hint?: string): string {
+	const specs = [...TOOL_SPECS, ...filteredMcpSpecs(hint)];
 	const list = specs.map(t => `- ${t.name}: ${t.description} args: ${t.args}`).join('\n');
 	return `Puoi AGIRE sul progetto SOLO tramite i tool: per eseguire un'azione (leggere/scrivere file, lanciare comandi) DEVI emettere un blocco tool, non descriverla.
 Quando usi un tool, rispondi ESCLUSIVAMENTE con UN blocco così e nient'altro (un solo tool per messaggio), poi FERMATI e ASPETTA:
@@ -344,7 +378,8 @@ async function runJsonAgent(
 	systemExtra?: string,
 	depth = 0
 ): Promise<void> {
-	const sys = systemExtra ? `${toolSystemPrompt()}\n\n${systemExtra}` : toolSystemPrompt();
+	const reqHint = [...messages].reverse().find(m => m.role === 'user')?.content;
+	const sys = systemExtra ? `${toolSystemPrompt(reqHint)}\n\n${systemExtra}` : toolSystemPrompt(reqHint);
 	const streaming = typeof cb.onStreamDelta === 'function';
 	const callCounts = new Map<string, number>();
 	let sawAnyTool = false;
@@ -558,7 +593,11 @@ async function runNativeAgent(
 	const lastUserMsg = [...history].reverse().find(m => m.role === 'user');
 	const system = await buildSystemPrompt(systemExtra, lastUserMsg?.content);
 	// Un subagent (depth>0) non espone il tool delegate, per evitare ricorsione.
-	const tools = [...anthropicBuiltinTools().filter(t => depth === 0 || t.name !== 'delegate'), ...(getMcpManager()?.anthropicTools() ?? [])];
+	// I tool MCP sono filtrati per pertinenza alla richiesta (vedi filteredMcpSpecs).
+	const tools = [
+		...anthropicBuiltinTools().filter(t => depth === 0 || t.name !== 'delegate'),
+		...filteredMcpSpecs(lastUserMsg?.content).map(s => ({ name: s.name, description: s.description, input_schema: s.inputSchema }))
+	];
 	const streaming = typeof cb.onStreamDelta === 'function';
 	const callCounts = new Map<string, number>();
 	let sawAnyTool = false;
