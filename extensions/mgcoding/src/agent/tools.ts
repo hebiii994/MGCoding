@@ -2,7 +2,7 @@
  *  MGCoding - tool dell'agente (filesystem + comandi shell)
  *--------------------------------------------------------------------------------------------*/
 
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
 import * as vscode from 'vscode';
 import { getMcpManager } from '../mcp/mcpClient';
@@ -57,9 +57,15 @@ export const TOOL_SPECS: ToolSpec[] = [
 	},
 	{
 		name: 'run_command',
-		description: 'Esegue un comando shell nella radice del workspace (può richiedere conferma). I comandi che non terminano (dev server, watch: es. "npm run dev") vengono avviati nel TERMINALE INTEGRATO e considerati avviati subito — non attenderne l\'output. Per forzare il terminale su un comando, passa "background": true.',
+		description: 'Esegue un comando shell nella radice del workspace (può richiedere conferma). I comandi che non terminano (dev server, watch: es. "npm run dev") vengono avviati in BACKGROUND con output catturato: ricevi subito l\'output iniziale reale (lì compaiono gli errori di avvio) e puoi rileggere il resto in qualsiasi momento con get_command_output. Per forzare il background passa "background": true.',
 		args: '{"command": "npm run dev", "background": true}',
-		inputSchema: { type: 'object', properties: { command: { type: 'string' }, background: { type: 'boolean', description: 'true = avvia nel terminale integrato senza attendere (per processi che restano attivi)' } }, required: ['command'] }
+		inputSchema: { type: 'object', properties: { command: { type: 'string' }, background: { type: 'boolean', description: 'true = avvia in background senza attendere la fine (per processi che restano attivi)' } }, required: ['command'] }
+	},
+	{
+		name: 'get_command_output',
+		description: 'Legge l\'output ACCUMULATO REALE di un processo avviato in background con run_command (dev server, watch): usalo per verificare che sia partito davvero o per leggere gli errori (es. errori di compilazione/import di Vite) quando qualcosa non funziona. Senza id legge l\'ultimo processo avviato.',
+		args: '{"id": 1}',
+		inputSchema: { type: 'object', properties: { id: { type: 'number', description: 'Id del processo (restituito da run_command); default: ultimo avviato' }, tailChars: { type: 'number', description: 'Quanti caratteri finali leggere (default 6000)' } } }
 	},
 	{
 		name: 'apply_patch',
@@ -171,16 +177,123 @@ export async function errorsForPaths(relPaths: string[]): Promise<string> {
 	return lines.slice(0, 80).join('\n');
 }
 
+/**
+ * Trova old_string nel contenuto in modo TOLLERANTE: prova il match esatto, poi senza i
+ * numeri di riga di read_file ("N\t") che i modelli copiano per sbaglio, poi confrontando
+ * le righe trimmate (whitespace/indentazione diversi). Ritorna il frammento reale trovato.
+ */
+function flexibleMatch(content: string, oldStr: string): { actual: string; count: number } | undefined {
+	let count = content.split(oldStr).length - 1;
+	if (count > 0) {
+		return { actual: oldStr, count };
+	}
+	const stripped = oldStr.split('\n').map(l => l.replace(/^\s*\d+\t/, '')).join('\n');
+	if (stripped !== oldStr && stripped) {
+		count = content.split(stripped).length - 1;
+		if (count > 0) {
+			return { actual: stripped, count };
+		}
+	}
+	const target = (stripped || oldStr).split('\n').map(l => l.trim());
+	if (!target.some(l => l)) {
+		return undefined;
+	}
+	const lines = content.split('\n');
+	const starts: number[] = [];
+	for (let i = 0; i + target.length <= lines.length; i++) {
+		let ok = true;
+		for (let j = 0; j < target.length; j++) {
+			if (lines[i + j].trim() !== target[j]) {
+				ok = false;
+				break;
+			}
+		}
+		if (ok) {
+			starts.push(i);
+		}
+	}
+	if (starts.length > 0) {
+		return { actual: lines.slice(starts[0], starts[0] + target.length).join('\n'), count: starts.length };
+	}
+	return undefined;
+}
+
 /** Comandi che NON terminano (dev server, watcher): vanno nel terminale integrato. */
 const LONG_RUNNING_RE = /\b(npm|yarn|pnpm|bun)\s+(run\s+)?(dev|start|serve|watch|preview)\b|\bvite\b|\bnext\s+(dev|start)\b|\bnodemon\b|--watch\b|\bwatch\b|http-server\b|http\.server\b|\bserve\b|\buvicorn\b|\bflask\s+run\b|\bng\s+serve\b|\brails\s+server\b|bootRun/i;
 
-/** Terminale integrato riutilizzabile per i comandi long-running avviati dall'agente. */
-let mgTerminal: vscode.Terminal | undefined;
-function getMgTerminal(): vscode.Terminal {
-	if (!mgTerminal || !vscode.window.terminals.includes(mgTerminal)) {
-		mgTerminal = vscode.window.createTerminal({ name: 'MGCoding', cwd: workspaceRoot().fsPath });
+/**
+ * Processo long-running GESTITO da MGCoding: l'output è catturato in un buffer (leggibile
+ * dall'agente con get_command_output) e mostrato dal vivo in un terminale dedicato.
+ * Così l'agente VEDE gli errori reali (es. errori di import di Vite) invece di andare alla cieca.
+ */
+interface ManagedProcess {
+	id: number;
+	command: string;
+	buffer: string;
+	running: boolean;
+	exitCode: number | null;
+	kill(): void;
+}
+
+const managedProcs = new Map<number, ManagedProcess>();
+let lastProcId = 0;
+const PROC_BUFFER_MAX = 200000;
+
+function startManagedProcess(command: string): ManagedProcess {
+	const id = ++lastProcId;
+	const writeEmitter = new vscode.EventEmitter<string>();
+	const child = spawn(command, {
+		cwd: workspaceRoot().fsPath,
+		shell: true,
+		env: { ...process.env, CI: '1', npm_config_yes: 'true', npm_config_audit: 'false', npm_config_fund: 'false', ADBLOCK: '1', FORCE_COLOR: '0' }
+	});
+	const mp: ManagedProcess = {
+		id, command, buffer: '', running: true, exitCode: null,
+		kill: () => { try { child.kill(); } catch { /* già terminato */ } }
+	};
+	const append = (chunk: Buffer) => {
+		const text = chunk.toString();
+		mp.buffer = (mp.buffer + text).slice(-PROC_BUFFER_MAX);
+		writeEmitter.fire(text.replace(/(?<!\r)\n/g, '\r\n'));
+	};
+	child.stdout?.on('data', append);
+	child.stderr?.on('data', append);
+	child.on('close', code => {
+		mp.running = false;
+		mp.exitCode = code;
+		writeEmitter.fire(`\r\n[processo terminato con codice ${code}]\r\n`);
+	});
+	child.on('error', err => {
+		mp.running = false;
+		mp.buffer += `\n[errore avvio] ${err.message}`;
+	});
+	const pty: vscode.Pseudoterminal = {
+		onDidWrite: writeEmitter.event,
+		open: () => { /* il processo è già partito */ },
+		close: () => mp.kill()
+	};
+	vscode.window.createTerminal({ name: `MGCoding · ${command.slice(0, 40)}`, pty }).show(true);
+	managedProcs.set(id, mp);
+	return mp;
+}
+
+/** Attende l'output iniziale del processo: max maxMs, o prima se l'output si assesta. */
+async function waitInitialOutput(mp: ManagedProcess, maxMs = 8000, quietMs = 1500): Promise<void> {
+	const start = Date.now();
+	let lastLen = mp.buffer.length;
+	let lastChange = Date.now();
+	while (Date.now() - start < maxMs) {
+		await new Promise(r => setTimeout(r, 250));
+		if (!mp.running) {
+			return;
+		}
+		if (mp.buffer.length !== lastLen) {
+			lastLen = mp.buffer.length;
+			lastChange = Date.now();
+		} else if (mp.buffer.length > 0 && Date.now() - lastChange >= quietMs) {
+			return;
+		}
 	}
-	return mgTerminal;
 }
 
 export async function executeTool(call: ToolCall): Promise<string> {
@@ -264,13 +377,15 @@ export async function executeTool(call: ToolCall): Promise<string> {
 						return 'Comando annullato dall\'utente.';
 					}
 				}
-				// Comandi long-running (dev server, watch) → terminale integrato: output live e
-				// fermabili dall'utente, senza bloccare l'agente in attesa (mai un vero output).
+				// Comandi long-running (dev server, watch) → processo gestito: output dal vivo in
+				// un terminale dedicato E catturato in un buffer, così l'agente vede gli errori
+				// reali (Vite, webpack, ecc.) e può rileggerli con get_command_output.
 				if (call.args.background === true || LONG_RUNNING_RE.test(command)) {
-					const term = getMgTerminal();
-					term.show(true);
-					term.sendText(command, true);
-					return `Comando avviato nel TERMINALE INTEGRATO "MGCoding" (resta in esecuzione, output dal vivo nel pannello Terminale): ${command}\nConsideralo avviato: NON attendere qui il suo output. Se è un dev server, l'app è ora raggiungibile all'URL che mostra nel terminale.`;
+					const mp = startManagedProcess(command);
+					await waitInitialOutput(mp);
+					const out = mp.buffer.trim().slice(-4000);
+					const status = mp.running ? `IN ESECUZIONE (id ${mp.id})` : `TERMINATO subito con codice ${mp.exitCode}`;
+					return `Processo "${command}" avviato — stato: ${status}.\n[output iniziale REALE]\n${out || '(ancora nessun output)'}\n\nL'output prosegue nel terminale dedicato; per rileggerlo più avanti usa il tool get_command_output (id ${mp.id}). Se l'output qui sopra mostra ERRORI, correggili ORA prima di concludere. Non inventare output diverso da questo.`;
 				}
 				try {
 					const { stdout, stderr } = await execAsync(command, {
@@ -284,6 +399,16 @@ export async function executeTool(call: ToolCall): Promise<string> {
 				} catch (err: any) {
 					return `[errore comando] ${err?.message ?? String(err)}\n${err?.stdout ?? ''}\n${err?.stderr ?? ''}`.trim();
 				}
+			}
+			case 'get_command_output': {
+				const id = call.args.id !== undefined ? Number(call.args.id) : lastProcId;
+				const mp = managedProcs.get(id);
+				if (!mp) {
+					return lastProcId === 0 ? 'Nessun processo in background avviato in questa sessione.' : `Errore: nessun processo con id ${id}.`;
+				}
+				const tail = Math.min(Number(call.args.tailChars ?? 6000) || 6000, 20000);
+				const status = mp.running ? 'IN ESECUZIONE' : `TERMINATO (codice ${mp.exitCode})`;
+				return `Processo ${mp.id} "${mp.command}" — ${status}\n[output recente REALE]\n${mp.buffer.slice(-tail).trim() || '(nessun output)'}`;
 			}
 			case 'apply_patch': {
 				const rel = String(call.args.path);
@@ -302,15 +427,16 @@ export async function executeTool(call: ToolCall): Promise<string> {
 				} catch {
 					return `Errore: impossibile leggere ${rel}.`;
 				}
-				const occurrences = content.split(oldStr).length - 1;
-				if (occurrences === 0) {
-					return `Errore: old_string non trovato in ${rel}.`;
+				const match = flexibleMatch(content, oldStr);
+				if (!match) {
+					return `Errore: old_string non trovato in ${rel} (nemmeno ignorando numeri di riga e differenze di spazi). Rileggi il file e riprova con un frammento copiato ESATTAMENTE.`;
 				}
+				const { actual, count: occurrences } = match;
 				const replaceAll = call.args.replaceAll === true;
 				if (occurrences > 1 && !replaceAll) {
-					return `Errore: old_string presente ${occurrences} volte in ${rel}; rendilo univoco o usa replaceAll:true.`;
+					return `Errore: old_string presente ${occurrences} volte in ${rel}; rendilo univoco (aggiungi righe di contesto) o usa replaceAll:true.`;
 				}
-				const updated = replaceAll ? content.split(oldStr).join(newStr) : content.replace(oldStr, newStr);
+				const updated = replaceAll ? content.split(actual).join(newStr) : content.replace(actual, newStr);
 				if (remoteMode && !remoteAutoApprove) {
 					return `Modifica a ${rel} NON applicata: da remoto serve la conferma. Attiva "mgcoding.telegram.autoApprove" per consentire le modifiche a distanza.`;
 				}
