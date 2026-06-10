@@ -12,6 +12,10 @@ const DEC = new TextDecoder();
 interface McpServerConfig {
 	command?: string;
 	args?: string[];
+	env?: Record<string, string>;
+	url?: string;
+	/** Timeout per chiamata tool in secondi (default 60). */
+	timeout?: number;
 	disabled?: boolean;
 }
 
@@ -58,7 +62,7 @@ async function writeConfig(uri: vscode.Uri, cfg: McpJson): Promise<void> {
 	await vscode.workspace.fs.writeFile(uri, ENC.encode(JSON.stringify(cfg, null, 2)));
 }
 
-/** Aggiunge un server MCP in modo guidato (nome, comando, argomenti). */
+/** Aggiunge un server MCP in modo guidato (stdio o HTTP, con env e timeout opzionali). */
 export async function addMcpServer(): Promise<boolean> {
 	const target = mcpConfigUri();
 	if (!target) {
@@ -66,32 +70,90 @@ export async function addMcpServer(): Promise<boolean> {
 		return false;
 	}
 	const name = (await vscode.window.showInputBox({
-		title: 'Nuovo server MCP (1/3)',
+		title: 'Nuovo server MCP (1/4)',
 		prompt: 'Nome del server',
-		placeHolder: 'es. filesystem',
+		placeHolder: 'es. unity, filesystem',
 		validateInput: v => v.trim() ? undefined : 'Inserisci un nome'
 	}))?.trim();
 	if (!name) {
 		return false;
 	}
-	const command = (await vscode.window.showInputBox({
-		title: 'Nuovo server MCP (2/3)',
-		prompt: 'Comando da eseguire',
-		placeHolder: 'es. npx',
-		validateInput: v => v.trim() ? undefined : 'Inserisci un comando'
-	}))?.trim();
-	if (!command) {
+	const transport = await vscode.window.showQuickPick(
+		[
+			{ label: 'Comando (stdio)', description: 'Avvia un processo locale (npx, node, python…)', value: 'stdio' as const },
+			{ label: 'URL (HTTP)', description: 'Si collega a un server MCP già in esecuzione via HTTP', value: 'http' as const }
+		],
+		{ title: 'Nuovo server MCP (2/4)', placeHolder: 'Come si raggiunge il server?' }
+	);
+	if (!transport) {
 		return false;
 	}
-	const argsRaw = await vscode.window.showInputBox({
-		title: 'Nuovo server MCP (3/3)',
-		prompt: 'Argomenti separati da spazio (opzionale)',
-		placeHolder: '-y @modelcontextprotocol/server-filesystem .'
+
+	let entry: McpServerConfig;
+	if (transport.value === 'http') {
+		const url = (await vscode.window.showInputBox({
+			title: 'Nuovo server MCP (3/4)',
+			prompt: 'URL dell\'endpoint MCP',
+			placeHolder: 'es. http://localhost:3000/mcp',
+			validateInput: v => /^https?:\/\//.test(v.trim()) ? undefined : 'Inserisci una URL http(s)'
+		}))?.trim();
+		if (!url) {
+			return false;
+		}
+		entry = { url, disabled: false };
+	} else {
+		const command = (await vscode.window.showInputBox({
+			title: 'Nuovo server MCP (3/4)',
+			prompt: 'Comando da eseguire',
+			placeHolder: 'es. npx',
+			validateInput: v => v.trim() ? undefined : 'Inserisci un comando'
+		}))?.trim();
+		if (!command) {
+			return false;
+		}
+		const argsRaw = await vscode.window.showInputBox({
+			title: 'Nuovo server MCP (3/4)',
+			prompt: 'Argomenti separati da spazio (opzionale)',
+			placeHolder: '-y @modelcontextprotocol/server-filesystem .'
+		});
+		if (argsRaw === undefined) {
+			return false;
+		}
+		const envRaw = await vscode.window.showInputBox({
+			title: 'Nuovo server MCP (4/4)',
+			prompt: 'Variabili d\'ambiente CHIAVE=valore separate da spazio (opzionale)',
+			placeHolder: 'es. UNITY_PORT=8090 API_KEY=xxx'
+		});
+		if (envRaw === undefined) {
+			return false;
+		}
+		const env: Record<string, string> = {};
+		for (const pair of (envRaw ?? '').trim().split(/\s+/).filter(Boolean)) {
+			const eq = pair.indexOf('=');
+			if (eq > 0) {
+				env[pair.slice(0, eq)] = pair.slice(eq + 1);
+			}
+		}
+		entry = {
+			command,
+			args: argsRaw.trim() ? argsRaw.trim().split(/\s+/) : [],
+			...(Object.keys(env).length ? { env } : {}),
+			disabled: false
+		};
+	}
+	// Timeout opzionale (operazioni lente: es. domain reload di Unity).
+	const timeoutRaw = await vscode.window.showInputBox({
+		title: 'Timeout per chiamata (opzionale)',
+		prompt: 'Secondi di attesa massima per ogni chiamata tool (vuoto = 60)',
+		placeHolder: 'es. 180 per Unity'
 	});
-	if (argsRaw === undefined) {
+	if (timeoutRaw === undefined) {
 		return false;
 	}
-	const args = argsRaw.trim() ? argsRaw.trim().split(/\s+/) : [];
+	const timeout = Number(timeoutRaw.trim());
+	if (timeoutRaw.trim() && Number.isFinite(timeout) && timeout > 0) {
+		entry.timeout = timeout;
+	}
 
 	const uri = (await existingConfigUri()) ?? target;
 	const cfg = await readConfig(uri);
@@ -102,7 +164,7 @@ export async function addMcpServer(): Promise<boolean> {
 			return false;
 		}
 	}
-	cfg.mcpServers[name] = { command, args, disabled: false };
+	cfg.mcpServers[name] = entry;
 	await writeConfig(uri, cfg);
 	vscode.window.showInformationMessage(`Server MCP "${name}" aggiunto.`);
 	return true;
