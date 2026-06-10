@@ -162,6 +162,11 @@ function makeResultDedup(): (name: string, args: unknown, result: string) => str
 	};
 }
 
+/** Immagini dell'ultima chiamata a un tool MCP, come data URL (per i percorsi testuali). */
+function mcpImageDataUrls(): string[] {
+	return (getMcpManager()?.takeLastImages() ?? []).map(im => `data:${im.mediaType};base64,${im.data}`);
+}
+
 /** Quanti risultati tool recenti tenere integri e taglio per i più vecchi (solo percorso Ollama). */
 const TRIM_KEEP_RECENT = 4;
 const TRIM_MAX_CHARS = 700;
@@ -404,7 +409,12 @@ async function runJsonAgent(
 				cb.onToolStart({ tool, args });
 				const result = await execOne(tool, args);
 				cb.onToolResult(result);
-				messages.push({ role: 'user', content: `Risultato del tool ${tool}:\n${result}` });
+				const structuredUserMsg: ChatMessage = { role: 'user', content: `Risultato del tool ${tool}:\n${result}` };
+				const structuredImgs = mcpImageDataUrls();
+				if (structuredImgs.length) {
+					structuredUserMsg.images = structuredImgs;
+				}
+				messages.push(structuredUserMsg);
 				continue;
 			} catch {
 				// Errore (schema/parse/connessione): disattiva la modalità strutturata per il
@@ -509,7 +519,12 @@ async function runJsonAgent(
 		const result = await execOne(call.tool, call.args);
 		cb.onToolResult(result);
 		const hint = n >= 3 ? `\n\n[AVVISO: hai già chiamato ${call.tool} con questi stessi argomenti ${n} volte. Cambia approccio (altro tool/argomenti) oppure, se hai le informazioni, procedi o concludi.]` : '';
-		messages.push({ role: 'user', content: `Risultato del tool ${call.tool}:\n${result}${hint}` });
+		const toolUserMsg: ChatMessage = { role: 'user', content: `Risultato del tool ${call.tool}:\n${result}${hint}` };
+		const toolImgs = mcpImageDataUrls();
+		if (toolImgs.length) {
+			toolUserMsg.images = toolImgs;
+		}
+		messages.push(toolUserMsg);
 	}
 
 	cb.onAssistantText('_(raggiunto il limite massimo di passi dell\'agente)_');
@@ -786,7 +801,17 @@ async function runNativeAgent(
 				if (WRITE_TOOLS.has(tu.name) && typeof p === 'string') {
 					changed.add(p);
 				}
-				resultBlocks.push({ type: 'tool_result', tool_use_id: tu.id, content: result });
+				// Immagini dai tool MCP (es. screenshot della scena Unity): allegate al
+				// tool_result così i modelli vision le VEDONO davvero.
+				const mcpImgs = getMcpManager()?.takeLastImages() ?? [];
+				resultBlocks.push(mcpImgs.length
+					? {
+						type: 'tool_result', tool_use_id: tu.id, content: [
+							{ type: 'text', text: result },
+							...mcpImgs.map(im => ({ type: 'image' as const, source: { type: 'base64' as const, media_type: im.mediaType, data: im.data } }))
+						]
+					}
+					: { type: 'tool_result', tool_use_id: tu.id, content: result });
 			}
 		}
 		messages.push({ role: 'user', content: resultBlocks });

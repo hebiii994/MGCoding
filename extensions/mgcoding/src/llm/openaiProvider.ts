@@ -3,7 +3,7 @@
  *  Endpoint /chat/completions con streaming SSE e tool-use nativo (function calling).
  *--------------------------------------------------------------------------------------------*/
 
-import { AgentStreamParams, AnthropicMessage, AnthropicStreamEvent, LLMError, LLMProvider, LLMRequest } from './types';
+import { AgentStreamParams, AnthropicMessage, AnthropicStreamEvent, LLMError, LLMProvider, LLMRequest, ToolResultPart, toolResultText } from './types';
 
 export interface OpenAIConfig {
 	endpoint: string;
@@ -192,10 +192,10 @@ export class OpenAIProvider implements LLMProvider {
 					} : {})
 				});
 			} else {
-				const toolResults = m.content.filter(b => b.type === 'tool_result') as { tool_use_id: string; content: string }[];
+				const toolResults = m.content.filter(b => b.type === 'tool_result') as { tool_use_id: string; content: string | ToolResultPart[] }[];
 				if (toolResults.length) {
 					for (const tr of toolResults) {
-						out.push({ role: 'tool', content: tr.content, tool_call_id: tr.tool_use_id });
+						out.push({ role: 'tool', content: toolResultText(tr.content), tool_call_id: tr.tool_use_id });
 					}
 				} else {
 					const text = m.content.filter(b => b.type === 'text').map(b => (b as { text: string }).text).join('');
