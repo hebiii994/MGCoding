@@ -14,7 +14,7 @@ import { anthropicBuiltinTools, errorsForPaths, executeTool, ToolCall, TOOL_SPEC
 const MAX_ITERATIONS = 30;
 
 /** Tool senza effetti collaterali: eseguibili in parallelo nello stesso turno. */
-const READ_ONLY_TOOLS = new Set(['read_file', 'list_dir', 'find_files', 'search_text', 'search_code', 'get_diagnostics']);
+const READ_ONLY_TOOLS = new Set(['read_file', 'list_dir', 'find_files', 'search_text', 'search_code', 'get_diagnostics', 'get_command_output']);
 
 /** Tool che modificano file (per la verifica automatica). */
 const WRITE_TOOLS = new Set(['write_file', 'apply_patch']);
@@ -29,8 +29,16 @@ async function autoVerify(changed: Set<string>): Promise<string> {
 	if (!changed.size || !vscode.workspace.getConfiguration('mgcoding').get<boolean>('autoVerify', true)) {
 		return '';
 	}
-	// Lascia ai language server il tempo di analizzare i file appena scritti.
-	await new Promise(r => setTimeout(r, 1200));
+	// Lascia ai language server il tempo di analizzare i file appena scritti: attende il
+	// primo aggiornamento delle diagnostiche (+ assestamento), con un tetto massimo.
+	await new Promise<void>(resolve => {
+		const timer = setTimeout(() => { sub.dispose(); resolve(); }, 2500);
+		const sub = vscode.languages.onDidChangeDiagnostics(() => {
+			clearTimeout(timer);
+			sub.dispose();
+			setTimeout(resolve, 400);
+		});
+	});
 	const errs = await errorsForPaths([...changed]);
 	if (!errs) {
 		return '';
@@ -48,7 +56,7 @@ Quando usi un tool, rispondi ESCLUSIVAMENTE con UN blocco così e nient'altro (u
 \`\`\`
 REGOLE FERREE:
 - Per le AZIONI (write_file, apply_patch, run_command) emetti UN SOLO tool per messaggio, poi interrompi e aspetta il risultato.
-- Per INDAGARE puoi emettere PIÙ blocchi di SOLA LETTURA insieme nello stesso messaggio (read_file, list_dir, search_text, find_files, search_code, get_diagnostics) — verranno eseguiti tutti in una volta: sfruttalo per leggere più file/cartelle in un colpo solo invece di un turno per file.
+- Per INDAGARE puoi emettere PIÙ blocchi di SOLA LETTURA insieme nello stesso messaggio (read_file, list_dir, search_text, find_files, search_code, get_diagnostics, get_command_output) — verranno eseguiti tutti in una volta: sfruttalo per leggere più file/cartelle in un colpo solo invece di un turno per file.
 - NON inventare MAI l'output di un tool (es. l'output di run_command): te lo fornirò io. Non scrivere finti log di successo.
 - Per "avvia/esegui/installa/crea" DEVI usare run_command/write_file: VIETATO limitarti a spiegare o a scrivere i comandi in un blocco di testo. Se scrivi "esegui questi comandi" SBAGLI: eseguili tu col tool.
 - Quando il compito è COMPLETO, rispondi in Markdown SENZA blocchi mg-tool.
@@ -112,16 +120,69 @@ function looksLikeUnfulfilledAnnouncement(text: string): boolean {
 /** Messaggio di "nudge" iniettato per far agire davvero il modello. */
 const NUDGE_MESSAGE = '[Sistema] NON hai usato alcuno strumento: hai solo descritto o scritto i comandi. Questo è sbagliato. ESEGUILI TU ADESSO con i tool, UNO alla volta. Ad esempio per installare/avviare emetti SUBITO e SOLO:\n```mg-tool\n{"tool": "run_command", "args": {"command": "npm install"}}\n```\nNiente spiegazioni, niente blocchi di shell: solo il blocco mg-tool del primo comando.';
 
-/** Schema per il tool calling rigoroso (Ollama format/grammar): azione sempre ben formata. */
-const TOOL_ACTION_SCHEMA = {
-	type: 'object',
-	properties: {
-		reasoning: { type: 'string' },
-		tool: { type: 'string' },
-		args: { type: 'object' }
-	},
-	required: ['tool', 'reasoning']
-};
+/**
+ * Schema per il tool calling rigoroso (Ollama format/grammar): azione sempre ben formata.
+ * Il nome del tool è vincolato con un enum ai tool realmente esistenti (+ "respond"):
+ * la grammar impedisce fisicamente al modello di inventare tool inesistenti.
+ */
+function toolActionSchema(): object {
+	const names = [
+		...TOOL_SPECS.map(t => t.name),
+		...(getMcpManager()?.toolSpecs().map(t => t.name) ?? []),
+		'respond'
+	];
+	return {
+		type: 'object',
+		properties: {
+			reasoning: { type: 'string' },
+			tool: { type: 'string', enum: names },
+			args: { type: 'object' }
+		},
+		required: ['tool', 'reasoning']
+	};
+}
+
+/**
+ * Dedup per-run dei risultati di sola lettura: se il modello ripete l'identica chiamata
+ * ottenendo l'identico risultato, lo sostituisce con un marker corto (risparmia contesto
+ * e segnala esplicitamente che rileggere non serve).
+ */
+function makeResultDedup(): (name: string, args: unknown, result: string) => string {
+	const seen = new Map<string, string>();
+	return (name, args, result) => {
+		if (!READ_ONLY_TOOLS.has(name)) {
+			return result;
+		}
+		const sig = `${name}:${JSON.stringify(args)}`;
+		if (seen.get(sig) === result) {
+			return `[Risultato IDENTICO alla precedente chiamata di ${name} con gli stessi argomenti: nulla è cambiato. Non ripetere la lettura: usa le informazioni già ottenute e agisci.]`;
+		}
+		seen.set(sig, result);
+		return result;
+	};
+}
+
+/** Quanti risultati tool recenti tenere integri e taglio per i più vecchi (solo percorso Ollama). */
+const TRIM_KEEP_RECENT = 4;
+const TRIM_MAX_CHARS = 700;
+
+/**
+ * Tronca i risultati tool più VECCHI nello storico del run (percorso testuale/structured,
+ * cioè modelli locali con contesto piccolo): gli ultimi restano integri, i precedenti
+ * vengono accorciati per non saturare il contesto nei run lunghi.
+ */
+function trimOldToolResults(msgs: ChatMessage[]): void {
+	let recent = 0;
+	for (let k = msgs.length - 1; k >= 0; k--) {
+		const m = msgs[k];
+		if (m.role === 'user' && /^Risultato del (?:tool|comando)/.test(m.content)) {
+			recent++;
+			if (recent > TRIM_KEEP_RECENT && m.content.length > TRIM_MAX_CHARS) {
+				m.content = `${m.content.slice(0, TRIM_MAX_CHARS)}\n… [risultato più vecchio troncato per non saturare il contesto]`;
+			}
+		}
+	}
+}
 /** Istruzione aggiunta al system prompt in modalità strutturata. */
 const STRUCTURED_INSTRUCTION = '\n\nRISPONDI SEMPRE con un oggetto JSON {"reasoning": "...", "tool": "<nome_tool o respond>", "args": {...}}. Per usare un tool metti il suo nome in "tool" e i parametri in "args". Per dare la risposta finale all\'utente usa "tool":"respond" e metti il testo in "args":{"message":"..."}. Un solo tool per volta.';
 
@@ -180,7 +241,7 @@ async function handleRememberTool(name: string, input: unknown, cb: AgentCallbac
  * Esegue un SUBAGENT focalizzato: un giro d'agente isolato (storico proprio, niente streaming
  * in UI) per un singolo sottocompito, restituendo un report conciso del risultato.
  */
-async function runDelegated(registry: ProviderRegistry, provider: LLMProvider, task: string, signal: AbortSignal | undefined, depth: number): Promise<string> {
+async function runDelegated(registry: ProviderRegistry, provider: LLMProvider, task: string, signal: AbortSignal | undefined, depth: number, systemExtra?: string): Promise<string> {
 	const messages: ChatMessage[] = [{ role: 'user', content: task }];
 	let finalText = '';
 	const tools: string[] = [];
@@ -190,16 +251,16 @@ async function runDelegated(registry: ProviderRegistry, provider: LLMProvider, t
 		onToolResult: () => { /* non inoltrato all'orchestratore */ }
 	};
 	if (typeof provider.streamAgent === 'function') {
-		await runNativeAgent(registry, provider, messages, cb, signal, undefined, depth + 1);
+		await runNativeAgent(registry, provider, messages, cb, signal, systemExtra, depth + 1);
 	} else {
-		await runJsonAgent(registry, provider, messages, cb, signal, undefined, depth + 1);
+		await runJsonAgent(registry, provider, messages, cb, signal, systemExtra, depth + 1);
 	}
 	const used = tools.length ? `\n[subagent · tool: ${[...new Set(tools)].join(', ')}]` : '';
 	return `${finalText.trim() || '(nessun risultato testuale)'}${used}`;
 }
 
 /** Intercetta il tool delegate: affida un sottocompito a un subagent (un livello di profondità). */
-async function handleDelegateTool(name: string, input: unknown, registry: ProviderRegistry, provider: LLMProvider, signal: AbortSignal | undefined, depth: number): Promise<string | undefined> {
+async function handleDelegateTool(name: string, input: unknown, registry: ProviderRegistry, provider: LLMProvider, signal: AbortSignal | undefined, depth: number, systemExtra?: string): Promise<string | undefined> {
 	if (name !== 'delegate') {
 		return undefined;
 	}
@@ -211,7 +272,7 @@ async function handleDelegateTool(name: string, input: unknown, registry: Provid
 		return 'Errore: delegate richiede "task" (il sottocompito da svolgere).';
 	}
 	const ctx = String((input as { context?: unknown })?.context ?? '').trim();
-	return await runDelegated(registry, provider, ctx ? `${task}\n\nContesto:\n${ctx}` : task, signal, depth);
+	return await runDelegated(registry, provider, ctx ? `${task}\n\nContesto:\n${ctx}` : task, signal, depth, systemExtra);
 }
 
 /**
@@ -287,16 +348,18 @@ async function runJsonAgent(
 	const changed = new Set<string>();
 	let verifyRounds = 0;
 
+	const dedup = makeResultDedup();
 	// Esegue un tool gestendo i casi speciali (ask/remember/delegate/plan) o quelli reali.
 	const execOne = async (toolName: string, args: Record<string, unknown>): Promise<string> =>
-		(await handleAskTool(toolName, args, cb))
-		?? (await handleRememberTool(toolName, args, cb))
-		?? (await handleDelegateTool(toolName, args, registry, provider, signal, depth))
-		?? handlePlanTool(toolName, args, cb)
-		?? await executeTool({ tool: toolName, args });
+		dedup(toolName, args,
+			(await handleAskTool(toolName, args, cb))
+			?? (await handleRememberTool(toolName, args, cb))
+			?? (await handleDelegateTool(toolName, args, registry, provider, signal, depth, systemExtra))
+			?? handlePlanTool(toolName, args, cb)
+			?? await executeTool({ tool: toolName, args }));
 
 	// Tool calling RIGOROSO (Ollama): output vincolato a uno schema → niente JSON spazzatura.
-	const structuredOllama = provider.id === 'ollama'
+	let structuredOllama = provider.id === 'ollama'
 		&& vscode.workspace.getConfiguration('mgcoding').get<boolean>('ollama.structuredTools', false)
 		&& typeof (provider as { chatStructured?: unknown }).chatStructured === 'function';
 
@@ -304,18 +367,23 @@ async function runJsonAgent(
 		if (signal?.aborted) {
 			return;
 		}
+		// Nei run lunghi accorcia i risultati tool più vecchi (contesto piccolo dei locali).
+		if (i > 0) {
+			trimOldToolResults(messages);
+		}
 
 		// --- Percorso RIGOROSO (Ollama structured): output vincolato a schema JSON ---
 		if (structuredOllama) {
 			try {
 				const raw = await (provider as unknown as { chatStructured(s: string | undefined, m: { role: string; content: string }[], schema: object, sig?: AbortSignal): Promise<string> })
-					.chatStructured(sys + STRUCTURED_INSTRUCTION, messages.map(m => ({ role: m.role, content: m.content })), TOOL_ACTION_SCHEMA, signal);
+					.chatStructured(sys + STRUCTURED_INSTRUCTION, messages.map(m => ({ role: m.role, content: m.content })), toolActionSchema(), signal);
 				const parsed = JSON.parse(raw) as { reasoning?: string; tool?: string; args?: Record<string, unknown> };
-				messages.push({ role: 'assistant', content: raw });
 				const tool = String(parsed.tool ?? '').trim();
 				const reasoning = String(parsed.reasoning ?? '').trim();
-				if (!tool || /^(respond|final|none|answer|done)$/i.test(tool)) {
-					const finalText = reasoning || String((parsed.args as { message?: unknown } | undefined)?.message ?? '');
+				const args = (parsed.args && typeof parsed.args === 'object') ? parsed.args : {};
+				if (!tool || /^(?:respond|final|none|answer|done)$/i.test(tool)) {
+					const finalText = reasoning || String((args as { message?: unknown }).message ?? '');
+					messages.push({ role: 'assistant', content: finalText });
 					cb.onAssistantText(finalText);
 					if (verifyRounds < MAX_VERIFY_ROUNDS) {
 						const verify = await autoVerify(changed);
@@ -327,7 +395,9 @@ async function runJsonAgent(
 				if (reasoning) {
 					cb.onAssistantText(reasoning);
 				}
-				const args = (parsed.args && typeof parsed.args === 'object') ? parsed.args : {};
+				// Nello storico va la forma mg-tool leggibile (non il JSON grezzo), così un
+				// eventuale fallback al percorso testuale vede una conversazione coerente.
+				messages.push({ role: 'assistant', content: `${reasoning ? `${reasoning}\n` : ''}\`\`\`mg-tool\n${JSON.stringify({ tool, args })}\n\`\`\`` });
 				if (WRITE_TOOLS.has(tool) && typeof args.path === 'string') {
 					changed.add(args.path);
 				}
@@ -337,7 +407,9 @@ async function runJsonAgent(
 				messages.push({ role: 'user', content: `Risultato del tool ${tool}:\n${result}` });
 				continue;
 			} catch {
-				// In caso di errore (schema/parse/connessione) ricadi sul percorso testuale.
+				// Errore (schema/parse/connessione): disattiva la modalità strutturata per il
+				// resto del run e prosegui col percorso testuale (niente retry sprecati).
+				structuredOllama = false;
 			}
 		}
 
@@ -416,7 +488,7 @@ async function runJsonAgent(
 		if (calls.length > 1 && calls.every(c => READ_ONLY_TOOLS.has(c.tool))) {
 			const results = await Promise.all(calls.map(async c => {
 				cb.onToolStart(c);
-				const r = await executeTool({ tool: c.tool, args: c.args });
+				const r = dedup(c.tool, c.args, await executeTool({ tool: c.tool, args: c.args }));
 				cb.onToolResult(r);
 				return `Risultato del tool ${c.tool} (${JSON.stringify(c.args)}):\n${r}`;
 			}));
@@ -434,11 +506,7 @@ async function runJsonAgent(
 		}
 
 		cb.onToolStart(call);
-		const result = (await handleAskTool(call.tool, call.args, cb))
-			?? (await handleRememberTool(call.tool, call.args, cb))
-			?? (await handleDelegateTool(call.tool, call.args, registry, provider, signal, depth))
-			?? handlePlanTool(call.tool, call.args, cb)
-			?? await executeTool(call);
+		const result = await execOne(call.tool, call.args);
 		cb.onToolResult(result);
 		const hint = n >= 3 ? `\n\n[AVVISO: hai già chiamato ${call.tool} con questi stessi argomenti ${n} volte. Cambia approccio (altro tool/argomenti) oppure, se hai le informazioni, procedi o concludi.]` : '';
 		messages.push({ role: 'user', content: `Risultato del tool ${call.tool}:\n${result}${hint}` });
@@ -483,6 +551,7 @@ async function runNativeAgent(
 	let shellRuns = 0;
 	const changed = new Set<string>();
 	let verifyRounds = 0;
+	const dedup = makeResultDedup();
 	// Esegue un tool con guard anti-loop (modelli che ripetono la stessa chiamata).
 	const runToolGuarded = async (name: string, input: unknown): Promise<string> => {
 		const ask = await handleAskTool(name, input, cb);
@@ -493,7 +562,7 @@ async function runNativeAgent(
 		if (mem !== undefined) {
 			return mem;
 		}
-		const del = await handleDelegateTool(name, input, registry, provider, signal, depth);
+		const del = await handleDelegateTool(name, input, registry, provider, signal, depth, systemExtra);
 		if (del !== undefined) {
 			return del;
 		}
@@ -508,7 +577,7 @@ async function runNativeAgent(
 			return `[interrotto: hai già chiamato ${name} con questi stessi argomenti ${n} volte senza progresso. Cambia approccio o concludi.]`;
 		}
 		const result = await executeTool({ tool: name, args: input as Record<string, unknown> });
-		return n >= 3 ? `${result}\n\n[AVVISO: chiamata a ${name} ripetuta ${n} volte; cambia strategia o concludi.]` : result;
+		return dedup(name, input, n >= 3 ? `${result}\n\n[AVVISO: chiamata a ${name} ripetuta ${n} volte; cambia strategia o concludi.]` : result);
 	};
 
 	// Costruisce i messaggi Anthropic dallo storico testuale.
