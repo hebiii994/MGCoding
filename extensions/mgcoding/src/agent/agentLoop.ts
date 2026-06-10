@@ -95,14 +95,16 @@ REGOLE FERREE:
 - Per "avvia/esegui/installa/crea" DEVI usare run_command/write_file: VIETATO limitarti a spiegare o a scrivere i comandi in un blocco di testo. Se scrivi "esegui questi comandi" SBAGLI: eseguili tu col tool.
 - Quando il compito è COMPLETO, rispondi in Markdown SENZA blocchi mg-tool.
 
-ESEMPIO. Richiesta: "avvia l'app". Risposta corretta (e nient'altro):
+ESEMPIO COMPLETO. Richiesta: "avvia l'app". Risposta corretta (e nient'altro):
 \`\`\`mg-tool
 {"tool": "run_command", "args": {"command": "npm install"}}
 \`\`\`
-(poi, ricevuto il risultato, al messaggio dopo:)
+(ricevi il risultato → al messaggio dopo:)
 \`\`\`mg-tool
 {"tool": "run_command", "args": {"command": "npm run dev"}}
 \`\`\`
+(ricevi l'output del server: se mostra errori li correggi, altrimenti CONCLUDI con la risposta finale in Markdown, breve e senza blocchi tool:)
+Fatto: dipendenze installate e dev server avviato su http://localhost:5173.
 
 Tool disponibili:
 ${list}
@@ -194,6 +196,11 @@ function makeResultDedup(): (name: string, args: unknown, result: string) => str
 		seen.set(sig, result);
 		return result;
 	};
+}
+
+/** Etichetta esito per i risultati tool (i modelli deboli capiscono meglio OK/ERRORE espliciti). */
+function resultLabel(result: string): string {
+	return /^\[?errore/i.test(result.trim()) ? 'ERRORE' : 'OK';
 }
 
 /** Immagini dell'ultima chiamata a un tool MCP, come data URL (per i percorsi testuali). */
@@ -411,6 +418,10 @@ async function runJsonAgent(
 		if (i > 0) {
 			trimOldToolResults(messages);
 		}
+		// Anti-deriva: ogni 8 iterazioni ricorda l'obiettivo (i modelli deboli lo perdono).
+		if (i > 0 && i % 8 === 0 && reqHint) {
+			messages.push({ role: 'user', content: `[Promemoria] L'obiettivo resta: "${reqHint.slice(0, 300)}". Non ricominciare da capo e non deviare: completa solo ciò che manca, poi concludi.` });
+		}
 
 		// --- Percorso RIGOROSO (Ollama structured): output vincolato a schema JSON ---
 		if (structuredOllama) {
@@ -444,7 +455,7 @@ async function runJsonAgent(
 				cb.onToolStart({ tool, args });
 				const result = await execOne(tool, args);
 				cb.onToolResult(result);
-				const structuredUserMsg: ChatMessage = { role: 'user', content: `Risultato del tool ${tool}:\n${result}` };
+				const structuredUserMsg: ChatMessage = { role: 'user', content: `Risultato del tool ${tool} (${resultLabel(result)}):\n${result}` };
 				const structuredImgs = mcpImageDataUrls();
 				if (structuredImgs.length) {
 					structuredUserMsg.images = structuredImgs;
@@ -535,7 +546,7 @@ async function runJsonAgent(
 				cb.onToolStart(c);
 				const r = dedup(c.tool, c.args, await executeTool({ tool: c.tool, args: c.args }));
 				cb.onToolResult(r);
-				return `Risultato del tool ${c.tool} (${JSON.stringify(c.args)}):\n${r}`;
+				return `Risultato del tool ${c.tool} (${JSON.stringify(c.args)}) — ${resultLabel(r)}:\n${r}`;
 			}));
 			messages.push({ role: 'user', content: results.join('\n\n') });
 			continue;
@@ -554,7 +565,7 @@ async function runJsonAgent(
 		const result = await execOne(call.tool, call.args);
 		cb.onToolResult(result);
 		const hint = n >= 3 ? `\n\n[AVVISO: hai già chiamato ${call.tool} con questi stessi argomenti ${n} volte. Cambia approccio (altro tool/argomenti) oppure, se hai le informazioni, procedi o concludi.]` : '';
-		const toolUserMsg: ChatMessage = { role: 'user', content: `Risultato del tool ${call.tool}:\n${result}${hint}` };
+		const toolUserMsg: ChatMessage = { role: 'user', content: `Risultato del tool ${call.tool} (${resultLabel(result)}):\n${result}${hint}` };
 		const toolImgs = mcpImageDataUrls();
 		if (toolImgs.length) {
 			toolUserMsg.images = toolImgs;
