@@ -4,6 +4,7 @@
 
 import * as vscode from 'vscode';
 import { runAgent } from './agent/agentLoop';
+import { initAgentStats, statsSummary } from './agent/agentStats';
 import { ChatViewProvider } from './chat/chatViewProvider';
 import { registerDiffApproval } from './edit/diffApproval';
 import { inlineEdit } from './edit/inlineEdit';
@@ -131,6 +132,13 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.window.registerTreeDataProvider('mgcoding.steering', steeringTree),
 		vscode.window.registerTreeDataProvider('mgcoding.mcp', mcpTree)
 	);
+
+	// Telemetria LOCALE dell'agente (iterazioni/tool/errori per run; nessun dato lascia il PC).
+	initAgentStats(context.globalState);
+	context.subscriptions.push(vscode.commands.registerCommand('mgcoding.agentStats', async () => {
+		const doc = await vscode.workspace.openTextDocument({ content: statsSummary(), language: 'markdown' });
+		await vscode.window.showTextDocument(doc, { preview: true });
+	}));
 
 	// Hooks runtime
 	const hookManager = new HookManager(registry, () => hooksTree.refresh(), () => chat.runReporter(), () => chat.beginRun());

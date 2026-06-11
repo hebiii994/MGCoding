@@ -199,6 +199,23 @@ export class ProviderRegistry implements vscode.Disposable {
 		return undefined;
 	}
 
+	/**
+	 * Sceglie tra i modelli installati un "reasoning" da usare come PLANNER
+	 * (architettura planner/executor: il reasoning pianifica, il coder esegue).
+	 */
+	async pickOllamaPlannerModel(): Promise<string | undefined> {
+		let installed: string[];
+		try {
+			installed = await this.ollama.listModels();
+		} catch {
+			return undefined;
+		}
+		if (installed.length < 2) {
+			return undefined;
+		}
+		return installed.find(m => /r1|reason|qwq|qwen3|deepseek|magistral|phi-?4|think/.test(m.toLowerCase()));
+	}
+
 	listOllamaModels(): Promise<string[]> {
 		return this.ollama.listModels();
 	}

@@ -69,6 +69,33 @@ Hai a disposizione molte iterazioni: non fermarti a metà, porta il task a termi
 - Con run_command spiega prima cosa fai e preferisci comandi non distruttivi.
 - Sii conciso e tecnico. Usa Markdown. Mostra solo le porzioni di codice rilevanti.`;
 
+/**
+ * System prompt CONDENSATO per i modelli locali piccoli (≤8B): le istruzioni lunghe li
+ * "diluiscono" (instruction dilution) — meglio poche regole essenziali e nette.
+ */
+const BASE_SYSTEM_COMPACT = `Sei MGCoding, agente di sviluppo nell'IDE. Lavori sul progetto aperto nel workspace dell'utente.
+REGOLE ESSENZIALI:
+- AGISCI con i tool: per leggere/scrivere/eseguire DEVI emettere la chiamata tool, MAI descriverla o scrivere comandi come testo. NON inventare mai l'output di un tool: te lo fornisce il sistema.
+- Metodo: esplora (search_code, read_file) → agisci a piccoli passi (apply_patch per i file esistenti) → verifica (get_diagnostics e output reale).
+- Un dev server avviato resta attivo e ha l'hot reload: NON riavviarlo dopo una modifica; rileggi l'output con get_command_output e verifica con fetch_url.
+- Niente preamboli né frasi di cortesia: vai dritto al punto; alla fine un breve riepilogo di cosa hai fatto e stop.
+- Codice (nomi di funzioni/variabili/classi/file/endpoint) SEMPRE in inglese; spiegazioni in italiano.
+- Le regole di steering più sotto hanno priorità su tutto.`;
+
+/** True se il modello locale configurato è piccolo (≤8B): meglio il prompt condensato. */
+function isSmallLocalModel(): boolean {
+	const cfg = vscode.workspace.getConfiguration('mgcoding');
+	if (cfg.get<string>('provider', 'ollama') !== 'ollama' || !cfg.get<boolean>('ollama.compactPrompt', true)) {
+		return false;
+	}
+	const model = cfg.get<string>('ollama.model', '').toLowerCase();
+	const m = /(\d+(?:\.\d+)?)\s*b\b/.exec(model);
+	if (m) {
+		return parseFloat(m[1]) <= 8;
+	}
+	return /mini|tiny|small/.test(model);
+}
+
 const SKIP_DIRS = new Set(['node_modules', '.git', 'out', 'out-build', 'out-vscode', '.build', 'dist', '.vscode-test']);
 
 /** Mappa compatta del progetto (2 livelli, limitata) per orientare l'agente. */
@@ -184,7 +211,8 @@ async function projectFlavorInfo(): Promise<string> {
 
 export async function buildSystemPrompt(extra?: string, requestHint?: string): Promise<string> {
 	const [project, steering, active, flavor] = await Promise.all([buildProjectContext(), buildSteeringContext(requestHint), buildActiveContext(), projectFlavorInfo()]);
-	return [BASE_SYSTEM, environmentInfo(), flavor, project, steering, active, extra].filter(Boolean).join('\n\n');
+	const base = isSmallLocalModel() ? BASE_SYSTEM_COMPACT : BASE_SYSTEM;
+	return [base, environmentInfo(), flavor, project, steering, active, extra].filter(Boolean).join('\n\n');
 }
 
 /** Ultimo messaggio utente: usato come "richiesta corrente" per lo steering auto. */
