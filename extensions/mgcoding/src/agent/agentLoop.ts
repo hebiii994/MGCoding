@@ -10,7 +10,7 @@ import { beginCheckpoint } from '../edit/checkpoint';
 import { parseToolCall, parseAllToolCalls, extractShellCommands, TOOL_RE } from '../util/parsing';
 import { buildSystemPrompt, complete, streamChat } from './agent';
 import { statsBeginRun, statsEndRun, statsIteration, statsMarkLimit, statsTool } from './agentStats';
-import { anthropicBuiltinTools, errorsForPaths, executeTool, ToolCall, ToolSpec, TOOL_SPECS } from './tools';
+import { activeDevServer, anthropicBuiltinTools, errorsForPaths, executeTool, ToolCall, ToolSpec, TOOL_SPECS } from './tools';
 
 const MAX_ITERATIONS = 30;
 
@@ -79,6 +79,55 @@ function filteredMcpSpecs(hint?: string): ToolSpec[] {
 	const hits = scored.filter(x => x.n > 0).sort((a, b) => b.n - a.n).map(x => x.s);
 	const rest = scored.filter(x => x.n === 0).map(x => x.s);
 	return [...hits, ...rest].slice(0, max);
+}
+
+/**
+ * Verifica WEB automatica: se durante questo run è stato avviato un dev server, è il
+ * SISTEMA a controllare che risponda (GET su URL, div di mount, entry script raggiungibile),
+ * senza affidarsi alla buona volontà del modello. Ritorna un messaggio di correzione,
+ * o '' se è tutto a posto (in quel caso mostra l'esito OK in chat).
+ */
+async function autoWebVerify(runStart: number, cb: AgentCallbacks): Promise<string> {
+	if (!vscode.workspace.getConfiguration('mgcoding').get<boolean>('autoVerify', true)) {
+		return '';
+	}
+	const srv = activeDevServer();
+	if (!srv || srv.startedAt < runStart) {
+		return ''; // nessun dev server avviato in QUESTO run
+	}
+	cb.onToolStart({ tool: 'verifica web', args: { url: srv.url } });
+	try {
+		const res = await fetch(srv.url, { signal: AbortSignal.timeout(8000) });
+		const html = await res.text();
+		if (!res.ok) {
+			cb.onToolResult(`HTTP ${res.status}`);
+			return `[Verifica automatica web] ${srv.url} risponde HTTP ${res.status}. La pagina NON funziona: leggi l'output del server con get_command_output, individua la causa, correggi e riverifica con fetch_url prima di concludere.`;
+		}
+		// Lo script entry deve essere servito senza errori (un 404/500 = pagina bianca).
+		const scripts = [...html.matchAll(/<script[^>]+src="(?<src>[^"]+)"/g)].map(m => m.groups!.src);
+		for (const s of scripts.slice(0, 4)) {
+			const u = new URL(s, srv.url).toString();
+			const r2 = await fetch(u, { signal: AbortSignal.timeout(8000) }).catch(() => undefined);
+			if (!r2 || !r2.ok) {
+				cb.onToolResult(`entry "${s}" → ${r2 ? `HTTP ${r2.status}` : 'irraggiungibile'}`);
+				return `[Verifica automatica web] La pagina ${srv.url} risponde, ma lo script entry "${s}" dà ${r2 ? `HTTP ${r2.status}` : 'errore di rete'} → è questa la causa della pagina bianca. Controlla index.html (il percorso dello <script>) e che il file entry esista e compili; correggi e poi concludi.`;
+			}
+			const js = r2 ? await r2.text().catch(() => '') : '';
+			if (/vite:import-analysis|Failed to resolve import/.test(js)) {
+				cb.onToolResult(`entry "${s}" → errore di import`);
+				return `[Verifica automatica web] Lo script entry "${s}" contiene un ERRORE di import di Vite. Leggi l'output del server con get_command_output per il dettaglio, correggi il file indicato e poi concludi.`;
+			}
+		}
+		if (!/<div[^>]+id=["'](?:root|app)["']/.test(html)) {
+			cb.onToolResult('manca il div di mount');
+			return `[Verifica automatica web] L'HTML servito da ${srv.url} NON contiene un div di mount (id "root" o "app") → pagina bianca probabile. Controlla index.html e l'entry che fa il render; correggi e poi concludi.`;
+		}
+		cb.onToolResult(`OK: HTTP 200 su ${srv.url}, div di mount presente, entry script raggiungibile.`);
+		return '';
+	} catch (err) {
+		cb.onToolResult('server non raggiungibile');
+		return `[Verifica automatica web] ${srv.url} NON risponde (${err instanceof Error ? err.message : String(err)}). Il server potrebbe essere crollato: leggi l'output con get_command_output, correggi e riavvialo se serve.`;
+	}
 }
 
 function toolSystemPrompt(hint?: string): string {
@@ -434,6 +483,7 @@ async function runJsonAgent(
 	systemExtra?: string,
 	depth = 0
 ): Promise<void> {
+	const runStart = Date.now();
 	const reqHint = [...messages].reverse().find(m => m.role === 'user')?.content;
 	const sys = systemExtra ? `${toolSystemPrompt(reqHint)}\n\n${systemExtra}` : toolSystemPrompt(reqHint);
 	const streaming = typeof cb.onStreamDelta === 'function';
@@ -489,7 +539,7 @@ async function runJsonAgent(
 					messages.push({ role: 'assistant', content: finalText });
 					cb.onAssistantText(finalText);
 					if (verifyRounds < MAX_VERIFY_ROUNDS) {
-						const verify = await autoVerify(changed);
+						const verify = (await autoVerify(changed)) || (await autoWebVerify(runStart, cb));
 						if (verify) { verifyRounds++; changed.clear(); cb.onToolStart({ tool: 'verifica', args: {} }); cb.onToolResult(verify); messages.push({ role: 'user', content: verify }); continue; }
 					}
 					return;
@@ -563,7 +613,7 @@ async function runJsonAgent(
 			}
 			// Auto-verifica: se ha modificato file, controlla gli errori e fagli correggere.
 			if (verifyRounds < MAX_VERIFY_ROUNDS) {
-				const verify = await autoVerify(changed);
+				const verify = (await autoVerify(changed)) || (await autoWebVerify(runStart, cb));
 				if (verify) {
 					verifyRounds++;
 					changed.clear();
@@ -656,6 +706,7 @@ async function runNativeAgent(
 	systemExtra?: string,
 	depth = 0
 ): Promise<void> {
+	const runStart = Date.now();
 	const lastUserMsg = [...history].reverse().find(m => m.role === 'user');
 	const system = await buildSystemPrompt(systemExtra, lastUserMsg?.content);
 	// Un subagent (depth>0) non espone il tool delegate, per evitare ricorsione.
@@ -860,7 +911,7 @@ async function runNativeAgent(
 			}
 			// Auto-verifica: se ha modificato file, controlla gli errori e fagli correggere.
 			if (verifyRounds < MAX_VERIFY_ROUNDS) {
-				const verify = await autoVerify(changed);
+				const verify = (await autoVerify(changed)) || (await autoWebVerify(runStart, cb));
 				if (verify) {
 					verifyRounds++;
 					changed.clear();

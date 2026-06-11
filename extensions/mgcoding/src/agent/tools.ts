@@ -238,6 +238,9 @@ interface ManagedProcess {
 	buffer: string;
 	running: boolean;
 	exitCode: number | null;
+	startedAt: number;
+	/** URL locale rilevato nell'output (es. quello stampato da Vite). */
+	url?: string;
 	kill(): void;
 }
 
@@ -254,12 +257,20 @@ function startManagedProcess(command: string): ManagedProcess {
 		env: { ...process.env, CI: '1', npm_config_yes: 'true', npm_config_audit: 'false', npm_config_fund: 'false', ADBLOCK: '1', FORCE_COLOR: '0' }
 	});
 	const mp: ManagedProcess = {
-		id, command, buffer: '', running: true, exitCode: null,
+		id, command, buffer: '', running: true, exitCode: null, startedAt: Date.now(),
 		kill: () => { try { child.kill(); } catch { /* già terminato */ } }
 	};
 	const append = (chunk: Buffer) => {
 		const text = chunk.toString();
 		mp.buffer = (mp.buffer + text).slice(-PROC_BUFFER_MAX);
+		if (!mp.url) {
+			// Rileva l'URL locale stampato dal server (Vite lo colora: via i codici ANSI).
+			const clean = mp.buffer.replace(/\[[0-9;]*m/g, '');
+			const m = /(https?:\/\/(?:localhost|127\.0\.0\.1):\d+\/?)/.exec(clean);
+			if (m) {
+				mp.url = m[1];
+			}
+		}
 		writeEmitter.fire(text.replace(/(?<!\r)\n/g, '\r\n'));
 	};
 	child.stdout?.on('data', append);
@@ -281,6 +292,16 @@ function startManagedProcess(command: string): ManagedProcess {
 	vscode.window.createTerminal({ name: `MGCoding · ${command.slice(0, 40)}`, pty }).show(true);
 	managedProcs.set(id, mp);
 	return mp;
+}
+
+/** Ultimo dev server attivo con URL rilevato (per la verifica web automatica). */
+export function activeDevServer(): { id: number; url: string; startedAt: number } | undefined {
+	for (const mp of [...managedProcs.values()].reverse()) {
+		if (mp.running && mp.url) {
+			return { id: mp.id, url: mp.url, startedAt: mp.startedAt };
+		}
+	}
+	return undefined;
 }
 
 /** Attende l'output iniziale del processo: max maxMs, o prima se l'output si assesta. */
