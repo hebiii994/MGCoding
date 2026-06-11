@@ -9,6 +9,7 @@ import { getMcpManager } from '../mcp/mcpClient';
 import { beginCheckpoint } from '../edit/checkpoint';
 import { parseToolCall, parseAllToolCalls, extractShellCommands, TOOL_RE } from '../util/parsing';
 import { buildSystemPrompt, complete, streamChat } from './agent';
+import { statsBeginRun, statsEndRun, statsIteration, statsMarkLimit, statsTool } from './agentStats';
 import { anthropicBuiltinTools, errorsForPaths, executeTool, ToolCall, ToolSpec, TOOL_SPECS } from './tools';
 
 const MAX_ITERATIONS = 30;
@@ -198,6 +199,28 @@ function makeResultDedup(): (name: string, args: unknown, result: string) => str
 	};
 }
 
+/** System prompt del PLANNER (planner/executor con AutoModel: il reasoning pianifica, il coder esegue). */
+const PLANNER_SYS = 'Sei un PLANNER di sviluppo software. Dato il compito dell\'utente, rispondi SOLO con un elenco numerato di 3-6 step concreti e verificabili (una riga per step, in italiano), nell\'ordine giusto. Niente premesse, niente spiegazioni, niente codice: solo l\'elenco numerato.';
+
+/** Estrae gli step numerati dalla risposta del planner (ripulita dal ragionamento). */
+function parsePlanSteps(raw: string): PlanStep[] {
+	const clean = raw.replace(/<think>[\s\S]*?<\/think>/g, '');
+	const steps: PlanStep[] = [];
+	for (const line of clean.split('\n')) {
+		const m = /^\s*\d+[.)]\s+(?<step>.+)/.exec(line);
+		if (m?.groups?.step) {
+			steps.push({ text: m.groups.step.trim(), status: 'pending' });
+		}
+	}
+	return steps.slice(0, 8);
+}
+
+/** Il compito merita una fase di pianificazione separata? */
+function deservesPlanning(hint?: string): boolean {
+	return !!hint && hint.length > 40
+		&& /\b(crea|implementa|aggiungi|rifattorizza|refactor|correggi|fix|sistema|avvia|configura|setup|migra|integra|costruisci|build)\b/i.test(hint);
+}
+
 /** Etichetta esito per i risultati tool (i modelli deboli capiscono meglio OK/ERRORE espliciti). */
 function resultLabel(result: string): string {
 	return /^\[?errore/i.test(result.trim()) ? 'ERRORE' : 'OK';
@@ -357,18 +380,44 @@ export async function runAgent(
 	// la chiamata come TESTO JSON invece che come tool-call nativa → sul percorso nativo non
 	// verrebbe eseguita. Il protocollo testuale invece la riconosce ed esegue. I tool nativi
 	// per Ollama restano un opt-in esplicito (toggle "Tool nativi").
+	// PLANNER/EXECUTOR (AutoModel): se è installato anche un modello reasoning, fagli
+	// produrre il piano; l'executor (coder) lo segue. I reasoning pianificano meglio,
+	// i coder eseguono meglio: ciascuno fa la sua parte.
+	let extra = systemExtra;
+	const mgCfg = vscode.workspace.getConfiguration('mgcoding');
+	if (provider.id === 'ollama' && mgCfg.get<boolean>('ollama.autoModel', false)
+		&& mgCfg.get<boolean>('ollama.planFirst', true) && deservesPlanning(hint)) {
+		try {
+			const executor = registry.currentOllamaModel();
+			const planner = await registry.pickOllamaPlannerModel();
+			if (planner && planner !== executor) {
+				registry.setOllamaModelOverride(planner);
+				const planRaw = await complete(registry, [{ role: 'user', content: hint! }], PLANNER_SYS, signal, provider, true);
+				registry.setOllamaModelOverride(executor || undefined);
+				const steps = parsePlanSteps(planRaw);
+				if (steps.length >= 2) {
+					cb.onPlan?.(steps);
+					extra = `${extra ? `${extra}\n\n` : ''}[Piano preparato da un modello planner]\n${steps.map((s, idx) => `${idx + 1}. ${s.text}`).join('\n')}\nSegui questi step nell'ordine, adattandoli se la realtà del codice lo richiede.`;
+				}
+			}
+		} catch {
+			// pianificazione best-effort: senza piano si procede comunque
+		}
+	}
 	let ollamaNative = true;
 	if (provider.id === 'ollama') {
 		ollamaNative = vscode.workspace.getConfiguration('mgcoding').get<boolean>('ollama.nativeTools', false);
 	}
+	statsBeginRun(provider.id, provider.id === 'ollama' ? registry.currentOllamaModel() : provider.modelName());
 	try {
 		if (typeof provider.streamAgent === 'function' && ollamaNative) {
-			await runNativeAgent(registry, provider, messages, cb, signal, systemExtra, 0);
+			await runNativeAgent(registry, provider, messages, cb, signal, extra, 0);
 		} else {
-			await runJsonAgent(registry, provider, messages, cb, signal, systemExtra, 0);
+			await runJsonAgent(registry, provider, messages, cb, signal, extra, 0);
 		}
 	} finally {
 		registry.setOllamaModelOverride(undefined);
+		await statsEndRun(!!signal?.aborted);
 	}
 }
 
@@ -397,13 +446,15 @@ async function runJsonAgent(
 
 	const dedup = makeResultDedup();
 	// Esegue un tool gestendo i casi speciali (ask/remember/delegate/plan) o quelli reali.
-	const execOne = async (toolName: string, args: Record<string, unknown>): Promise<string> =>
-		dedup(toolName, args,
-			(await handleAskTool(toolName, args, cb))
+	const execOne = async (toolName: string, args: Record<string, unknown>): Promise<string> => {
+		const raw = (await handleAskTool(toolName, args, cb))
 			?? (await handleRememberTool(toolName, args, cb))
 			?? (await handleDelegateTool(toolName, args, registry, provider, signal, depth, systemExtra))
 			?? handlePlanTool(toolName, args, cb)
-			?? await executeTool({ tool: toolName, args }));
+			?? await executeTool({ tool: toolName, args });
+		statsTool(toolName, resultLabel(raw) === 'OK');
+		return dedup(toolName, args, raw);
+	};
 
 	// Tool calling RIGOROSO (Ollama): output vincolato a uno schema → niente JSON spazzatura.
 	let structuredOllama = provider.id === 'ollama'
@@ -414,6 +465,7 @@ async function runJsonAgent(
 		if (signal?.aborted) {
 			return;
 		}
+		statsIteration();
 		// Nei run lunghi accorcia i risultati tool più vecchi (contesto piccolo dei locali).
 		if (i > 0) {
 			trimOldToolResults(messages);
@@ -544,7 +596,9 @@ async function runJsonAgent(
 		if (calls.length > 1 && calls.every(c => READ_ONLY_TOOLS.has(c.tool))) {
 			const results = await Promise.all(calls.map(async c => {
 				cb.onToolStart(c);
-				const r = dedup(c.tool, c.args, await executeTool({ tool: c.tool, args: c.args }));
+				const rawBatch = await executeTool({ tool: c.tool, args: c.args });
+				statsTool(c.tool, resultLabel(rawBatch) === 'OK');
+				const r = dedup(c.tool, c.args, rawBatch);
 				cb.onToolResult(r);
 				return `Risultato del tool ${c.tool} (${JSON.stringify(c.args)}) — ${resultLabel(r)}:\n${r}`;
 			}));
@@ -573,6 +627,7 @@ async function runJsonAgent(
 		messages.push(toolUserMsg);
 	}
 
+	statsMarkLimit();
 	cb.onAssistantText('_(raggiunto il limite massimo di passi dell\'agente)_');
 }
 
@@ -643,6 +698,7 @@ async function runNativeAgent(
 			return `[interrotto: hai già chiamato ${name} con questi stessi argomenti ${n} volte senza progresso. Cambia approccio o concludi.]`;
 		}
 		const result = await executeTool({ tool: name, args: input as Record<string, unknown> });
+		statsTool(name, resultLabel(result) === 'OK');
 		return dedup(name, input, n >= 3 ? `${result}\n\n[AVVISO: chiamata a ${name} ripetuta ${n} volte; cambia strategia o concludi.]` : result);
 	};
 
@@ -665,6 +721,7 @@ async function runNativeAgent(
 		if (signal?.aborted) {
 			return;
 		}
+		statsIteration();
 
 		if (streaming) {
 			cb.onStreamStart?.();
@@ -867,5 +924,6 @@ async function runNativeAgent(
 		messages.push({ role: 'user', content: resultBlocks });
 	}
 
+	statsMarkLimit();
 	cb.onAssistantText('_(raggiunto il limite massimo di passi dell\'agente)_');
 }

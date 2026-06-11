@@ -3,7 +3,7 @@
 	"publisher": "mgcoding",
 	"displayName": "MGCoding",
 	"description": "Agente di sviluppo spec-driven (Specs, Steering, Hooks, MCP) con LLM locale o Claude.",
-	"version": "0.8.5",
+	"version": "0.8.6",
 	"license": "MIT",
 	"engines": {
 		"vscode": "^1.5.0"
@@ -115,6 +115,10 @@
 			{
 				"command": "mgcoding.toggleAnalytics",
 				"title": "MGCoding: Statistiche d'uso (attiva/disattiva)"
+			},
+			{
+				"command": "mgcoding.agentStats",
+				"title": "MGCoding: Statistiche agente (locali)"
 			},
 			{
 				"command": "mgcoding.setApiKey",
@@ -698,6 +702,16 @@
 					"type": "boolean",
 					"default": true,
 					"description": "Dopo che l'agente modifica dei file, controlla automaticamente gli errori dei language server sui file toccati e glieli fa correggere (fino a 2 giri) prima di concludere."
+				},
+				"mgcoding.ollama.planFirst": {
+					"type": "boolean",
+					"default": true,
+					"description": "Planner/executor (richiede AutoModel attivo): se è installato anche un modello reasoning, prepara lui il piano del task e il modello coder lo esegue. Ciascuno fa ciò in cui è più bravo."
+				},
+				"mgcoding.ollama.compactPrompt": {
+					"type": "boolean",
+					"default": true,
+					"description": "Per i modelli locali piccoli (≤8B) usa un system prompt condensato: le istruzioni lunghe li confondono (instruction dilution). Disattiva per usare sempre il prompt completo."
 				},
 				"mgcoding.mcp.maxTools": {
 					"type": "number",
