@@ -18,7 +18,7 @@ import { ChatMessage, parseDataUrl } from '../llm/types';
 import { ProfileStore } from '../profile/profiles';
 import { codeIndex } from '../index/codeIndex';
 import { detectImageBackend, generateImage } from '../media/imageGen';
-import { runWorkflow, missingModels, loadWorkflow } from '../media/comfyHelper';
+import { runWorkflow, missingModels, missingNodes, loadWorkflow } from '../media/comfyHelper';
 import * as os from 'os';
 import { execFile } from 'child_process';
 
@@ -1108,18 +1108,22 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 			const { prompt, negative, aspect } = await this.enhanceImagePrompt(text);
 			const workflowName = cfg.get<string>('image.workflow', '');
 			const denoise = cfg.get<number>('image.denoise', 0.6);
+			const checkpoint = cfg.get<string>('image.checkpoint', '').trim() || undefined;
 			let result;
 			if (initImage) {
 				// Image-to-image: usa l'immagine allegata come base.
 				this.post({ type: 'toolResult', text: `${backend.label} · img2img (forza ${denoise})` });
-				result = await generateImage(backend, prompt, { aspect, count: 1, negative, initImage, denoise }, keys, this.abort.signal);
+				result = await generateImage(backend, prompt, { aspect, count: 1, negative, initImage, denoise, checkpoint }, keys, this.abort.signal);
 			} else if (backend.id === 'comfyui' && workflowName) {
-				// "Porta il tuo workflow": controlla le dipendenze e poi esegui quel workflow.
+				// "Porta il tuo workflow": controlla modelli E nodi mancanti, poi esegui.
 				const wf = await loadWorkflow(workflowName);
 				if (wf) {
-					const missing = await missingModels(backend.endpoint!, wf);
+					const [missing, nodes] = await Promise.all([missingModels(backend.endpoint!, wf), missingNodes(backend.endpoint!, wf)]);
 					if (missing.length) {
-						this.post({ type: 'assistant', text: `⚠ Il workflow «${workflowName}» richiede modelli non installati in ComfyUI: ${missing.join(', ')}.\nScaricali con **MGCoding: Scarica modello immagini** (o incolla l'URL), poi riprova.` });
+						this.post({ type: 'assistant', text: `⚠ Il workflow «${workflowName}» richiede modelli non installati: ${missing.join(', ')}.\nScaricali con **MGCoding: Scarica modello immagini**.` });
+					}
+					if (nodes.length) {
+						this.post({ type: 'assistant', text: `⚠ Il workflow «${workflowName}» usa nodi custom non installati: ${nodes.join(', ')}.\nInstallali con **MGCoding: Installa nodi mancanti (ComfyUI)** e riavvia ComfyUI.` });
 					}
 				}
 				this.post({ type: 'toolResult', text: `ComfyUI · workflow ${workflowName}` });
@@ -1127,7 +1131,7 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 				result = { images: imgs, mediaType: 'image/png', backendLabel: `ComfyUI · ${workflowName}` };
 			} else {
 				this.post({ type: 'toolResult', text: `${backend.label} · ${aspect}` });
-				result = await generateImage(backend, prompt, { aspect, count: 1, negative }, keys, this.abort.signal);
+				result = await generateImage(backend, prompt, { aspect, count: 1, negative, checkpoint }, keys, this.abort.signal);
 			}
 			const saved: string[] = [];
 			const dataUrls: string[] = [];
