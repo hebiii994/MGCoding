@@ -63,8 +63,13 @@ Tre modalità (pulsanti *Vibe* / *Spec* / *🎨 Img* in alto):
   `:7860`, ComfyUI su `:8188`), altrimenti usa una tua API key già impostata (Google Gemini →
   Imagen, OpenAI → gpt-image-1). Basta scrivere poche parole: il prompt viene espanso
   automaticamente e l'immagine salvata in `.mg/generated/`. Clicca l'immagine per aprirla.
+  **Image-to-image**: allega un'immagine (📎) in modalità Img e descrivi la modifica: MGCoding
+  la usa come base (img2img su ComfyUI/A1111, edit su OpenAI; non disponibile con Imagen). Quanto
+  trasformarla si regola con `image.denoise` (0.4 ritocco, 0.7-0.8 cambiamento forte).
+
   Impostazioni: `image.backend` (auto/locale/cloud), `image.localEndpoint`,
-  `image.comfyEndpoint`, `image.enhancePrompt`. (La generazione video arriverà in seguito.)
+  `image.comfyEndpoint`, `image.enhancePrompt`, `image.enhanceModel`, `image.denoise`.
+  (La generazione video arriverà in seguito.)
 
   **Helper ComfyUI** (comandi nella palette):
   - **`MGCoding: Seleziona cartella ComfyUI`** — scegli con un dialog la cartella di ComfyUI

@@ -3,7 +3,7 @@
 	"publisher": "mgcoding",
 	"displayName": "MGCoding",
 	"description": "Agente di sviluppo spec-driven (Specs, Steering, Hooks, MCP) con LLM locale o Claude.",
-	"version": "0.9.3",
+	"version": "0.9.4",
 	"license": "MIT",
 	"engines": {
 		"vscode": "^1.5.0"
@@ -756,6 +756,11 @@
 					"type": "boolean",
 					"default": true,
 					"description": "Migliora automaticamente il prompt immagine (lo espande in inglese e sceglie il rapporto d'aspetto) con il modello di chat attivo, così bastano poche parole."
+				},
+				"mgcoding.image.denoise": {
+					"type": "number",
+					"default": 0.6,
+					"description": "Image-to-image: quanto trasformare l'immagine allegata (0 = quasi identica, 1 = ignora la base). 0.4-0.5 per ritocchi, 0.7-0.8 per cambiamenti forti."
 				},
 				"mgcoding.image.enhanceModel": {
 					"type": "string",

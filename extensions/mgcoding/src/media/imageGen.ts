@@ -22,9 +22,13 @@ export interface ImageGenOptions {
 	count?: number;
 	/** Negative prompt (cosa evitare) per i backend che lo supportano (A1111, ComfyUI). */
 	negative?: string;
+	/** Image-to-image: immagine base in base64 (senza prefisso data:). */
+	initImage?: string;
+	/** Forza della trasformazione img2img (0 = identica, 1 = ignora la base). Default 0.6. */
+	denoise?: number;
 }
 
-const DEFAULT_NEGATIVE = 'low quality, blurry, deformed, bad anatomy, watermark, text';
+const DEFAULT_NEGATIVE = 'low quality, blurry, deformed, bad anatomy, extra limbs, extra arms, extra fingers, fused fingers, mutated hands, missing fingers, malformed, disfigured, watermark, text';
 
 export interface ImageGenResult {
 	/** Immagini in base64 grezzo (senza prefisso data:). */
@@ -114,6 +118,15 @@ export async function generateImage(
 	keys: CloudKeys,
 	signal?: AbortSignal
 ): Promise<ImageGenResult> {
+	// Image-to-image: percorsi dedicati per i backend che lo supportano.
+	if (opts.initImage) {
+		switch (backend.id) {
+			case 'a1111': return genA1111Img2Img(backend.endpoint!, prompt, opts, signal);
+			case 'comfyui': return genComfyImg2Img(backend.endpoint!, prompt, opts, signal);
+			case 'openai': return genOpenAIEdit(keys.openaiKey!, backend.model!, prompt, opts, signal);
+			case 'gemini': throw new Error('Image-to-image non supportato con Google Imagen: usa un backend locale (ComfyUI/A1111) o OpenAI.');
+		}
+	}
 	switch (backend.id) {
 		case 'a1111': return genA1111(backend.endpoint!, prompt, opts, signal);
 		case 'comfyui': return genComfy(backend.endpoint!, prompt, opts, signal);
@@ -256,4 +269,88 @@ async function genOpenAI(key: string, model: string, prompt: string, opts: Image
 		throw new Error('OpenAI non ha restituito immagini.');
 	}
 	return { images, mediaType: 'image/png', backendLabel: 'OpenAI gpt-image-1' };
+}
+
+// ---- Image-to-image ----
+
+async function genA1111Img2Img(endpoint: string, prompt: string, opts: ImageGenOptions, signal?: AbortSignal): Promise<ImageGenResult> {
+	const { width, height } = aspectToSize(opts.aspect);
+	const res = await fetch(`${endpoint}/sdapi/v1/img2img`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ init_images: [opts.initImage], prompt, negative_prompt: opts.negative ?? DEFAULT_NEGATIVE, denoising_strength: opts.denoise ?? 0.6, steps: 28, width, height, cfg_scale: 6, batch_size: Math.min(opts.count ?? 1, 4) }),
+		signal
+	});
+	if (!res.ok) {
+		throw new Error(`Server locale (img2img) ha risposto ${res.status}`);
+	}
+	const data = await res.json() as { images?: string[] };
+	if (!data.images?.length) {
+		throw new Error('Il server locale non ha restituito immagini.');
+	}
+	return { images: data.images, mediaType: 'image/png', backendLabel: 'Stable Diffusion locale (img2img)' };
+}
+
+async function genComfyImg2Img(endpoint: string, prompt: string, opts: ImageGenOptions, signal?: AbortSignal): Promise<ImageGenResult> {
+	const ep = endpoint.replace(/\/$/, '');
+	// 1) Carica l'immagine base in ComfyUI.
+	const fd = new FormData();
+	fd.append('image', new Blob([Buffer.from(opts.initImage!, 'base64')], { type: 'image/png' }), 'mgcoding-init.png');
+	fd.append('overwrite', 'true');
+	const up = await fetch(`${ep}/upload/image`, { method: 'POST', body: fd, signal });
+	if (!up.ok) {
+		throw new Error(`ComfyUI: upload immagine fallito (${up.status}).`);
+	}
+	const uploaded = await up.json() as { name: string; subfolder?: string };
+	// 2) Checkpoint disponibile.
+	const infoRes = await fetch(`${ep}/object_info/CheckpointLoaderSimple`, { signal });
+	const info = await infoRes.json() as Record<string, { input?: { required?: { ckpt_name?: unknown[][] } } }>;
+	const ckpt = (info?.CheckpointLoaderSimple?.input?.required?.ckpt_name?.[0] as string[] | undefined)?.[0];
+	if (!ckpt) {
+		throw new Error('ComfyUI è attivo ma non ha nessun checkpoint installato. Scaricane uno con "MGCoding: Scarica modello immagini".');
+	}
+	const imageRef = uploaded.subfolder ? `${uploaded.subfolder}/${uploaded.name}` : uploaded.name;
+	const seed = Math.floor(Math.random() * 1e15);
+	// 3) Workflow img2img: LoadImage -> VAEEncode -> KSampler(denoise) -> VAEDecode -> Save.
+	const workflow = {
+		'3': { class_type: 'KSampler', inputs: { seed, steps: 28, cfg: 6, sampler_name: 'euler', scheduler: 'normal', denoise: opts.denoise ?? 0.6, model: ['4', 0], positive: ['6', 0], negative: ['7', 0], latent_image: ['10', 0] } },
+		'4': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: ckpt } },
+		'6': { class_type: 'CLIPTextEncode', inputs: { text: prompt, clip: ['4', 1] } },
+		'7': { class_type: 'CLIPTextEncode', inputs: { text: opts.negative ?? DEFAULT_NEGATIVE, clip: ['4', 1] } },
+		'8': { class_type: 'VAEDecode', inputs: { samples: ['3', 0], vae: ['4', 2] } },
+		'9': { class_type: 'SaveImage', inputs: { filename_prefix: 'MGCoding', images: ['8', 0] } },
+		'10': { class_type: 'VAEEncode', inputs: { pixels: ['11', 0], vae: ['4', 2] } },
+		'11': { class_type: 'LoadImage', inputs: { image: imageRef } }
+	};
+	const images = await queueAndCollect(ep, workflow, signal);
+	return { images, mediaType: 'image/png', backendLabel: 'ComfyUI locale (img2img)' };
+}
+
+async function genOpenAIEdit(key: string, model: string, prompt: string, opts: ImageGenOptions, signal?: AbortSignal): Promise<ImageGenResult> {
+	const fd = new FormData();
+	fd.append('model', model);
+	fd.append('prompt', prompt);
+	fd.append('size', aspectToOpenAISize(opts.aspect));
+	fd.append('image', new Blob([Buffer.from(opts.initImage!, 'base64')], { type: 'image/png' }), 'image.png');
+	const res = await fetch('https://api.openai.com/v1/images/edits', {
+		method: 'POST', headers: { authorization: `Bearer ${key}` }, body: fd, signal
+	});
+	if (!res.ok) {
+		const t = await res.text().catch(() => '');
+		throw new Error(`OpenAI (edit) ha risposto ${res.status}: ${t.slice(0, 200)}`);
+	}
+	const data = await res.json() as { data?: { b64_json?: string; url?: string }[] };
+	const images: string[] = [];
+	for (const d of data.data ?? []) {
+		if (d.b64_json) {
+			images.push(d.b64_json);
+		} else if (d.url) {
+			const r = await fetch(d.url, { signal });
+			images.push(Buffer.from(await r.arrayBuffer()).toString('base64'));
+		}
+	}
+	if (!images.length) {
+		throw new Error('OpenAI non ha restituito immagini.');
+	}
+	return { images, mediaType: 'image/png', backendLabel: 'OpenAI gpt-image-1 (edit)' };
 }

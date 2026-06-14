@@ -14,7 +14,7 @@ import { listSteeringNames } from '../steering/steering';
 import { RunReporter } from '../run/runView';
 import { WhisperEngine } from '../stt/whisperEngine';
 import { ProviderRegistry } from '../llm/registry';
-import { ChatMessage } from '../llm/types';
+import { ChatMessage, parseDataUrl } from '../llm/types';
 import { ProfileStore } from '../profile/profiles';
 import { codeIndex } from '../index/codeIndex';
 import { detectImageBackend, generateImage } from '../media/imageGen';
@@ -921,7 +921,7 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 			if (session.title === 'Nuova sessione') {
 				session.title = (text || 'Immagine').slice(0, 40);
 			}
-			await this.handleImageMessage(text);
+			await this.handleImageMessage(text, images);
 			return;
 		}
 		if (session.mode === 'free') {
@@ -1037,7 +1037,7 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 	 */
 	private async enhanceImagePrompt(text: string): Promise<{ prompt: string; negative: string; aspect: string }> {
 		const QUALITY = 'highly detailed, sharp focus, intricate details, 8k, professional';
-		const DEFAULT_NEG = 'low quality, blurry, deformed, bad anatomy, watermark, text';
+		const DEFAULT_NEG = 'low quality, blurry, deformed, bad anatomy, extra limbs, extra arms, extra fingers, fused fingers, mutated hands, missing fingers, malformed, disfigured, watermark, text';
 		const imgCfg = vscode.workspace.getConfiguration('mgcoding');
 		if (!imgCfg.get<boolean>('image.enhancePrompt', true)) {
 			return { prompt: text, negative: DEFAULT_NEG, aspect: '1:1' };
@@ -1075,11 +1075,17 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 		return { prompt: `${text}, ${QUALITY}`, negative: DEFAULT_NEG, aspect: '1:1' };
 	}
 
-	/** Genera immagini dal prompt: auto-detect del backend, generazione, salvataggio e display. */
-	private async handleImageMessage(text: string): Promise<void> {
+	/** Genera immagini dal prompt: auto-detect del backend, generazione, salvataggio e display.
+	 *  Se è allegata un'immagine, fa image-to-image (la usa come base). */
+	private async handleImageMessage(text: string, images?: string[]): Promise<void> {
 		const session = this.active();
-		session.messages.push({ role: 'user', content: text });
-		this.mirror?.('user', text);
+		const userMsg: ChatMessage = { role: 'user', content: text };
+		const initImage = images?.length ? (parseDataUrl(images[0])?.data) : undefined;
+		if (images?.length) {
+			userMsg.images = images.slice(0, 1);
+		}
+		session.messages.push(userMsg);
+		this.mirror?.('user', text + (initImage ? ' (img2img)' : ''));
 		this.post({ type: 'busy', value: true });
 		this.abort = new AbortController();
 		const cfg = vscode.workspace.getConfiguration('mgcoding');
@@ -1101,8 +1107,13 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 			}
 			const { prompt, negative, aspect } = await this.enhanceImagePrompt(text);
 			const workflowName = cfg.get<string>('image.workflow', '');
+			const denoise = cfg.get<number>('image.denoise', 0.6);
 			let result;
-			if (backend.id === 'comfyui' && workflowName) {
+			if (initImage) {
+				// Image-to-image: usa l'immagine allegata come base.
+				this.post({ type: 'toolResult', text: `${backend.label} · img2img (forza ${denoise})` });
+				result = await generateImage(backend, prompt, { aspect, count: 1, negative, initImage, denoise }, keys, this.abort.signal);
+			} else if (backend.id === 'comfyui' && workflowName) {
 				// "Porta il tuo workflow": controlla le dipendenze e poi esegui quel workflow.
 				const wf = await loadWorkflow(workflowName);
 				if (wf) {
