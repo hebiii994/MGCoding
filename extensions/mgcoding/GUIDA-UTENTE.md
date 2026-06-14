@@ -81,7 +81,11 @@ Tre modalità (pulsanti *Vibe* / *Spec* / *🎨 Img* in alto):
   di ComfyUI (connesso/checkpoint), scelta di backend/checkpoint/workflow dai menu, parametri con
   slider e valori consigliati (migliora prompt, modello prompt, forza img2img), pulsanti per tutte
   le azioni rapide (cartella, scarica modello, checkpoint, workflow, nodi mancanti) e la **galleria**
-  delle immagini generate (clic per aprirle). È il modo più comodo per gestire tutto senza palette.
+  delle immagini generate (clic per aprirle, **✕ per eliminarle**). La galleria ha **📂 Sfoglia**
+  (scegli la cartella da mostrare, `image.galleryFolder`) e **↗ Apri** (apri la cartella nel sistema).
+  Le immagini generate da qualsiasi modalità (anche dal pulsante 🎨 Genera in Libera/Vibe) finiscono
+  qui; se non c'è un progetto aperto vengono salvate in una cartella nella tua home. È il modo più
+  comodo per gestire tutto senza palette.
 
   **Helper ComfyUI** (comandi nella palette):
   - **`MGCoding: Seleziona cartella ComfyUI`** — scegli con un dialog la cartella di ComfyUI

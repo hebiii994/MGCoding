@@ -9,11 +9,39 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { queueAndCollect } from './imageGen';
 
 const execAsync = promisify(exec);
+
+/**
+ * Cartella dove salvare/leggere le immagini generate. Priorità: cartella scelta dall'utente
+ * (image.galleryFolder) → .mg/generated del workspace → fallback globale in home (così funziona
+ * anche senza una cartella di lavoro aperta — prima in quel caso le immagini non si salvavano).
+ */
+export function generatedDirUri(): vscode.Uri {
+	const custom = vscode.workspace.getConfiguration('mgcoding').get<string>('image.galleryFolder', '').trim();
+	if (custom) {
+		return vscode.Uri.file(custom);
+	}
+	const ws = vscode.workspace.workspaceFolders?.[0];
+	if (ws) {
+		return vscode.Uri.joinPath(ws.uri, '.mg', 'generated');
+	}
+	return vscode.Uri.file(path.join(os.homedir(), '.mgcoding', 'generated'));
+}
+
+/** Sceglie una cartella per la galleria delle immagini (image.galleryFolder). */
+export async function pickGalleryFolder(): Promise<void> {
+	const sel = await vscode.window.showOpenDialog({ canSelectFolders: true, canSelectFiles: false, canSelectMany: false, title: 'Cartella della galleria immagini', openLabel: 'Usa questa cartella' });
+	if (!sel?.length) {
+		return;
+	}
+	await vscode.workspace.getConfiguration('mgcoding').update('image.galleryFolder', sel[0].fsPath, vscode.ConfigurationTarget.Global);
+	vscode.window.showInformationMessage(`Galleria: ${sel[0].fsPath}`);
+}
 
 const DEC = new TextDecoder();
 

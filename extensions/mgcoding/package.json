@@ -3,7 +3,7 @@
 	"publisher": "mgcoding",
 	"displayName": "MGCoding",
 	"description": "Agente di sviluppo spec-driven (Specs, Steering, Hooks, MCP) con LLM locale o Claude.",
-	"version": "0.9.9",
+	"version": "0.9.10",
 	"license": "MIT",
 	"engines": {
 		"vscode": "^1.5.0"
@@ -155,6 +155,10 @@
 			{
 				"command": "mgcoding.importWorkflow",
 				"title": "MGCoding: Importa workflow ComfyUI (da file)"
+			},
+			{
+				"command": "mgcoding.pickGalleryFolder",
+				"title": "MGCoding: Cartella galleria immagini"
 			},
 			{
 				"command": "mgcoding.setApiKey",
@@ -765,6 +769,11 @@
 					"type": "string",
 					"default": "http://127.0.0.1:8188",
 					"description": "Endpoint del server ComfyUI locale."
+				},
+				"mgcoding.image.galleryFolder": {
+					"type": "string",
+					"default": "",
+					"description": "Cartella dove vengono salvate e mostrate le immagini generate (galleria Image Studio). Vuoto = .mg/generated del progetto (o una cartella nella home se nessun progetto è aperto). Impostala con 'MGCoding: Cartella galleria immagini'."
 				},
 				"mgcoding.image.comfyRoot": {
 					"type": "string",

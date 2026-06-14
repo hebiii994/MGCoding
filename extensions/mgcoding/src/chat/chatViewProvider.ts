@@ -18,7 +18,7 @@ import { ChatMessage, parseDataUrl } from '../llm/types';
 import { ProfileStore } from '../profile/profiles';
 import { codeIndex } from '../index/codeIndex';
 import { detectImageBackend, generateImage } from '../media/imageGen';
-import { runWorkflow, missingModels, missingNodes, loadWorkflow } from '../media/comfyHelper';
+import { runWorkflow, missingModels, missingNodes, loadWorkflow, generatedDirUri } from '../media/comfyHelper';
 import * as os from 'os';
 import { execFile } from 'child_process';
 
@@ -1209,11 +1209,7 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 
 	/** Cartella .mg/generated/ del workspace (creata se manca), o undefined senza workspace. */
 	private async generatedDir(): Promise<vscode.Uri | undefined> {
-		const folder = vscode.workspace.workspaceFolders?.[0];
-		if (!folder) {
-			return undefined;
-		}
-		const dir = vscode.Uri.joinPath(folder.uri, '.mg', 'generated');
+		const dir = generatedDirUri();
 		await vscode.workspace.fs.createDirectory(dir);
 		return dir;
 	}
