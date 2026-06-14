@@ -5,7 +5,7 @@
 import * as vscode from 'vscode';
 import { runAgent } from './agent/agentLoop';
 import { initAgentStats, statsSummary } from './agent/agentStats';
-import { pickComfyFolder, downloadImageModel, listWorkflows, listCheckpoints, installMissingNodesForWorkflow, importWorkflow } from './media/comfyHelper';
+import { pickComfyFolder, downloadImageModel, listWorkflows, listCheckpoints, installMissingNodesForWorkflow, importWorkflow, pickGalleryFolder } from './media/comfyHelper';
 import { ImageStudioProvider } from './media/imageStudioView';
 import { ChatViewProvider } from './chat/chatViewProvider';
 import { registerDiffApproval } from './edit/diffApproval';
@@ -164,6 +164,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			vscode.window.showInformationMessage(pick.startsWith('(auto') ? 'Checkpoint: automatico.' : `Checkpoint attivo: ${pick}`);
 		}),
 		vscode.commands.registerCommand('mgcoding.importWorkflow', () => importWorkflow()),
+		vscode.commands.registerCommand('mgcoding.pickGalleryFolder', () => pickGalleryFolder()),
 		vscode.commands.registerCommand('mgcoding.installMissingNodes', async () => {
 			const cfg = vscode.workspace.getConfiguration('mgcoding');
 			const wf = cfg.get<string>('image.workflow', '');
