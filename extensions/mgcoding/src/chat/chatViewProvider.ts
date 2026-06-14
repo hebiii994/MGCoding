@@ -91,6 +91,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	hookEvents?: { promptSubmit(text: string): void; agentDone(): void };
 	/** Notifica quando viene generata un'immagine (per aggiornare l'Image Studio). */
 	onImageGenerated?: () => void;
+	/** Ultima immagine allegata per sessione (data URL): riusata come base per img2img dal pulsante Genera. */
+	private readonly sourceImages = new Map<string, string>();
 	/** Testo in attesa di scelta (offerta sessione Spec / prioritizzazione). */
 	private pendingSpecText = '';
 	/** Spec estratte da un messaggio multi-spec, in attesa di scelta. */
@@ -273,7 +275,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 					{
 						const t = String((msg as { text?: string }).text ?? '').trim();
 						if (t) {
-							await this.handleImageMessage(t);
+							// Se nella sessione c'è un'immagine allegata, la riusa come base (img2img).
+							const src = this.sourceImages.get(this.activeId);
+							await this.handleImageMessage(t, src ? [src] : undefined);
 						}
 					}
 					break;
@@ -938,7 +942,7 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 			if (session.title === 'Nuova sessione') {
 				session.title = (text || 'Chat').slice(0, 40);
 			}
-			await this.handleFreeMessage(text);
+			await this.handleFreeMessage(text, images);
 			return;
 		}
 		if (session.mode === 'spec') {
@@ -967,6 +971,8 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 		const userMsg: ChatMessage = { role: 'user', content: await this.augmentWithProviders(withMentions) };
 		if (images?.length) {
 			userMsg.images = images.slice(0, 4);
+			// Ricorda l'immagine: il pulsante "Genera immagine" la userà come base (img2img).
+			this.sourceImages.set(this.activeId, images[0]);
 		}
 		session.messages.push(userMsg);
 		this.mirror?.('user', text || '(immagine)');
@@ -1011,14 +1017,21 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 	// ---- Modalità Libera: chat pura, senza contesto progetto né tool ----
 
 	/** Conversazione semplice: nessun system prompt agentico, nessun contesto del workspace. */
-	private async handleFreeMessage(text: string): Promise<void> {
+	private async handleFreeMessage(text: string, images?: string[]): Promise<void> {
 		const session = this.active();
-		session.messages.push({ role: 'user', content: text });
+		const userMsg: ChatMessage = { role: 'user', content: text };
+		if (images?.length) {
+			userMsg.images = images.slice(0, 1);
+			// Ricorda l'immagine: il pulsante "Genera immagine" la userà come base (img2img).
+			this.sourceImages.set(this.activeId, images[0]);
+		}
+		session.messages.push(userMsg);
 		this.mirror?.('user', text);
 		this.post({ type: 'busy', value: true });
 		await this.compactIfNeeded(session);
 		this.abort = new AbortController();
-		const sys = 'Sei un assistente AI utile, amichevole e diretto. Conversi liberamente con l\'utente: rispondi in modo chiaro e utile, in italiano se l\'utente scrive in italiano. NON sei legato ad alcun progetto o codice: non assumere che l\'utente voglia sviluppare software se non lo chiede esplicitamente. Usa Markdown quando aiuta. NON puoi eseguire azioni, comandi o tool e NON puoi generare immagini tu stesso: NON scrivere blocchi tool/JSON né fingere di farlo. Se ti chiedono un\'immagine, scrivi un ottimo prompt e di\' all\'utente di premere il pulsante "🎨 Genera immagine" sotto la tua risposta (oppure la modalità Img).';
+		const hasImg = !!images?.length;
+		const sys = `Sei un assistente AI utile, amichevole e diretto. Conversi liberamente con l'utente: rispondi in modo chiaro e utile, in italiano se l'utente scrive in italiano. NON sei legato ad alcun progetto o codice: non assumere che l'utente voglia sviluppare software se non lo chiede esplicitamente. Usa Markdown quando aiuta. NON puoi eseguire azioni, comandi o tool e NON puoi generare immagini tu stesso: NON scrivere blocchi tool/JSON né fingere di farlo.${hasImg ? ' L\'utente ha allegato un\'IMMAGINE: se chiede di modificarla, scrivi un prompt in INGLESE che descriva il RISULTATO desiderato (l\'immagine allegata verrà usata come base per img2img quando l\'utente preme "🎨 Genera immagine").' : ' Se ti chiedono un\'immagine, scrivi un ottimo prompt e di\' all\'utente di premere il pulsante "🎨 Genera immagine" sotto la tua risposta (oppure la modalità Img).'}`;
 		let streamBuf = '';
 		try {
 			this.post({ type: 'streamStart' });
