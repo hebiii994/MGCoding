@@ -3,7 +3,7 @@
 	"publisher": "mgcoding",
 	"displayName": "MGCoding",
 	"description": "Agente di sviluppo spec-driven (Specs, Steering, Hooks, MCP) con LLM locale o Claude.",
-	"version": "0.9.7",
+	"version": "0.9.8",
 	"license": "MIT",
 	"engines": {
 		"vscode": "^1.5.0"
@@ -151,6 +151,10 @@
 			{
 				"command": "mgcoding.installMissingNodes",
 				"title": "MGCoding: Installa nodi mancanti (ComfyUI)"
+			},
+			{
+				"command": "mgcoding.importWorkflow",
+				"title": "MGCoding: Importa workflow ComfyUI (da file)"
 			},
 			{
 				"command": "mgcoding.setApiKey",
@@ -781,6 +785,13 @@
 					"type": "boolean",
 					"default": true,
 					"description": "Migliora automaticamente il prompt immagine (lo espande in inglese e sceglie il rapporto d'aspetto) con il modello di chat attivo, così bastano poche parole."
+				},
+				"mgcoding.image.aspect": {
+					"type": "string",
+					"enum": ["auto", "1:1", "2:3", "3:2", "9:16", "16:9", "3:4", "4:3"],
+					"enumDescriptions": ["Lo sceglie l'ottimizzatore in base alla richiesta", "Quadrato", "Verticale (ritratti, full body)", "Orizzontale (foto)", "Verticale alto (telefono, full body)", "Orizzontale ampio (panorami)", "Verticale 3:4", "Orizzontale 4:3"],
+					"default": "auto",
+					"description": "Rapporto d'aspetto delle immagini generate. Per una persona a figura intera (full body) usa un formato VERTICALE come 2:3 o 9:16. 'auto' lo fa scegliere all'ottimizzatore del prompt."
 				},
 				"mgcoding.image.denoise": {
 					"type": "number",

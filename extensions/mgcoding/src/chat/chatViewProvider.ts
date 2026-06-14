@@ -1061,14 +1061,14 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 		try {
 			// Few-shot che mostra come AMPLIFICARE l'intento: indispensabile coi modelli deboli/coder,
 			// che altrimenti "addolciscono" la richiesta (es. "gattino killer" -> gatto qualsiasi).
-			const sys = `Sei un esperto di prompt per modelli di generazione immagini (diffusion). Espandi la richiesta dell'utente in un prompt DETTAGLIATO in INGLESE, AMPLIFICANDO intento, soggetto e atmosfera: NON addolcire e NON genericizzare (se l'utente dice "killer", l'immagine deve risultare minacciosa/feroce). Includi soggetto, mood, stile artistico, illuminazione, dettagli e qualità. Produci anche un "negative" (cosa evitare) e scegli "aspect".
-Rispondi SOLO con JSON: {"prompt":"...","negative":"...","aspect":"1:1|16:9|9:16|4:3|3:4"}.
+			const sys = `Sei un esperto di prompt per modelli di generazione immagini (diffusion). Espandi la richiesta dell'utente in un prompt DETTAGLIATO in INGLESE, AMPLIFICANDO intento, soggetto e atmosfera: NON addolcire e NON genericizzare (se l'utente dice "killer", l'immagine deve risultare minacciosa/feroce). Includi soggetto, mood, stile artistico, illuminazione, dettagli e qualità. Per una persona A FIGURA INTERA usa termini di inquadratura ("full body shot, head to toe, standing, facing the camera, full figure visible, feet visible") e un "aspect" VERTICALE (2:3 o 9:16). Produci anche un "negative" e scegli "aspect".
+Rispondi SOLO con JSON: {"prompt":"...","negative":"...","aspect":"1:1|2:3|3:2|9:16|16:9|4:3|3:4"}.
 Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with piercing glowing eyes and bared fangs, battle-scarred fur, stalking through a dark gritty alley, dramatic cinematic lighting, ominous atmosphere, hyper detailed, sharp focus, 8k","negative":"cute, soft, friendly, cartoon, low quality, blurry, deformed","aspect":"1:1"}`;
 			const raw = await complete(this.registry, [{ role: 'user', content: text }], sys, undefined, undefined, true);
 			const m = raw.match(/\{[\s\S]*\}/);
 			if (m) {
 				const obj = JSON.parse(m[0]) as { prompt?: string; negative?: string; aspect?: string };
-				const aspect = ['1:1', '16:9', '9:16', '4:3', '3:4'].includes(obj.aspect ?? '') ? obj.aspect! : '1:1';
+				const aspect = ['1:1', '16:9', '9:16', '4:3', '3:4', '2:3', '3:2'].includes(obj.aspect ?? '') ? obj.aspect! : '1:1';
 				if (obj.prompt && obj.prompt.trim()) {
 					const prompt = /detail|8k|quality|focus/i.test(obj.prompt) ? obj.prompt.trim() : `${obj.prompt.trim()}, ${QUALITY}`;
 					return { prompt, negative: (obj.negative?.trim() || DEFAULT_NEG), aspect };
@@ -1115,7 +1115,11 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 				session.messages.push({ role: 'assistant', content: msg });
 				return;
 			}
-			const { prompt, negative, aspect } = await this.enhanceImagePrompt(text);
+			const enhanced = await this.enhanceImagePrompt(text);
+			const { prompt, negative } = enhanced;
+			// Aspetto: se l'utente lo forza nelle impostazioni (Image Studio), ha la priorità.
+			const aspectPref = cfg.get<string>('image.aspect', 'auto');
+			const aspect = aspectPref && aspectPref !== 'auto' ? aspectPref : enhanced.aspect;
 			const workflowName = cfg.get<string>('image.workflow', '');
 			const denoise = cfg.get<number>('image.denoise', 0.6);
 			const checkpoint = cfg.get<string>('image.checkpoint', '').trim() || undefined;

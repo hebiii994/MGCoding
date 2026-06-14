@@ -197,6 +197,42 @@ export async function listWorkflows(): Promise<string[]> {
 	}
 }
 
+/** Importa un workflow da file (.json formato API) in .mg/workflows/ e lo imposta come attivo. */
+export async function importWorkflow(): Promise<void> {
+	const dir = workflowsDir();
+	if (!dir) {
+		vscode.window.showWarningMessage('Apri una cartella di lavoro per importare un workflow.');
+		return;
+	}
+	const sel = await vscode.window.showOpenDialog({
+		canSelectMany: false, filters: { 'Workflow ComfyUI (JSON)': ['json'] },
+		title: 'Importa un workflow ComfyUI (formato API)', openLabel: 'Importa'
+	});
+	if (!sel?.length) {
+		return;
+	}
+	let parsed: Record<string, { class_type?: unknown }>;
+	try {
+		parsed = JSON.parse(DEC.decode(await vscode.workspace.fs.readFile(sel[0])));
+	} catch {
+		vscode.window.showErrorMessage('File non valido: non è un JSON.');
+		return;
+	}
+	// Verifica che sia formato API (nodi con class_type), non il formato UI (nodes[]).
+	const isApi = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+		&& Object.values(parsed).some(n => n && typeof n === 'object' && 'class_type' in n);
+	if (!isApi) {
+		vscode.window.showWarningMessage('Questo sembra un workflow in formato UI. In ComfyUI esportalo con "Save (API Format)" e reimportalo, altrimenti MGCoding non può iniettarci il prompt.');
+		return;
+	}
+	const baseName = path.basename(sel[0].fsPath).replace(/\.json$/i, '').replace(/[^a-z0-9_-]+/gi, '-') || 'workflow';
+	await vscode.workspace.fs.createDirectory(dir);
+	const dest = vscode.Uri.joinPath(dir, `${baseName}.json`);
+	await vscode.workspace.fs.writeFile(dest, new TextEncoder().encode(JSON.stringify(parsed, null, 2)));
+	await vscode.workspace.getConfiguration('mgcoding').update('image.workflow', `${baseName}.json`, vscode.ConfigurationTarget.Global);
+	vscode.window.showInformationMessage(`Workflow importato e attivato: ${baseName}.json`);
+}
+
 /** Carica il JSON di un workflow per nome file. */
 export async function loadWorkflow(name: string): Promise<Record<string, { class_type: string; inputs: Record<string, unknown> }> | undefined> {
 	const dir = workflowsDir();
