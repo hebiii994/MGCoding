@@ -20,7 +20,11 @@ export interface ImageGenOptions {
 	/** Rapporto d'aspetto richiesto: "1:1" | "16:9" | "9:16" | "4:3" | "3:4". */
 	aspect?: string;
 	count?: number;
+	/** Negative prompt (cosa evitare) per i backend che lo supportano (A1111, ComfyUI). */
+	negative?: string;
 }
+
+const DEFAULT_NEGATIVE = 'low quality, blurry, deformed, bad anatomy, watermark, text';
 
 export interface ImageGenResult {
 	/** Immagini in base64 grezzo (senza prefisso data:). */
@@ -123,7 +127,7 @@ async function genA1111(endpoint: string, prompt: string, opts: ImageGenOptions,
 	const res = await fetch(`${endpoint}/sdapi/v1/txt2img`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify({ prompt, steps: 28, width, height, batch_size: Math.min(opts.count ?? 1, 4), cfg_scale: 6 }),
+		body: JSON.stringify({ prompt, negative_prompt: opts.negative ?? DEFAULT_NEGATIVE, steps: 28, width, height, batch_size: Math.min(opts.count ?? 1, 4), cfg_scale: 6 }),
 		signal
 	});
 	if (!res.ok) {
@@ -156,7 +160,7 @@ async function genComfy(endpoint: string, prompt: string, opts: ImageGenOptions,
 		'4': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: ckpt } },
 		'5': { class_type: 'EmptyLatentImage', inputs: { width, height, batch_size: 1 } },
 		'6': { class_type: 'CLIPTextEncode', inputs: { text: prompt, clip: ['4', 1] } },
-		'7': { class_type: 'CLIPTextEncode', inputs: { text: 'low quality, blurry, deformed', clip: ['4', 1] } },
+		'7': { class_type: 'CLIPTextEncode', inputs: { text: opts.negative ?? DEFAULT_NEGATIVE, clip: ['4', 1] } },
 		'8': { class_type: 'VAEDecode', inputs: { samples: ['3', 0], vae: ['4', 2] } },
 		'9': { class_type: 'SaveImage', inputs: { filename_prefix: 'MGCoding', images: ['8', 0] } }
 	};

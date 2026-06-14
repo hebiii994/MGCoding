@@ -971,25 +971,33 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 	 * Espande un prompt breve (in italiano) in un buon prompt inglese per i modelli diffusion
 	 * e sceglie il rapporto d'aspetto. Best-effort: se l'LLM non è disponibile usa il prompt grezzo.
 	 */
-	private async enhanceImagePrompt(text: string): Promise<{ prompt: string; aspect: string }> {
+	private async enhanceImagePrompt(text: string): Promise<{ prompt: string; negative: string; aspect: string }> {
+		const QUALITY = 'highly detailed, sharp focus, intricate details, 8k, professional';
+		const DEFAULT_NEG = 'low quality, blurry, deformed, bad anatomy, watermark, text';
 		if (!vscode.workspace.getConfiguration('mgcoding').get<boolean>('image.enhancePrompt', true)) {
-			return { prompt: text, aspect: '1:1' };
+			return { prompt: text, negative: DEFAULT_NEG, aspect: '1:1' };
 		}
 		try {
-			const sys = 'Trasforma la richiesta dell\'utente in un prompt EFFICACE in INGLESE per un modello di generazione immagini (diffusion). Aggiungi dettagli utili su soggetto, stile, luce, composizione, qualità. Scegli il rapporto d\'aspetto adatto. Rispondi SOLO con JSON: {"prompt":"...","aspect":"1:1|16:9|9:16|4:3|3:4"}. Nessun altro testo.';
+			// Few-shot che mostra come AMPLIFICARE l'intento: indispensabile coi modelli deboli/coder,
+			// che altrimenti "addolciscono" la richiesta (es. "gattino killer" -> gatto qualsiasi).
+			const sys = `Sei un esperto di prompt per modelli di generazione immagini (diffusion). Espandi la richiesta dell'utente in un prompt DETTAGLIATO in INGLESE, AMPLIFICANDO intento, soggetto e atmosfera: NON addolcire e NON genericizzare (se l'utente dice "killer", l'immagine deve risultare minacciosa/feroce). Includi soggetto, mood, stile artistico, illuminazione, dettagli e qualità. Produci anche un "negative" (cosa evitare) e scegli "aspect".
+Rispondi SOLO con JSON: {"prompt":"...","negative":"...","aspect":"1:1|16:9|9:16|4:3|3:4"}.
+Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with piercing glowing eyes and bared fangs, battle-scarred fur, stalking through a dark gritty alley, dramatic cinematic lighting, ominous atmosphere, hyper detailed, sharp focus, 8k","negative":"cute, soft, friendly, cartoon, low quality, blurry, deformed","aspect":"1:1"}`;
 			const raw = await complete(this.registry, [{ role: 'user', content: text }], sys, undefined, undefined, true);
 			const m = raw.match(/\{[\s\S]*\}/);
 			if (m) {
-				const obj = JSON.parse(m[0]) as { prompt?: string; aspect?: string };
+				const obj = JSON.parse(m[0]) as { prompt?: string; negative?: string; aspect?: string };
 				const aspect = ['1:1', '16:9', '9:16', '4:3', '3:4'].includes(obj.aspect ?? '') ? obj.aspect! : '1:1';
 				if (obj.prompt && obj.prompt.trim()) {
-					return { prompt: obj.prompt.trim(), aspect };
+					const prompt = /detail|8k|quality|focus/i.test(obj.prompt) ? obj.prompt.trim() : `${obj.prompt.trim()}, ${QUALITY}`;
+					return { prompt, negative: (obj.negative?.trim() || DEFAULT_NEG), aspect };
 				}
 			}
 		} catch {
 			// enhancement best-effort
 		}
-		return { prompt: text, aspect: '1:1' };
+		// Fallback: testo utente + booster qualità (meglio del prompt nudo).
+		return { prompt: `${text}, ${QUALITY}`, negative: DEFAULT_NEG, aspect: '1:1' };
 	}
 
 	/** Genera immagini dal prompt: auto-detect del backend, generazione, salvataggio e display. */
@@ -1016,7 +1024,7 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 				session.messages.push({ role: 'assistant', content: msg });
 				return;
 			}
-			const { prompt, aspect } = await this.enhanceImagePrompt(text);
+			const { prompt, negative, aspect } = await this.enhanceImagePrompt(text);
 			const workflowName = cfg.get<string>('image.workflow', '');
 			let result;
 			if (backend.id === 'comfyui' && workflowName) {
@@ -1033,7 +1041,7 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 				result = { images: imgs, mediaType: 'image/png', backendLabel: `ComfyUI · ${workflowName}` };
 			} else {
 				this.post({ type: 'toolResult', text: `${backend.label} · ${aspect}` });
-				result = await generateImage(backend, prompt, { aspect, count: 1 }, keys, this.abort.signal);
+				result = await generateImage(backend, prompt, { aspect, count: 1, negative }, keys, this.abort.signal);
 			}
 			const saved: string[] = [];
 			const dataUrls: string[] = [];
