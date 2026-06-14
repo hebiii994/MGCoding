@@ -89,6 +89,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	private abort?: AbortController;
 	/** Notifiche per gli Agent Hooks globali (onPromptSubmit / onAgentDone), impostate dall'host. */
 	hookEvents?: { promptSubmit(text: string): void; agentDone(): void };
+	/** Notifica quando viene generata un'immagine (per aggiornare l'Image Studio). */
+	onImageGenerated?: () => void;
 	/** Testo in attesa di scelta (offerta sessione Spec / prioritizzazione). */
 	private pendingSpecText = '';
 	/** Spec estratte da un messaggio multi-spec, in attesa di scelta. */
@@ -1152,6 +1154,7 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 			this.mirror?.('assistant', `🎨 Immagine generata (${result.backendLabel})`);
 			// In cronologia salviamo una nota leggera col percorso (niente base64 nel globalState).
 			session.messages.push({ role: 'assistant', content: `${caption}\n\nPrompt: ${prompt}` });
+			this.onImageGenerated?.();
 		} catch (err) {
 			const text2 = err instanceof Error ? err.message : String(err);
 			this.post({ type: 'error', text: `Generazione immagine fallita: ${text2}` });

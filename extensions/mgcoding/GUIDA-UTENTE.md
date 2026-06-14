@@ -71,6 +71,12 @@ Tre modalità (pulsanti *Vibe* / *Spec* / *🎨 Img* in alto):
   `image.comfyEndpoint`, `image.enhancePrompt`, `image.enhanceModel`, `image.denoise`.
   (La generazione video arriverà in seguito.)
 
+  **🖼️ Image Studio** (pannello nella barra MGCoding a sinistra): un cruscotto visuale con stato
+  di ComfyUI (connesso/checkpoint), scelta di backend/checkpoint/workflow dai menu, parametri con
+  slider e valori consigliati (migliora prompt, modello prompt, forza img2img), pulsanti per tutte
+  le azioni rapide (cartella, scarica modello, checkpoint, workflow, nodi mancanti) e la **galleria**
+  delle immagini generate (clic per aprirle). È il modo più comodo per gestire tutto senza palette.
+
   **Helper ComfyUI** (comandi nella palette):
   - **`MGCoding: Seleziona cartella ComfyUI`** — scegli con un dialog la cartella di ComfyUI
     (anche quella portable: trova da solo `models/`). Serve per scaricare i modelli al posto giusto.

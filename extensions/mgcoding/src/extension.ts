@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 import { runAgent } from './agent/agentLoop';
 import { initAgentStats, statsSummary } from './agent/agentStats';
 import { pickComfyFolder, downloadImageModel, listWorkflows, listCheckpoints, installMissingNodesForWorkflow } from './media/comfyHelper';
+import { ImageStudioProvider } from './media/imageStudioView';
 import { ChatViewProvider } from './chat/chatViewProvider';
 import { registerDiffApproval } from './edit/diffApproval';
 import { inlineEdit } from './edit/inlineEdit';
@@ -127,11 +128,13 @@ export function activate(context: vscode.ExtensionContext): void {
 	const hooksTree = new HooksTreeProvider();
 	const steeringTree = new SteeringTreeProvider();
 	const mcpTree = new McpTreeProvider(() => mcpManager.getStatuses());
+	const imageStudio = new ImageStudioProvider(context.extensionUri);
 	context.subscriptions.push(
 		vscode.window.registerTreeDataProvider('mgcoding.specs', specsTree),
 		vscode.window.registerTreeDataProvider('mgcoding.hooks', hooksTree),
 		vscode.window.registerTreeDataProvider('mgcoding.steering', steeringTree),
-		vscode.window.registerTreeDataProvider('mgcoding.mcp', mcpTree)
+		vscode.window.registerTreeDataProvider('mgcoding.mcp', mcpTree),
+		vscode.window.registerWebviewViewProvider(ImageStudioProvider.viewType, imageStudio)
 	);
 
 	// Telemetria LOCALE dell'agente (iterazioni/tool/errori per run; nessun dato lascia il PC).
@@ -193,6 +196,8 @@ export function activate(context: vscode.ExtensionContext): void {
 		promptSubmit: () => void hookManager.fireGlobal('onPromptSubmit'),
 		agentDone: () => void hookManager.fireGlobal('onAgentDone')
 	};
+	// Aggiorna la galleria dell'Image Studio quando viene generata un'immagine dalla chat.
+	chat.onImageGenerated = () => imageStudio.refresh();
 
 	// Bridge Telegram (controllo da smartphone). Si avvia solo se è stato salvato un token.
 	const TELEGRAM_SECRET = 'mgcoding.telegram.token';
