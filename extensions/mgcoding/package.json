@@ -3,7 +3,7 @@
 	"publisher": "mgcoding",
 	"displayName": "MGCoding",
 	"description": "Agente di sviluppo spec-driven (Specs, Steering, Hooks, MCP) con LLM locale o Claude.",
-	"version": "0.9.5",
+	"version": "0.9.6",
 	"license": "MIT",
 	"engines": {
 		"vscode": "^1.5.0"
@@ -41,6 +41,11 @@
 					"id": "mgcoding",
 					"title": "MGCoding",
 					"icon": "media/icon.svg"
+				},
+				{
+					"id": "mgcodingImages",
+					"title": "Image Studio",
+					"icon": "media/image-studio.svg"
 				}
 			],
 			"secondarySidebar": [
@@ -68,7 +73,9 @@
 				{
 					"id": "mgcoding.mcp",
 					"name": "MCP Servers"
-				},
+				}
+			],
+			"mgcodingImages": [
 				{
 					"type": "webview",
 					"id": "mgcoding.imageStudio",
