@@ -3,7 +3,7 @@
 	"publisher": "mgcoding",
 	"displayName": "MGCoding",
 	"description": "Agente di sviluppo spec-driven (Specs, Steering, Hooks, MCP) con LLM locale o Claude.",
-	"version": "0.9.0",
+	"version": "0.9.1",
 	"license": "MIT",
 	"engines": {
 		"vscode": "^1.5.0"
@@ -119,6 +119,18 @@
 			{
 				"command": "mgcoding.agentStats",
 				"title": "MGCoding: Statistiche agente (locali)"
+			},
+			{
+				"command": "mgcoding.pickComfyFolder",
+				"title": "MGCoding: Seleziona cartella ComfyUI"
+			},
+			{
+				"command": "mgcoding.downloadImageModel",
+				"title": "MGCoding: Scarica modello immagini (ComfyUI)"
+			},
+			{
+				"command": "mgcoding.selectWorkflow",
+				"title": "MGCoding: Scegli workflow ComfyUI (modalità Img)"
 			},
 			{
 				"command": "mgcoding.setApiKey",
@@ -729,6 +741,16 @@
 					"type": "string",
 					"default": "http://127.0.0.1:8188",
 					"description": "Endpoint del server ComfyUI locale."
+				},
+				"mgcoding.image.comfyRoot": {
+					"type": "string",
+					"default": "",
+					"description": "Cartella di ComfyUI sul disco (quella che contiene models/). Impostala con 'MGCoding: Seleziona cartella ComfyUI'. Serve per scaricare i modelli nelle cartelle giuste."
+				},
+				"mgcoding.image.workflow": {
+					"type": "string",
+					"default": "",
+					"description": "Nome del file di workflow ComfyUI (in .mg/workflows/, formato API) da usare nella modalità Img. Vuoto = workflow predefinito txt2img. Impostalo con 'MGCoding: Scegli workflow ComfyUI'."
 				},
 				"mgcoding.image.enhancePrompt": {
 					"type": "boolean",

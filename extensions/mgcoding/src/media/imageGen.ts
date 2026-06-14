@@ -146,7 +146,7 @@ async function genComfy(endpoint: string, prompt: string, opts: ImageGenOptions,
 	const ckpts = info?.CheckpointLoaderSimple?.input?.required?.ckpt_name?.[0] as string[] | undefined;
 	const ckpt = ckpts?.[0];
 	if (!ckpt) {
-		throw new Error('ComfyUI: nessun checkpoint installato.');
+		throw new Error('ComfyUI è attivo ma non ha nessun checkpoint installato. Scaricane uno con il comando "MGCoding: Scarica modello immagini" (es. SDXL Base), poi riprova.');
 	}
 	const { width, height } = aspectToSize(opts.aspect);
 	const seed = Math.floor(Math.random() * 1e15);
@@ -160,22 +160,30 @@ async function genComfy(endpoint: string, prompt: string, opts: ImageGenOptions,
 		'8': { class_type: 'VAEDecode', inputs: { samples: ['3', 0], vae: ['4', 2] } },
 		'9': { class_type: 'SaveImage', inputs: { filename_prefix: 'MGCoding', images: ['8', 0] } }
 	};
-	const clientId = `mgcoding-${seed}`;
-	const queue = await fetch(`${endpoint}/prompt`, {
+	const images = await queueAndCollect(endpoint, workflow, signal);
+	return { images, mediaType: 'image/png', backendLabel: 'ComfyUI locale' };
+}
+
+/** Accoda un workflow ComfyUI, attende il completamento e raccoglie le immagini (base64). */
+export async function queueAndCollect(endpoint: string, workflow: object, signal?: AbortSignal): Promise<string[]> {
+	const ep = endpoint.replace(/\/$/, '');
+	const clientId = `mgcoding-${Date.now()}`;
+	const queue = await fetch(`${ep}/prompt`, {
 		method: 'POST', headers: { 'content-type': 'application/json' },
 		body: JSON.stringify({ prompt: workflow, client_id: clientId }), signal
 	});
 	if (!queue.ok) {
-		throw new Error(`ComfyUI ha rifiutato il job (${queue.status}).`);
+		const t = await queue.text().catch(() => '');
+		throw new Error(`ComfyUI ha rifiutato il job (${queue.status}): ${t.slice(0, 200)}`);
 	}
 	const { prompt_id } = await queue.json() as { prompt_id: string };
-	// Polling della history finche il job non e completo (max ~120s).
-	for (let i = 0; i < 120; i++) {
+	// Polling della history finche il job non e completo (max ~180s).
+	for (let i = 0; i < 180; i++) {
 		if (signal?.aborted) {
 			throw new Error('Annullato.');
 		}
 		await new Promise(r => setTimeout(r, 1000));
-		const h = await fetch(`${endpoint}/history/${prompt_id}`, { signal }).catch(() => undefined);
+		const h = await fetch(`${ep}/history/${prompt_id}`, { signal }).catch(() => undefined);
 		if (!h?.ok) {
 			continue;
 		}
@@ -187,15 +195,14 @@ async function genComfy(endpoint: string, prompt: string, opts: ImageGenOptions,
 		const imgs: string[] = [];
 		for (const out of Object.values(entry.outputs)) {
 			for (const im of out.images ?? []) {
-				const v = await fetch(`${endpoint}/view?filename=${encodeURIComponent(im.filename)}&subfolder=${encodeURIComponent(im.subfolder)}&type=${im.type}`, { signal });
+				const v = await fetch(`${ep}/view?filename=${encodeURIComponent(im.filename)}&subfolder=${encodeURIComponent(im.subfolder)}&type=${im.type}`, { signal });
 				if (v.ok) {
-					const buf = Buffer.from(await v.arrayBuffer());
-					imgs.push(buf.toString('base64'));
+					imgs.push(Buffer.from(await v.arrayBuffer()).toString('base64'));
 				}
 			}
 		}
 		if (imgs.length) {
-			return { images: imgs, mediaType: 'image/png', backendLabel: 'ComfyUI locale' };
+			return imgs;
 		}
 	}
 	throw new Error('ComfyUI: timeout in attesa del risultato.');
