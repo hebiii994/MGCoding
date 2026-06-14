@@ -133,6 +133,14 @@
 				"title": "MGCoding: Scegli workflow ComfyUI (modalità Img)"
 			},
 			{
+				"command": "mgcoding.selectCheckpoint",
+				"title": "MGCoding: Scegli checkpoint immagini (ComfyUI)"
+			},
+			{
+				"command": "mgcoding.installMissingNodes",
+				"title": "MGCoding: Installa nodi mancanti (ComfyUI)"
+			},
+			{
 				"command": "mgcoding.setApiKey",
 				"title": "MGCoding: Imposta API key Claude"
 			},
@@ -751,6 +759,11 @@
 					"type": "string",
 					"default": "",
 					"description": "Nome del file di workflow ComfyUI (in .mg/workflows/, formato API) da usare nella modalità Img. Vuoto = workflow predefinito txt2img. Impostalo con 'MGCoding: Scegli workflow ComfyUI'."
+				},
+				"mgcoding.image.checkpoint": {
+					"type": "string",
+					"default": "",
+					"description": "Checkpoint ComfyUI da usare nel workflow predefinito (modalità Img). Vuoto = primo disponibile. Impostalo con 'MGCoding: Scegli checkpoint immagini'. I modelli FLUX vengono rilevati dal nome e usano automaticamente i parametri giusti (cfg basso, pochi step)."
 				},
 				"mgcoding.image.enhancePrompt": {
 					"type": "boolean",

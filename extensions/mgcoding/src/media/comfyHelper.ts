@@ -9,7 +9,11 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import { queueAndCollect } from './imageGen';
+
+const execAsync = promisify(exec);
 
 const DEC = new TextDecoder();
 
@@ -264,6 +268,141 @@ export async function runWorkflow(endpoint: string, name: string, prompt: string
 		throw new Error(`Workflow "${name}" non trovato o non valido (serve il formato API JSON).`);
 	}
 	return queueAndCollect(endpoint, injectPrompt(wf as Workflow, prompt), signal);
+}
+
+/** Elenca i checkpoint installati in ComfyUI (da /object_info). */
+export async function listCheckpoints(endpoint: string): Promise<string[]> {
+	try {
+		const res = await fetch(`${endpoint.replace(/\/$/, '')}/object_info/CheckpointLoaderSimple`, { signal: AbortSignal.timeout(8000) });
+		if (!res.ok) {
+			return [];
+		}
+		const info = await res.json() as Record<string, { input?: { required?: { ckpt_name?: unknown[][] } } }>;
+		return (info?.CheckpointLoaderSimple?.input?.required?.ckpt_name?.[0] as string[] | undefined) ?? [];
+	} catch {
+		return [];
+	}
+}
+
+/** Le class_type usate dal workflow che NON sono registrate in ComfyUI (nodi custom mancanti). */
+export async function missingNodes(endpoint: string, workflow: Record<string, { class_type?: string }>): Promise<string[]> {
+	const used = new Set<string>();
+	for (const node of Object.values(workflow)) {
+		if (node.class_type) {
+			used.add(node.class_type);
+		}
+	}
+	if (!used.size) {
+		return [];
+	}
+	let known = new Set<string>();
+	try {
+		const res = await fetch(`${endpoint.replace(/\/$/, '')}/object_info`, { signal: AbortSignal.timeout(8000) });
+		if (res.ok) {
+			known = new Set(Object.keys(await res.json() as Record<string, unknown>));
+		}
+	} catch {
+		return []; // senza /object_info non possiamo sapere cosa manca
+	}
+	return [...used].filter(c => !known.has(c));
+}
+
+/** Cartella custom_nodes e python embedded di ComfyUI (struttura portable o standard). */
+function comfyPaths(): { customNodes?: string; python?: string } {
+	const root = vscode.workspace.getConfiguration('mgcoding').get<string>('image.comfyRoot', '');
+	if (!root) {
+		return {};
+	}
+	const customNodes = path.join(root, 'custom_nodes');
+	// portable: <root>/../python_embeded/python.exe ; altrimenti python di sistema.
+	const embedded = path.join(path.dirname(root), 'python_embeded', 'python.exe');
+	return { customNodes: fs.existsSync(customNodes) ? customNodes : undefined, python: fs.existsSync(embedded) ? embedded : undefined };
+}
+
+/**
+ * Installa automaticamente i nodi custom mancanti per un workflow: risolve le class_type
+ * mancanti nei repo via la mappa di ComfyUI-Manager, le clona in custom_nodes e installa i
+ * requirements. RICHIEDE CONFERMA (clona codice di terzi). Serve git nel PATH.
+ */
+export async function installMissingNodesForWorkflow(endpoint: string, workflowName: string): Promise<void> {
+	const wf = await loadWorkflow(workflowName);
+	if (!wf) {
+		vscode.window.showWarningMessage(`Workflow «${workflowName}» non trovato.`);
+		return;
+	}
+	const missing = await missingNodes(endpoint, wf);
+	if (!missing.length) {
+		vscode.window.showInformationMessage('Nessun nodo mancante: il workflow è completo.');
+		return;
+	}
+	const { customNodes, python } = comfyPaths();
+	if (!customNodes) {
+		vscode.window.showWarningMessage('Imposta prima la cartella di ComfyUI ("MGCoding: Seleziona cartella ComfyUI"): non trovo custom_nodes/.');
+		return;
+	}
+	// Mappa class_type -> repo via ComfyUI-Manager (extension-node-map.json).
+	let nodeMap: Record<string, [string[], unknown]>;
+	try {
+		const res = await fetch('https://raw.githubusercontent.com/ltdrdata/ComfyUI-Manager/main/extension-node-map.json', { signal: AbortSignal.timeout(15000) });
+		if (!res.ok) {
+			throw new Error(`HTTP ${res.status}`);
+		}
+		nodeMap = await res.json() as Record<string, [string[], unknown]>;
+	} catch (err) {
+		vscode.window.showErrorMessage(`Impossibile scaricare l'elenco nodi di ComfyUI-Manager: ${err instanceof Error ? err.message : String(err)}`);
+		return;
+	}
+	const repos = new Map<string, string[]>(); // repoUrl -> class_types che fornisce
+	const unresolved: string[] = [];
+	for (const cls of missing) {
+		let found: string | undefined;
+		for (const [repo, val] of Object.entries(nodeMap)) {
+			if (Array.isArray(val?.[0]) && val[0].includes(cls)) {
+				found = repo;
+				break;
+			}
+		}
+		if (found) {
+			repos.set(found, [...(repos.get(found) ?? []), cls]);
+		} else {
+			unresolved.push(cls);
+		}
+	}
+	if (!repos.size) {
+		vscode.window.showWarningMessage(`Nodi mancanti non risolti automaticamente: ${unresolved.join(', ')}. Installali da ComfyUI-Manager.`);
+		return;
+	}
+	const repoList = [...repos.keys()];
+	const detail = repoList.map(r => `• ${r.replace(/^https?:\/\/github\.com\//, '')}`).join('\n');
+	const ok = await vscode.window.showWarningMessage(
+		`Installo ${repoList.length} pacchetto/i di nodi custom per il workflow «${workflowName}»? Verranno clonati da GitHub in custom_nodes/ e ne verranno installate le dipendenze (codice di terzi).`,
+		{ modal: true, detail: `${detail}${unresolved.length ? `\n\nNon risolti (manuali): ${unresolved.join(', ')}` : ''}` },
+		'Installa'
+	);
+	if (ok !== 'Installa') {
+		return;
+	}
+	await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Installo nodi ComfyUI', cancellable: false }, async progress => {
+		for (const repo of repoList) {
+			const name = repo.split('/').pop()!.replace(/\.git$/, '');
+			const dest = path.join(customNodes, name);
+			progress.report({ message: name });
+			try {
+				if (fs.existsSync(dest)) {
+					await execAsync(`git -C "${dest}" pull`, { timeout: 120000 });
+				} else {
+					await execAsync(`git clone --depth 1 "${repo}" "${dest}"`, { timeout: 180000 });
+				}
+				const reqs = path.join(dest, 'requirements.txt');
+				if (fs.existsSync(reqs) && python) {
+					await execAsync(`"${python}" -m pip install -r "${reqs}"`, { timeout: 300000 });
+				}
+			} catch (err) {
+				vscode.window.showWarningMessage(`Installazione di ${name} non riuscita: ${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
+	});
+	vscode.window.showInformationMessage(`Nodi installati in custom_nodes/. RIAVVIA ComfyUI per caricarli${unresolved.length ? `. Da installare a mano: ${unresolved.join(', ')}` : '.'}`);
 }
 
 /** Modelli del workflow NON disponibili in ComfyUI (confronto con /object_info). */

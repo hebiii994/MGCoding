@@ -26,6 +26,30 @@ export interface ImageGenOptions {
 	initImage?: string;
 	/** Forza della trasformazione img2img (0 = identica, 1 = ignora la base). Default 0.6. */
 	denoise?: number;
+	/** Checkpoint ComfyUI da usare (nome file); se assente o non disponibile usa il primo. */
+	checkpoint?: string;
+}
+
+/** Sceglie il checkpoint: quello richiesto se disponibile, altrimenti il primo della lista. */
+function pickCheckpoint(list: string[] | undefined, preferred?: string): string | undefined {
+	if (!list?.length) {
+		return undefined;
+	}
+	if (preferred && list.includes(preferred)) {
+		return preferred;
+	}
+	return list[0];
+}
+
+/**
+ * Parametri di sampling adatti al modello: FLUX vuole cfg 1, pochi step e niente negative;
+ * SD/SDXL usano cfg 6, 28 step e il negative prompt.
+ */
+function samplerParams(ckpt: string, opts: ImageGenOptions): { steps: number; cfg: number; negative: string; sampler: string; scheduler: string } {
+	if (/flux/i.test(ckpt)) {
+		return { steps: /schnell/i.test(ckpt) ? 4 : 20, cfg: 1, negative: '', sampler: 'euler', scheduler: 'simple' };
+	}
+	return { steps: 28, cfg: 6, negative: opts.negative ?? DEFAULT_NEGATIVE, sampler: 'euler', scheduler: 'normal' };
 }
 
 const DEFAULT_NEGATIVE = 'low quality, blurry, deformed, bad anatomy, extra limbs, extra arms, extra fingers, fused fingers, mutated hands, missing fingers, malformed, disfigured, watermark, text';
@@ -161,24 +185,25 @@ async function genComfy(endpoint: string, prompt: string, opts: ImageGenOptions,
 	}
 	const info = await infoRes.json() as Record<string, { input?: { required?: { ckpt_name?: unknown[][] } } }>;
 	const ckpts = info?.CheckpointLoaderSimple?.input?.required?.ckpt_name?.[0] as string[] | undefined;
-	const ckpt = ckpts?.[0];
+	const ckpt = pickCheckpoint(ckpts, opts.checkpoint);
 	if (!ckpt) {
 		throw new Error('ComfyUI è attivo ma non ha nessun checkpoint installato. Scaricane uno con il comando "MGCoding: Scarica modello immagini" (es. SDXL Base), poi riprova.');
 	}
 	const { width, height } = aspectToSize(opts.aspect);
 	const seed = Math.floor(Math.random() * 1e15);
+	const sp = samplerParams(ckpt, opts); // parametri adatti al modello (FLUX vs SD/SDXL)
 	// Workflow txt2img minimale standard.
 	const workflow = {
-		'3': { class_type: 'KSampler', inputs: { seed, steps: 28, cfg: 6, sampler_name: 'euler', scheduler: 'normal', denoise: 1, model: ['4', 0], positive: ['6', 0], negative: ['7', 0], latent_image: ['5', 0] } },
+		'3': { class_type: 'KSampler', inputs: { seed, steps: sp.steps, cfg: sp.cfg, sampler_name: sp.sampler, scheduler: sp.scheduler, denoise: 1, model: ['4', 0], positive: ['6', 0], negative: ['7', 0], latent_image: ['5', 0] } },
 		'4': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: ckpt } },
 		'5': { class_type: 'EmptyLatentImage', inputs: { width, height, batch_size: 1 } },
 		'6': { class_type: 'CLIPTextEncode', inputs: { text: prompt, clip: ['4', 1] } },
-		'7': { class_type: 'CLIPTextEncode', inputs: { text: opts.negative ?? DEFAULT_NEGATIVE, clip: ['4', 1] } },
+		'7': { class_type: 'CLIPTextEncode', inputs: { text: sp.negative, clip: ['4', 1] } },
 		'8': { class_type: 'VAEDecode', inputs: { samples: ['3', 0], vae: ['4', 2] } },
 		'9': { class_type: 'SaveImage', inputs: { filename_prefix: 'MGCoding', images: ['8', 0] } }
 	};
 	const images = await queueAndCollect(endpoint, workflow, signal);
-	return { images, mediaType: 'image/png', backendLabel: 'ComfyUI locale' };
+	return { images, mediaType: 'image/png', backendLabel: `ComfyUI · ${ckpt}` };
 }
 
 /** Accoda un workflow ComfyUI, attende il completamento e raccoglie le immagini (base64). */
@@ -305,25 +330,27 @@ async function genComfyImg2Img(endpoint: string, prompt: string, opts: ImageGenO
 	// 2) Checkpoint disponibile.
 	const infoRes = await fetch(`${ep}/object_info/CheckpointLoaderSimple`, { signal });
 	const info = await infoRes.json() as Record<string, { input?: { required?: { ckpt_name?: unknown[][] } } }>;
-	const ckpt = (info?.CheckpointLoaderSimple?.input?.required?.ckpt_name?.[0] as string[] | undefined)?.[0];
+	const ckpts = info?.CheckpointLoaderSimple?.input?.required?.ckpt_name?.[0] as string[] | undefined;
+	const ckpt = pickCheckpoint(ckpts, opts.checkpoint);
 	if (!ckpt) {
 		throw new Error('ComfyUI è attivo ma non ha nessun checkpoint installato. Scaricane uno con "MGCoding: Scarica modello immagini".');
 	}
 	const imageRef = uploaded.subfolder ? `${uploaded.subfolder}/${uploaded.name}` : uploaded.name;
 	const seed = Math.floor(Math.random() * 1e15);
+	const sp = samplerParams(ckpt, opts);
 	// 3) Workflow img2img: LoadImage -> VAEEncode -> KSampler(denoise) -> VAEDecode -> Save.
 	const workflow = {
-		'3': { class_type: 'KSampler', inputs: { seed, steps: 28, cfg: 6, sampler_name: 'euler', scheduler: 'normal', denoise: opts.denoise ?? 0.6, model: ['4', 0], positive: ['6', 0], negative: ['7', 0], latent_image: ['10', 0] } },
+		'3': { class_type: 'KSampler', inputs: { seed, steps: sp.steps, cfg: sp.cfg, sampler_name: sp.sampler, scheduler: sp.scheduler, denoise: opts.denoise ?? 0.6, model: ['4', 0], positive: ['6', 0], negative: ['7', 0], latent_image: ['10', 0] } },
 		'4': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: ckpt } },
 		'6': { class_type: 'CLIPTextEncode', inputs: { text: prompt, clip: ['4', 1] } },
-		'7': { class_type: 'CLIPTextEncode', inputs: { text: opts.negative ?? DEFAULT_NEGATIVE, clip: ['4', 1] } },
+		'7': { class_type: 'CLIPTextEncode', inputs: { text: sp.negative, clip: ['4', 1] } },
 		'8': { class_type: 'VAEDecode', inputs: { samples: ['3', 0], vae: ['4', 2] } },
 		'9': { class_type: 'SaveImage', inputs: { filename_prefix: 'MGCoding', images: ['8', 0] } },
 		'10': { class_type: 'VAEEncode', inputs: { pixels: ['11', 0], vae: ['4', 2] } },
 		'11': { class_type: 'LoadImage', inputs: { image: imageRef } }
 	};
 	const images = await queueAndCollect(ep, workflow, signal);
-	return { images, mediaType: 'image/png', backendLabel: 'ComfyUI locale (img2img)' };
+	return { images, mediaType: 'image/png', backendLabel: `ComfyUI · ${ckpt} (img2img)` };
 }
 
 async function genOpenAIEdit(key: string, model: string, prompt: string, opts: ImageGenOptions, signal?: AbortSignal): Promise<ImageGenResult> {

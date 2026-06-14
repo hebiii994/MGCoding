@@ -77,10 +77,17 @@ Tre modalità (pulsanti *Vibe* / *Spec* / *🎨 Img* in alto):
   - **`MGCoding: Scarica modello immagini (ComfyUI)`** — catalogo curato (SDXL, FLUX schnell,
     SD 1.5, VAE) con download e barra di avanzamento nella cartella corretta; oppure incolla un
     URL diretto (HuggingFace/Civitai). Niente più download manuali.
+  - **`MGCoding: Scegli checkpoint immagini`** — scegli QUALE modello usare (la lista è letta da
+    ComfyUI). La didascalia sotto l'immagine mostra il modello usato (es. `ComfyUI · flux1-schnell-fp8`).
+    I modelli **FLUX** sono riconosciuti dal nome e usano in automatico i parametri giusti
+    (cfg basso, pochi step), quindi rendono bene anche col workflow predefinito.
   - **`MGCoding: Scegli workflow ComfyUI`** — usa un tuo workflow avanzato: esporta da ComfyUI in
     *formato API* (Save → API Format), mettilo in `.mg/workflows/`, selezionalo. In modalità Img
     MGCoding inietta il prompt ed esegue quel workflow (FLUX, upscaler, LoRA…). Prima dell'avvio
-    controlla se mancano modelli e te lo segnala.
+    controlla se mancano modelli o **nodi custom** e te lo segnala.
+  - **`MGCoding: Installa nodi mancanti (ComfyUI)`** — per il workflow selezionato, individua i
+    nodi custom mancanti, li risolve tramite l'elenco di ComfyUI-Manager, e (con conferma) li
+    clona in `custom_nodes/` installandone le dipendenze. Poi riavvia ComfyUI.
 
 Mentre l'agente lavora vedi l'indicatore **"MGCoding sta lavorando · *strumento*"** e, per le
 risposte, il pannello **Ragionamento** (think) espandibile. I blocchi di codice hanno i

@@ -5,7 +5,7 @@
 import * as vscode from 'vscode';
 import { runAgent } from './agent/agentLoop';
 import { initAgentStats, statsSummary } from './agent/agentStats';
-import { pickComfyFolder, downloadImageModel, listWorkflows } from './media/comfyHelper';
+import { pickComfyFolder, downloadImageModel, listWorkflows, listCheckpoints, installMissingNodesForWorkflow } from './media/comfyHelper';
 import { ChatViewProvider } from './chat/chatViewProvider';
 import { registerDiffApproval } from './edit/diffApproval';
 import { inlineEdit } from './edit/inlineEdit';
@@ -145,6 +145,30 @@ export function activate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(
 		vscode.commands.registerCommand('mgcoding.pickComfyFolder', () => pickComfyFolder()),
 		vscode.commands.registerCommand('mgcoding.downloadImageModel', () => downloadImageModel()),
+		vscode.commands.registerCommand('mgcoding.selectCheckpoint', async () => {
+			const cfg = vscode.workspace.getConfiguration('mgcoding');
+			const endpoint = cfg.get<string>('image.comfyEndpoint', 'http://127.0.0.1:8188');
+			const list = await listCheckpoints(endpoint);
+			if (!list.length) {
+				vscode.window.showInformationMessage('Nessun checkpoint trovato (ComfyUI è avviato e ha modelli in models/checkpoints?). Scaricane uno con "MGCoding: Scarica modello immagini".');
+				return;
+			}
+			const pick = await vscode.window.showQuickPick(['(auto: primo disponibile)', ...list], { title: 'Checkpoint per la modalità Img' });
+			if (pick === undefined) {
+				return;
+			}
+			await cfg.update('image.checkpoint', pick.startsWith('(auto') ? '' : pick, vscode.ConfigurationTarget.Global);
+			vscode.window.showInformationMessage(pick.startsWith('(auto') ? 'Checkpoint: automatico.' : `Checkpoint attivo: ${pick}`);
+		}),
+		vscode.commands.registerCommand('mgcoding.installMissingNodes', async () => {
+			const cfg = vscode.workspace.getConfiguration('mgcoding');
+			const wf = cfg.get<string>('image.workflow', '');
+			if (!wf) {
+				vscode.window.showInformationMessage('Imposta prima un workflow con "MGCoding: Scegli workflow ComfyUI": l\'installazione nodi controlla quel workflow.');
+				return;
+			}
+			await installMissingNodesForWorkflow(cfg.get<string>('image.comfyEndpoint', 'http://127.0.0.1:8188'), wf);
+		}),
 		vscode.commands.registerCommand('mgcoding.selectWorkflow', async () => {
 			const wfs = await listWorkflows();
 			const cfg = vscode.workspace.getConfiguration('mgcoding');
