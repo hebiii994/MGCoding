@@ -54,10 +54,17 @@ La chat è nella barra laterale. In basso trovi i controlli:
 - **🎤** dettatura vocale · **🎧** conversazione hands-free · **👤** profilo utente.
 - **Selettore modello** e **Autopilot** (esegue le azioni senza chiederti conferma).
 
-Due modalità (pulsanti *Vibe* / *Spec* in alto):
+Tre modalità (pulsanti *Vibe* / *Spec* / *🎨 Img* in alto):
 
 - **Vibe**: chat libera/agentica. Chiedi una modifica e l'agente la realizza con i suoi tool.
 - **Spec**: flusso guidato *requirements → design → tasks* (vedi sezione 4).
+- **🎨 Img** (Text-to-Image): descrivi un'immagine e MGCoding la genera. **Si configura da
+  solo**: cerca prima un generatore locale in ascolto (Stable Diffusion A1111/SD.Next/Forge su
+  `:7860`, ComfyUI su `:8188`), altrimenti usa una tua API key già impostata (Google Gemini →
+  Imagen, OpenAI → gpt-image-1). Basta scrivere poche parole: il prompt viene espanso
+  automaticamente e l'immagine salvata in `.mg/generated/`. Clicca l'immagine per aprirla.
+  Impostazioni: `image.backend` (auto/locale/cloud), `image.localEndpoint`,
+  `image.comfyEndpoint`, `image.enhancePrompt`. (La generazione video arriverà in seguito.)
 
 Mentre l'agente lavora vedi l'indicatore **"MGCoding sta lavorando · *strumento*"** e, per le
 risposte, il pannello **Ragionamento** (think) espandibile. I blocchi di codice hanno i

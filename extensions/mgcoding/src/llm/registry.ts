@@ -216,6 +216,16 @@ export class ProviderRegistry implements vscode.Disposable {
 		return installed.find(m => /r1|reason|qwq|qwen3|deepseek|magistral|phi-?4|think/.test(m.toLowerCase()));
 	}
 
+	/**
+	 * Chiavi cloud riutilizzabili per la generazione immagini/video: legge il secret della
+	 * key Gemini (endpoint generativelanguage) e quello della key OpenAI ufficiale, se presenti.
+	 */
+	async getMediaKeys(): Promise<{ geminiKey?: string; openaiKey?: string }> {
+		const geminiKey = await this.context.secrets.get(openAiSecretKeyFor('https://generativelanguage.googleapis.com/v1beta/openai'));
+		const openaiKey = await this.context.secrets.get(openAiSecretKeyFor('https://api.openai.com/v1'));
+		return { geminiKey: geminiKey || undefined, openaiKey: openaiKey || undefined };
+	}
+
 	listOllamaModels(): Promise<string[]> {
 		return this.ollama.listModels();
 	}
