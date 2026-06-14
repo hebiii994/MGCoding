@@ -974,8 +974,15 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 	private async enhanceImagePrompt(text: string): Promise<{ prompt: string; negative: string; aspect: string }> {
 		const QUALITY = 'highly detailed, sharp focus, intricate details, 8k, professional';
 		const DEFAULT_NEG = 'low quality, blurry, deformed, bad anatomy, watermark, text';
-		if (!vscode.workspace.getConfiguration('mgcoding').get<boolean>('image.enhancePrompt', true)) {
+		const imgCfg = vscode.workspace.getConfiguration('mgcoding');
+		if (!imgCfg.get<boolean>('image.enhancePrompt', true)) {
 			return { prompt: text, negative: DEFAULT_NEG, aspect: '1:1' };
+		}
+		// Modello dedicato all'enhancement (es. uncensored/creativo) senza toccare il modello di chat.
+		const enhanceModel = imgCfg.get<string>('image.enhanceModel', '').trim();
+		const useOverride = !!enhanceModel && imgCfg.get<string>('provider', 'ollama') === 'ollama';
+		if (useOverride) {
+			this.registry.setOllamaModelOverride(enhanceModel);
 		}
 		try {
 			// Few-shot che mostra come AMPLIFICARE l'intento: indispensabile coi modelli deboli/coder,
@@ -995,6 +1002,10 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 			}
 		} catch {
 			// enhancement best-effort
+		} finally {
+			if (useOverride) {
+				this.registry.setOllamaModelOverride(undefined);
+			}
 		}
 		// Fallback: testo utente + booster qualità (meglio del prompt nudo).
 		return { prompt: `${text}, ${QUALITY}`, negative: DEFAULT_NEG, aspect: '1:1' };
