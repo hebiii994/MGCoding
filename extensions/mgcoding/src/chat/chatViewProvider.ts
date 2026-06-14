@@ -29,7 +29,7 @@ interface ProviderOption {
 	tools?: boolean;
 }
 
-type ChatMode = 'vibe' | 'spec' | 'img';
+type ChatMode = 'vibe' | 'spec' | 'img' | 'free';
 
 type SpecPhase = 'requirements' | 'design' | 'tasks' | 'done';
 
@@ -134,6 +134,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 
 	private active(): Session {
 		return this.sessions.find(s => s.id === this.activeId) ?? this.sessions[0];
+	}
+
+	/** Elimina una sessione (default: quella attiva), con conferma; ne attiva un'altra. */
+	private async deleteSession(id?: string): Promise<void> {
+		const target = id ?? this.activeId;
+		const sess = this.sessions.find(s => s.id === target);
+		if (!sess) {
+			return;
+		}
+		const ok = await vscode.window.showWarningMessage(`Eliminare la chat «${sess.title}»?`, { modal: true }, 'Elimina');
+		if (ok !== 'Elimina') {
+			return;
+		}
+		this.sessions = this.sessions.filter(s => s.id !== target);
+		if (this.sessions.length === 0) {
+			this.sessions.push(this.makeSession());
+		}
+		if (this.activeId === target) {
+			this.activeId = this.sessions[0].id;
+		}
+		await this.save();
+		await this.sendState();
+		this.post({ type: 'restore', messages: this.active().messages });
 	}
 
 	private async save(): Promise<void> {
@@ -310,6 +333,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 						await this.sendState();
 						this.post({ type: 'restore', messages: this.active().messages });
 					}
+					break;
+				case 'deleteSession':
+					await this.deleteSession((msg as { id?: string }).id);
 					break;
 				case 'stop':
 					this.abort?.abort();
@@ -898,6 +924,13 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 			await this.handleImageMessage(text);
 			return;
 		}
+		if (session.mode === 'free') {
+			if (session.title === 'Nuova sessione') {
+				session.title = (text || 'Chat').slice(0, 40);
+			}
+			await this.handleFreeMessage(text);
+			return;
+		}
 		if (session.mode === 'spec') {
 			if (session.title === 'Nuova sessione') {
 				session.title = (text || 'Spec').slice(0, 40);
@@ -962,6 +995,37 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 			await this.save();
 			await this.sendState();
 			this.hookEvents?.agentDone();
+		}
+	}
+
+	// ---- Modalità Libera: chat pura, senza contesto progetto né tool ----
+
+	/** Conversazione semplice: nessun system prompt agentico, nessun contesto del workspace. */
+	private async handleFreeMessage(text: string): Promise<void> {
+		const session = this.active();
+		session.messages.push({ role: 'user', content: text });
+		this.mirror?.('user', text);
+		this.post({ type: 'busy', value: true });
+		await this.compactIfNeeded(session);
+		this.abort = new AbortController();
+		const sys = 'Sei un assistente AI utile, amichevole e diretto. Conversi liberamente con l\'utente: rispondi in modo chiaro e utile, in italiano se l\'utente scrive in italiano. NON sei legato ad alcun progetto o codice: non assumere che l\'utente voglia sviluppare software se non lo chiede esplicitamente. Usa Markdown quando aiuta.';
+		let streamBuf = '';
+		try {
+			this.post({ type: 'streamStart' });
+			streamBuf = await streamPure(this.registry, session.messages, sys, t => this.post({ type: 'streamDelta', text: t }), this.abort.signal);
+			this.post({ type: 'streamEnd' });
+			if (streamBuf.trim()) {
+				session.messages.push({ role: 'assistant', content: streamBuf });
+				this.mirror?.('assistant', streamBuf.trim());
+			}
+		} catch (err) {
+			this.post({ type: 'streamCancel' });
+			this.post({ type: 'error', text: err instanceof Error ? err.message : String(err) });
+		} finally {
+			this.abort = undefined;
+			this.post({ type: 'busy', value: false });
+			await this.save();
+			await this.sendState();
 		}
 	}
 
@@ -1567,6 +1631,7 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 	.modebtn { flex: 0 0 auto; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; border-radius: 6px; padding: 3px 8px; font-size: 12px; cursor: pointer; }
 	.modebtn.active { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
 	#newbtn { flex: 0 0 auto; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; border-radius: 6px; padding: 3px 9px; cursor: pointer; }
+	#delbtn { flex: 0 0 auto; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; border-radius: 6px; padding: 3px 7px; cursor: pointer; }
 	#log { flex: 1 1 auto; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
 	.empty { margin: auto; text-align: center; opacity: 0.6; line-height: 1.7; padding: 16px; }
 	.welcome { margin: auto; width: 100%; max-width: 520px; padding: 24px 18px; box-sizing: border-box; }
@@ -1716,9 +1781,11 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 	<div id="topbar">
 		<select id="session" title="Sessione"></select>
 		<button id="newbtn" title="Nuova sessione">＋</button>
+		<button id="delbtn" title="Elimina questa chat">🗑</button>
 		<button class="modebtn" id="mode-vibe" title="Chat-first">Vibe</button>
 		<button class="modebtn" id="mode-spec" title="Spec-driven">Spec</button>
 		<button class="modebtn" id="mode-img" title="Genera immagini (Text-to-Image)">🎨 Img</button>
+		<button class="modebtn" id="mode-free" title="Chat libera, senza contesto del progetto">💭 Libera</button>
 	</div>
 	<div id="log"></div>
 	<div id="working"><span class="dot"></span><span class="wt">MGCoding sta lavorando</span><span class="ws"></span></div>
@@ -1828,6 +1895,8 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 	var modeVibe = document.getElementById('mode-vibe');
 	var modeSpec = document.getElementById('mode-spec');
 	var modeImg = document.getElementById('mode-img');
+	var modeFree = document.getElementById('mode-free');
+	var delBtn = document.getElementById('delbtn');
 	var hashBtn = document.getElementById('hash');
 	var attachBtn = document.getElementById('attach');
 	var micBtn = document.getElementById('mic');
@@ -2029,6 +2098,7 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 		cards.appendChild(card('vibe', '\\uD83D\\uDCAC', 'Vibe', 'Prima parli, poi costruisci. Esplora idee e itera mentre scopri cosa serve.'));
 		cards.appendChild(card('spec', '\\uD83D\\uDCCB', 'Spec', 'Prima pianifichi, poi costruisci. Crea requisiti e design prima di scrivere codice.'));
 		cards.appendChild(card('img', '\\uD83C\\uDFA8', 'Immagini', 'Descrivi e genera immagini. Si configura da solo: usa un modello locale o le tue API key.'));
+		cards.appendChild(card('free', '\\uD83D\\uDCAD', 'Libera', 'Solo conversazione: nessun contesto del progetto, nessuno strumento. Parla e basta.'));
 		var gf = document.createElement('div'); gf.className = 'greatfor';
 		var gfh = document.createElement('div'); gfh.className = 'gf-h'; gfh.textContent = 'Ottimo per:';
 		var ul = document.createElement('ul');
@@ -2173,6 +2243,8 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 	modeVibe.addEventListener('click', function () { vscode.postMessage({ type: 'setMode', mode: 'vibe' }); });
 	modeSpec.addEventListener('click', function () { vscode.postMessage({ type: 'setMode', mode: 'spec' }); });
 	modeImg.addEventListener('click', function () { vscode.postMessage({ type: 'setMode', mode: 'img' }); });
+	modeFree.addEventListener('click', function () { vscode.postMessage({ type: 'setMode', mode: 'free' }); });
+	delBtn.addEventListener('click', function () { vscode.postMessage({ type: 'deleteSession' }); });
 	input.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
 	function autoGrow() { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 200) + 'px'; }
 	input.addEventListener('input', autoGrow);
@@ -2333,7 +2405,8 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 			modeVibe.className = 'modebtn' + (m.state.mode === 'vibe' ? ' active' : '');
 			modeSpec.className = 'modebtn' + (m.state.mode === 'spec' ? ' active' : '');
 			if (modeImg) { modeImg.className = 'modebtn' + (m.state.mode === 'img' ? ' active' : ''); }
-			input.placeholder = m.state.mode === 'img' ? 'Descrivi l\\'immagine da generare…' : 'Chiedi o incolla codice…';
+			if (modeFree) { modeFree.className = 'modebtn' + (m.state.mode === 'free' ? ' active' : ''); }
+			input.placeholder = m.state.mode === 'img' ? 'Descrivi l\\'immagine da generare…' : m.state.mode === 'free' ? 'Scrivi un messaggio…' : 'Chiedi o incolla codice…';
 			var wcards = log.querySelectorAll('.welcome .card');
 			for (var wc = 0; wc < wcards.length; wc++) { wcards[wc].className = 'card' + (wcards[wc].getAttribute('data-mode') === currentMode ? ' active' : ''); }
 			autoBtn.className = 'toggle' + (m.state.autopilot ? ' on' : '');
