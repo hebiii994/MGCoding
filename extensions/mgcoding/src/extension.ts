@@ -5,6 +5,7 @@
 import * as vscode from 'vscode';
 import { runAgent } from './agent/agentLoop';
 import { initAgentStats, statsSummary } from './agent/agentStats';
+import { pickComfyFolder, downloadImageModel, listWorkflows } from './media/comfyHelper';
 import { ChatViewProvider } from './chat/chatViewProvider';
 import { registerDiffApproval } from './edit/diffApproval';
 import { inlineEdit } from './edit/inlineEdit';
@@ -139,6 +140,26 @@ export function activate(context: vscode.ExtensionContext): void {
 		const doc = await vscode.workspace.openTextDocument({ content: statsSummary(), language: 'markdown' });
 		await vscode.window.showTextDocument(doc, { preview: true });
 	}));
+
+	// ComfyUI Helper: selezione cartella, download modelli, scelta workflow "porta il tuo".
+	context.subscriptions.push(
+		vscode.commands.registerCommand('mgcoding.pickComfyFolder', () => pickComfyFolder()),
+		vscode.commands.registerCommand('mgcoding.downloadImageModel', () => downloadImageModel()),
+		vscode.commands.registerCommand('mgcoding.selectWorkflow', async () => {
+			const wfs = await listWorkflows();
+			const cfg = vscode.workspace.getConfiguration('mgcoding');
+			if (!wfs.length) {
+				vscode.window.showInformationMessage('Nessun workflow in .mg/workflows/. Esporta un workflow da ComfyUI in formato API (Save → API Format) e mettilo lì.');
+				return;
+			}
+			const pick = await vscode.window.showQuickPick(['(nessuno: workflow predefinito)', ...wfs], { title: 'Workflow ComfyUI per la modalità Img' });
+			if (pick === undefined) {
+				return;
+			}
+			await cfg.update('image.workflow', pick.startsWith('(nessuno') ? '' : pick, vscode.ConfigurationTarget.Global);
+			vscode.window.showInformationMessage(pick.startsWith('(nessuno') ? 'Workflow predefinito ripristinato.' : `Workflow attivo: ${pick}`);
+		})
+	);
 
 	// Hooks runtime
 	const hookManager = new HookManager(registry, () => hooksTree.refresh(), () => chat.runReporter(), () => chat.beginRun());

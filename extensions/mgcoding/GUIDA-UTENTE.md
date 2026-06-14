@@ -66,6 +66,17 @@ Tre modalità (pulsanti *Vibe* / *Spec* / *🎨 Img* in alto):
   Impostazioni: `image.backend` (auto/locale/cloud), `image.localEndpoint`,
   `image.comfyEndpoint`, `image.enhancePrompt`. (La generazione video arriverà in seguito.)
 
+  **Helper ComfyUI** (comandi nella palette):
+  - **`MGCoding: Seleziona cartella ComfyUI`** — scegli con un dialog la cartella di ComfyUI
+    (anche quella portable: trova da solo `models/`). Serve per scaricare i modelli al posto giusto.
+  - **`MGCoding: Scarica modello immagini (ComfyUI)`** — catalogo curato (SDXL, FLUX schnell,
+    SD 1.5, VAE) con download e barra di avanzamento nella cartella corretta; oppure incolla un
+    URL diretto (HuggingFace/Civitai). Niente più download manuali.
+  - **`MGCoding: Scegli workflow ComfyUI`** — usa un tuo workflow avanzato: esporta da ComfyUI in
+    *formato API* (Save → API Format), mettilo in `.mg/workflows/`, selezionalo. In modalità Img
+    MGCoding inietta il prompt ed esegue quel workflow (FLUX, upscaler, LoRA…). Prima dell'avvio
+    controlla se mancano modelli e te lo segnala.
+
 Mentre l'agente lavora vedi l'indicatore **"MGCoding sta lavorando · *strumento*"** e, per le
 risposte, il pannello **Ragionamento** (think) espandibile. I blocchi di codice hanno i
 pulsanti *Copia* / *Inserisci*.

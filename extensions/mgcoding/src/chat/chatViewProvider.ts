@@ -18,6 +18,7 @@ import { ChatMessage } from '../llm/types';
 import { ProfileStore } from '../profile/profiles';
 import { codeIndex } from '../index/codeIndex';
 import { detectImageBackend, generateImage } from '../media/imageGen';
+import { runWorkflow, missingModels, loadWorkflow } from '../media/comfyHelper';
 import * as os from 'os';
 import { execFile } from 'child_process';
 
@@ -1016,8 +1017,24 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 				return;
 			}
 			const { prompt, aspect } = await this.enhanceImagePrompt(text);
-			this.post({ type: 'toolResult', text: `${backend.label} · ${aspect}` });
-			const result = await generateImage(backend, prompt, { aspect, count: 1 }, keys, this.abort.signal);
+			const workflowName = cfg.get<string>('image.workflow', '');
+			let result;
+			if (backend.id === 'comfyui' && workflowName) {
+				// "Porta il tuo workflow": controlla le dipendenze e poi esegui quel workflow.
+				const wf = await loadWorkflow(workflowName);
+				if (wf) {
+					const missing = await missingModels(backend.endpoint!, wf);
+					if (missing.length) {
+						this.post({ type: 'assistant', text: `⚠ Il workflow «${workflowName}» richiede modelli non installati in ComfyUI: ${missing.join(', ')}.\nScaricali con **MGCoding: Scarica modello immagini** (o incolla l'URL), poi riprova.` });
+					}
+				}
+				this.post({ type: 'toolResult', text: `ComfyUI · workflow ${workflowName}` });
+				const imgs = await runWorkflow(backend.endpoint!, workflowName, prompt, this.abort.signal);
+				result = { images: imgs, mediaType: 'image/png', backendLabel: `ComfyUI · ${workflowName}` };
+			} else {
+				this.post({ type: 'toolResult', text: `${backend.label} · ${aspect}` });
+				result = await generateImage(backend, prompt, { aspect, count: 1 }, keys, this.abort.signal);
+			}
 			const saved: string[] = [];
 			const dataUrls: string[] = [];
 			const dir = await this.generatedDir();
