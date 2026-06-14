@@ -269,6 +269,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 				case 'openImage':
 					await this.openImageDataUrl((msg as { dataUrl?: string }).dataUrl);
 					break;
+				case 'genFromMessage':
+					{
+						const t = String((msg as { text?: string }).text ?? '').trim();
+						if (t) {
+							await this.handleImageMessage(t);
+						}
+					}
+					break;
 				case 'recordMic':
 					await this.recordMic((msg as { mode?: 'dictate' | 'convo' }).mode === 'convo' ? 'convo' : 'dictate');
 					break;
@@ -1010,7 +1018,7 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 		this.post({ type: 'busy', value: true });
 		await this.compactIfNeeded(session);
 		this.abort = new AbortController();
-		const sys = 'Sei un assistente AI utile, amichevole e diretto. Conversi liberamente con l\'utente: rispondi in modo chiaro e utile, in italiano se l\'utente scrive in italiano. NON sei legato ad alcun progetto o codice: non assumere che l\'utente voglia sviluppare software se non lo chiede esplicitamente. Usa Markdown quando aiuta.';
+		const sys = 'Sei un assistente AI utile, amichevole e diretto. Conversi liberamente con l\'utente: rispondi in modo chiaro e utile, in italiano se l\'utente scrive in italiano. NON sei legato ad alcun progetto o codice: non assumere che l\'utente voglia sviluppare software se non lo chiede esplicitamente. Usa Markdown quando aiuta. NON puoi eseguire azioni, comandi o tool e NON puoi generare immagini tu stesso: NON scrivere blocchi tool/JSON né fingere di farlo. Se ti chiedono un\'immagine, scrivi un ottimo prompt e di\' all\'utente di premere il pulsante "🎨 Genera immagine" sotto la tua risposta (oppure la modalità Img).';
 		let streamBuf = '';
 		try {
 			this.post({ type: 'streamStart' });
@@ -2052,7 +2060,13 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 			if (navigator.clipboard) { navigator.clipboard.writeText(txt); }
 			var old = copy.textContent; copy.textContent = '\\u2713 Copiato'; setTimeout(function () { copy.textContent = old; }, 1200);
 		});
-		f.appendChild(t); f.appendChild(copy);
+		var gen = document.createElement('button'); gen.className = 'msg-copy'; gen.title = 'Genera un\\'immagine usando questo testo come prompt'; gen.textContent = '\\uD83C\\uDFA8 Genera immagine';
+		gen.addEventListener('click', function () {
+			gen.disabled = true; var old = gen.textContent; gen.textContent = '\\uD83C\\uDFA8 invio…';
+			vscode.postMessage({ type: 'genFromMessage', text: getText() });
+			setTimeout(function () { gen.disabled = false; gen.textContent = old; }, 1500);
+		});
+		f.appendChild(t); f.appendChild(copy); f.appendChild(gen);
 		msgEl.appendChild(f);
 		return t;
 	}
