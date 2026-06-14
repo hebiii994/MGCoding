@@ -63,6 +63,12 @@ Tre modalità (pulsanti *Vibe* / *Spec* / *🎨 Img* in alto):
   `:7860`, ComfyUI su `:8188`), altrimenti usa una tua API key già impostata (Google Gemini →
   Imagen, OpenAI → gpt-image-1). Basta scrivere poche parole: il prompt viene espanso
   automaticamente e l'immagine salvata in `.mg/generated/`. Clicca l'immagine per aprirla.
+  **Formato/inquadratura**: per una persona **a figura intera** scegli un **aspetto verticale**
+  (2:3 o 9:16) dall'Image Studio (impostazione `image.aspect`): a 1:1 i modelli tendono a fare
+  mezzo busto. Nota: i modelli **FLUX ignorano il negative prompt** (girano a cfg 1), quindi per
+  controllare l'inquadratura conta il formato + i termini ("full body, head to toe, standing,
+  front view"), non i negativi.
+
   **Image-to-image**: allega un'immagine (📎) in modalità Img e descrivi la modifica: MGCoding
   la usa come base (img2img su ComfyUI/A1111, edit su OpenAI; non disponibile con Imagen). Quanto
   trasformarla si regola con `image.denoise` (0.4 ritocco, 0.7-0.8 cambiamento forte).

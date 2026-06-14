@@ -94,6 +94,7 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 			workflow: cfg.get<string>('image.workflow', ''),
 			enhancePrompt: cfg.get<boolean>('image.enhancePrompt', true),
 			enhanceModel: cfg.get<string>('image.enhanceModel', ''),
+			aspect: cfg.get<string>('image.aspect', 'auto'),
 			denoise: cfg.get<number>('image.denoise', 0.6),
 			comfyRoot: cfg.get<string>('image.comfyRoot', ''),
 			gallery
@@ -136,6 +137,14 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 	<div class="row"><label>Workflow</label><select id="workflow"></select></div>
 
 	<h3>Parametri</h3>
+	<div class="row"><label>Aspetto</label>
+		<select id="aspect">
+			<option value="auto">Auto</option><option value="1:1">1:1 quadrato</option>
+			<option value="2:3">2:3 verticale (full body)</option><option value="9:16">9:16 verticale alto</option>
+			<option value="3:2">3:2 orizzontale</option><option value="16:9">16:9 panorama</option>
+			<option value="3:4">3:4</option><option value="4:3">4:3</option>
+		</select></div>
+	<div class="hint">Per una persona a figura intera scegli 2:3 o 9:16 (verticale).</div>
 	<div class="row"><label>Migliora prompt</label><input type="checkbox" id="enhance" /><span class="muted">amplifica e traduce</span></div>
 	<div class="row"><label>Modello prompt</label><input type="text" id="enhanceModel" placeholder="(usa il modello di chat)" /></div>
 	<div class="hint">Per i prompt puoi usare un modello creativo/uncensored separato.</div>
@@ -148,6 +157,7 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 		<button data-cmd="mgcoding.downloadImageModel" class="primary">⬇ Scarica modello</button>
 		<button data-cmd="mgcoding.selectCheckpoint">🎯 Checkpoint</button>
 		<button data-cmd="mgcoding.selectWorkflow">🎛 Workflow</button>
+		<button data-cmd="mgcoding.importWorkflow">⬆ Importa workflow</button>
 		<button data-cmd="mgcoding.installMissingNodes">🧩 Nodi mancanti</button>
 		<button data-cmd="mgcoding.openChat">💬 Apri chat Img</button>
 	</div>
@@ -164,6 +174,7 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 	$('backend').addEventListener('change', function(){ send({type:'setConfig', key:'image.backend', value:this.value}); });
 	$('checkpoint').addEventListener('change', function(){ send({type:'setConfig', key:'image.checkpoint', value:this.value}); });
 	$('workflow').addEventListener('change', function(){ send({type:'setConfig', key:'image.workflow', value:this.value}); });
+	$('aspect').addEventListener('change', function(){ send({type:'setConfig', key:'image.aspect', value:this.value}); });
 	$('enhance').addEventListener('change', function(){ send({type:'setConfig', key:'image.enhancePrompt', value:this.checked}); });
 	$('enhanceModel').addEventListener('change', function(){ send({type:'setConfig', key:'image.enhanceModel', value:this.value}); });
 	$('denoise').addEventListener('input', function(){ $('denoiseVal').textContent = (+this.value).toFixed(2); });
@@ -180,6 +191,7 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 		for (var i=0;i<m.checkpoints.length;i++){ cs.appendChild(opt(m.checkpoints[i], m.checkpoints[i], m.checkpoint)); }
 		var ws = $('workflow'); ws.innerHTML=''; ws.appendChild(opt('', '(predefinito txt2img)', m.workflow));
 		for (var j=0;j<m.workflows.length;j++){ ws.appendChild(opt(m.workflows[j], m.workflows[j], m.workflow)); }
+		$('aspect').value = m.aspect || 'auto';
 		$('enhance').checked = !!m.enhancePrompt;
 		$('enhanceModel').value = m.enhanceModel || '';
 		$('denoise').value = m.denoise; $('denoiseVal').textContent = (+m.denoise).toFixed(2);
