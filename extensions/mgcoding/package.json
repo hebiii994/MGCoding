@@ -757,6 +757,11 @@
 					"default": true,
 					"description": "Migliora automaticamente il prompt immagine (lo espande in inglese e sceglie il rapporto d'aspetto) con il modello di chat attivo, così bastano poche parole."
 				},
+				"mgcoding.image.enhanceModel": {
+					"type": "string",
+					"default": "",
+					"description": "Modello Ollama da usare SOLO per migliorare i prompt immagine (es. un modello creativo/uncensored come 'trinhnv1205/Qwen3.5-9B-Uncensored-ctx64k'). Vuoto = usa il modello di chat attivo. Utile per tenere un coder per il codice e un modello adatto alle immagini."
+				},
 				"mgcoding.mcp.maxTools": {
 					"type": "number",
 					"default": 12,
