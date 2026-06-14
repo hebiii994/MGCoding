@@ -1699,7 +1699,7 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 		<button id="newbtn" title="Nuova sessione">＋</button>
 		<button class="modebtn" id="mode-vibe" title="Chat-first">Vibe</button>
 		<button class="modebtn" id="mode-spec" title="Spec-driven">Spec</button>
-		<button class="modebtn" id="mode-img" title="Genera immagini (Text-to-Image)">\\uD83C\\uDFA8 Img</button>
+		<button class="modebtn" id="mode-img" title="Genera immagini (Text-to-Image)">🎨 Img</button>
 	</div>
 	<div id="log"></div>
 	<div id="working"><span class="dot"></span><span class="wt">MGCoding sta lavorando</span><span class="ws"></span></div>
