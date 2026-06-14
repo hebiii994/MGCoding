@@ -17,6 +17,7 @@ import { ProviderRegistry } from '../llm/registry';
 import { ChatMessage } from '../llm/types';
 import { ProfileStore } from '../profile/profiles';
 import { codeIndex } from '../index/codeIndex';
+import { detectImageBackend, generateImage } from '../media/imageGen';
 import * as os from 'os';
 import { execFile } from 'child_process';
 
@@ -27,7 +28,7 @@ interface ProviderOption {
 	tools?: boolean;
 }
 
-type ChatMode = 'vibe' | 'spec';
+type ChatMode = 'vibe' | 'spec' | 'img';
 
 type SpecPhase = 'requirements' | 'design' | 'tasks' | 'done';
 
@@ -238,6 +239,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 					break;
 				case 'refreshState':
 					await this.sendState();
+					break;
+				case 'openImage':
+					await this.openImageDataUrl((msg as { dataUrl?: string }).dataUrl);
 					break;
 				case 'recordMic':
 					await this.recordMic((msg as { mode?: 'dictate' | 'convo' }).mode === 'convo' ? 'convo' : 'dictate');
@@ -886,6 +890,13 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 		if (await this.tryResumeSpec(text)) {
 			return;
 		}
+		if (session.mode === 'img') {
+			if (session.title === 'Nuova sessione') {
+				session.title = (text || 'Immagine').slice(0, 40);
+			}
+			await this.handleImageMessage(text);
+			return;
+		}
 		if (session.mode === 'spec') {
 			if (session.title === 'Nuova sessione') {
 				session.title = (text || 'Spec').slice(0, 40);
@@ -951,6 +962,117 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 			await this.sendState();
 			this.hookEvents?.agentDone();
 		}
+	}
+
+	// ---- Modalità TextToImg: generazione immagini con auto-configurazione ----
+
+	/**
+	 * Espande un prompt breve (in italiano) in un buon prompt inglese per i modelli diffusion
+	 * e sceglie il rapporto d'aspetto. Best-effort: se l'LLM non è disponibile usa il prompt grezzo.
+	 */
+	private async enhanceImagePrompt(text: string): Promise<{ prompt: string; aspect: string }> {
+		if (!vscode.workspace.getConfiguration('mgcoding').get<boolean>('image.enhancePrompt', true)) {
+			return { prompt: text, aspect: '1:1' };
+		}
+		try {
+			const sys = 'Trasforma la richiesta dell\'utente in un prompt EFFICACE in INGLESE per un modello di generazione immagini (diffusion). Aggiungi dettagli utili su soggetto, stile, luce, composizione, qualità. Scegli il rapporto d\'aspetto adatto. Rispondi SOLO con JSON: {"prompt":"...","aspect":"1:1|16:9|9:16|4:3|3:4"}. Nessun altro testo.';
+			const raw = await complete(this.registry, [{ role: 'user', content: text }], sys, undefined, undefined, true);
+			const m = raw.match(/\{[\s\S]*\}/);
+			if (m) {
+				const obj = JSON.parse(m[0]) as { prompt?: string; aspect?: string };
+				const aspect = ['1:1', '16:9', '9:16', '4:3', '3:4'].includes(obj.aspect ?? '') ? obj.aspect! : '1:1';
+				if (obj.prompt && obj.prompt.trim()) {
+					return { prompt: obj.prompt.trim(), aspect };
+				}
+			}
+		} catch {
+			// enhancement best-effort
+		}
+		return { prompt: text, aspect: '1:1' };
+	}
+
+	/** Genera immagini dal prompt: auto-detect del backend, generazione, salvataggio e display. */
+	private async handleImageMessage(text: string): Promise<void> {
+		const session = this.active();
+		session.messages.push({ role: 'user', content: text });
+		this.mirror?.('user', text);
+		this.post({ type: 'busy', value: true });
+		this.abort = new AbortController();
+		const cfg = vscode.workspace.getConfiguration('mgcoding');
+		try {
+			this.post({ type: 'tool', name: 'genera immagine', args: '{}' });
+			const keys = await this.registry.getMediaKeys();
+			const backend = await detectImageBackend(
+				cfg.get<string>('image.backend', 'auto'),
+				cfg.get<string>('image.localEndpoint', 'http://127.0.0.1:7860'),
+				cfg.get<string>('image.comfyEndpoint', 'http://127.0.0.1:8188'),
+				keys
+			);
+			if (!backend) {
+				this.post({ type: 'toolResult', text: 'nessun generatore disponibile' });
+				const msg = 'Nessun generatore di immagini disponibile. Hai due opzioni:\n\n1. **Locale** (gratis): avvia Stable Diffusion (Automatic1111/SD.Next/Forge su `:7860` o ComfyUI su `:8188`).\n2. **Cloud**: imposta una API key con `MGCoding: Configurazione guidata` — Google Gemini (Imagen) o OpenAI (gpt-image-1).\n\nPoi riprova.';
+				this.post({ type: 'assistant', text: msg });
+				session.messages.push({ role: 'assistant', content: msg });
+				return;
+			}
+			const { prompt, aspect } = await this.enhanceImagePrompt(text);
+			this.post({ type: 'toolResult', text: `${backend.label} · ${aspect}` });
+			const result = await generateImage(backend, prompt, { aspect, count: 1 }, keys, this.abort.signal);
+			const saved: string[] = [];
+			const dataUrls: string[] = [];
+			const dir = await this.generatedDir();
+			for (let i = 0; i < result.images.length; i++) {
+				const b64 = result.images[i];
+				dataUrls.push(`data:${result.mediaType};base64,${b64}`);
+				if (dir) {
+					const ext = result.mediaType.includes('jpeg') ? 'jpg' : 'png';
+					const name = `img-${Date.now()}-${i + 1}.${ext}`;
+					const uri = vscode.Uri.joinPath(dir, name);
+					await vscode.workspace.fs.writeFile(uri, Buffer.from(b64, 'base64'));
+					saved.push(vscode.workspace.asRelativePath(uri, false));
+				}
+			}
+			const caption = `🎨 ${result.backendLabel}${saved.length ? ` · salvato in ${saved.join(', ')}` : ''}`;
+			this.post({ type: 'image', images: dataUrls, caption, prompt });
+			this.mirror?.('assistant', `🎨 Immagine generata (${result.backendLabel})`);
+			// In cronologia salviamo una nota leggera col percorso (niente base64 nel globalState).
+			session.messages.push({ role: 'assistant', content: `${caption}\n\nPrompt: ${prompt}` });
+		} catch (err) {
+			const text2 = err instanceof Error ? err.message : String(err);
+			this.post({ type: 'error', text: `Generazione immagine fallita: ${text2}` });
+			session.messages.push({ role: 'assistant', content: `⚠ Generazione fallita: ${text2}` });
+		} finally {
+			this.abort = undefined;
+			this.post({ type: 'busy', value: false });
+			await this.save();
+			await this.sendState();
+		}
+	}
+
+	/** Apre un'immagine (data URL) in un editor: la scrive su file temporaneo e la apre. */
+	private async openImageDataUrl(dataUrl?: string): Promise<void> {
+		if (!dataUrl) {
+			return;
+		}
+		const m = /^data:(?<mt>[^;]+);base64,(?<data>.*)$/s.exec(dataUrl);
+		if (!m?.groups) {
+			return;
+		}
+		const ext = m.groups.mt.includes('jpeg') ? 'jpg' : 'png';
+		const file = vscode.Uri.joinPath(vscode.Uri.file(os.tmpdir()), `mgcoding-img-${Date.now()}.${ext}`);
+		await vscode.workspace.fs.writeFile(file, Buffer.from(m.groups.data, 'base64'));
+		await vscode.commands.executeCommand('vscode.open', file);
+	}
+
+	/** Cartella .mg/generated/ del workspace (creata se manca), o undefined senza workspace. */
+	private async generatedDir(): Promise<vscode.Uri | undefined> {
+		const folder = vscode.workspace.workspaceFolders?.[0];
+		if (!folder) {
+			return undefined;
+		}
+		const dir = vscode.Uri.joinPath(folder.uri, '.mg', 'generated');
+		await vscode.workspace.fs.createDirectory(dir);
+		return dir;
 	}
 
 	// ---- Rilevamento intento: offerta/prioritizzazione Spec ----
@@ -1550,6 +1672,8 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 	#thumbs img { height: 46px; border-radius: 4px; display: block; }
 	#thumbs .x { position: absolute; top: -6px; right: -6px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border-radius: 50%; width: 16px; height: 16px; font-size: 11px; line-height: 16px; text-align: center; cursor: pointer; }
 	.msg img.thumb { max-height: 140px; border-radius: 6px; margin: 4px 4px 0 0; }
+	.msg img.genimg { max-width: 100%; border-radius: 8px; margin: 4px 0; cursor: zoom-in; display: block; }
+	.genimg-cap { font-size: 11px; opacity: 0.75; margin-top: 2px; }
 </style>
 </head>
 <body>
@@ -1558,6 +1682,7 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 		<button id="newbtn" title="Nuova sessione">＋</button>
 		<button class="modebtn" id="mode-vibe" title="Chat-first">Vibe</button>
 		<button class="modebtn" id="mode-spec" title="Spec-driven">Spec</button>
+		<button class="modebtn" id="mode-img" title="Genera immagini (Text-to-Image)">\\uD83C\\uDFA8 Img</button>
 	</div>
 	<div id="log"></div>
 	<div id="working"><span class="dot"></span><span class="wt">MGCoding sta lavorando</span><span class="ws"></span></div>
@@ -1666,6 +1791,7 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 	var newBtn = document.getElementById('newbtn');
 	var modeVibe = document.getElementById('mode-vibe');
 	var modeSpec = document.getElementById('mode-spec');
+	var modeImg = document.getElementById('mode-img');
 	var hashBtn = document.getElementById('hash');
 	var attachBtn = document.getElementById('attach');
 	var micBtn = document.getElementById('mic');
@@ -1866,6 +1992,7 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 		var cards = document.createElement('div'); cards.className = 'cards';
 		cards.appendChild(card('vibe', '\\uD83D\\uDCAC', 'Vibe', 'Prima parli, poi costruisci. Esplora idee e itera mentre scopri cosa serve.'));
 		cards.appendChild(card('spec', '\\uD83D\\uDCCB', 'Spec', 'Prima pianifichi, poi costruisci. Crea requisiti e design prima di scrivere codice.'));
+		cards.appendChild(card('img', '\\uD83C\\uDFA8', 'Immagini', 'Descrivi e genera immagini. Si configura da solo: usa un modello locale o le tue API key.'));
 		var gf = document.createElement('div'); gf.className = 'greatfor';
 		var gfh = document.createElement('div'); gfh.className = 'gf-h'; gfh.textContent = 'Ottimo per:';
 		var ul = document.createElement('ul');
@@ -1984,6 +2111,17 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 	function addThumbsTo(el, imgs) {
 		for (var i = 0; i < imgs.length; i++) { var im = document.createElement('img'); im.className = 'thumb'; im.src = imgs[i]; el.appendChild(im); }
 	}
+	function addGenImages(images, caption, prompt) {
+		ensureCleared();
+		var el = document.createElement('div'); el.className = 'msg assistant';
+		for (var i = 0; i < images.length; i++) {
+			var im = document.createElement('img'); im.className = 'genimg'; im.src = images[i]; im.title = prompt || '';
+			(function (src) { im.addEventListener('click', function () { vscode.postMessage({ type: 'openImage', dataUrl: src }); }); })(images[i]);
+			el.appendChild(im);
+		}
+		if (caption) { var cap = document.createElement('div'); cap.className = 'genimg-cap'; cap.textContent = caption; el.appendChild(cap); }
+		log.appendChild(el); log.scrollTop = log.scrollHeight;
+	}
 	function send() {
 		var text = input.value.trim();
 		if (!text && pendingImages.length === 0) { return; }
@@ -1998,6 +2136,7 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 	newBtn.addEventListener('click', function () { vscode.postMessage({ type: 'newChat' }); });
 	modeVibe.addEventListener('click', function () { vscode.postMessage({ type: 'setMode', mode: 'vibe' }); });
 	modeSpec.addEventListener('click', function () { vscode.postMessage({ type: 'setMode', mode: 'spec' }); });
+	modeImg.addEventListener('click', function () { vscode.postMessage({ type: 'setMode', mode: 'img' }); });
 	input.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
 	function autoGrow() { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 200) + 'px'; }
 	input.addEventListener('input', autoGrow);
@@ -2157,6 +2296,8 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 			currentMode = m.state.mode;
 			modeVibe.className = 'modebtn' + (m.state.mode === 'vibe' ? ' active' : '');
 			modeSpec.className = 'modebtn' + (m.state.mode === 'spec' ? ' active' : '');
+			if (modeImg) { modeImg.className = 'modebtn' + (m.state.mode === 'img' ? ' active' : ''); }
+			input.placeholder = m.state.mode === 'img' ? 'Descrivi l\\'immagine da generare…' : 'Chiedi o incolla codice…';
 			var wcards = log.querySelectorAll('.welcome .card');
 			for (var wc = 0; wc < wcards.length; wc++) { wcards[wc].className = 'card' + (wcards[wc].getAttribute('data-mode') === currentMode ? ' active' : ''); }
 			autoBtn.className = 'toggle' + (m.state.autopilot ? ' on' : '');
@@ -2207,6 +2348,7 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 		else if (m.type === 'streamEnd') { if (current && current.elapsed && mgTurnStart) { current.elapsed.textContent = fmtElapsed(Date.now() - mgTurnStart); } var _et = current ? current.raw : ''; current = null; if (mgHandsFree && _et) { speakThenListen(_et); } }
 		else if (m.type === 'streamCancel') { if (current) { current.el.remove(); current = null; } }
 		else if (m.type === 'assistant') { addStatic('assistant', m.text); if (mgHandsFree && m.text) { speakThenListen(m.text); } }
+		else if (m.type === 'image') { addGenImages(m.images, m.caption, m.prompt); }
 		else if (m.type === 'tool') { lastToolResult = addTool(m.name, m.args); workSub('· ' + m.name); }
 		else if (m.type === 'toolResult') { if (lastToolResult) { lastToolResult.textContent = m.text; log.scrollTop = log.scrollHeight; } }
 		else if (m.type === 'error') { addStatic('error', '⚠ ' + m.text); }

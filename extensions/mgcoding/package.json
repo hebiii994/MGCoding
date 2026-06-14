@@ -3,7 +3,7 @@
 	"publisher": "mgcoding",
 	"displayName": "MGCoding",
 	"description": "Agente di sviluppo spec-driven (Specs, Steering, Hooks, MCP) con LLM locale o Claude.",
-	"version": "0.8.7",
+	"version": "0.9.0",
 	"license": "MIT",
 	"engines": {
 		"vscode": "^1.5.0"
@@ -712,6 +712,28 @@
 					"type": "boolean",
 					"default": true,
 					"description": "Per i modelli locali piccoli (≤8B) usa un system prompt condensato: le istruzioni lunghe li confondono (instruction dilution). Disattiva per usare sempre il prompt completo."
+				},
+				"mgcoding.image.backend": {
+					"type": "string",
+					"enum": ["auto", "a1111", "comfyui", "gemini", "openai"],
+					"enumDescriptions": ["Rileva automaticamente: prima un server locale, poi una API key cloud", "Stable Diffusion locale (Automatic1111/SD.Next/Forge)", "ComfyUI locale", "Google Imagen (usa la API key Gemini)", "OpenAI gpt-image-1 (usa la API key OpenAI)"],
+					"default": "auto",
+					"description": "Backend per la generazione immagini (modalità Img della chat). 'auto' sceglie da solo il migliore disponibile."
+				},
+				"mgcoding.image.localEndpoint": {
+					"type": "string",
+					"default": "http://127.0.0.1:7860",
+					"description": "Endpoint del server Stable Diffusion locale compatibile Automatic1111 (A1111/SD.Next/Forge)."
+				},
+				"mgcoding.image.comfyEndpoint": {
+					"type": "string",
+					"default": "http://127.0.0.1:8188",
+					"description": "Endpoint del server ComfyUI locale."
+				},
+				"mgcoding.image.enhancePrompt": {
+					"type": "boolean",
+					"default": true,
+					"description": "Migliora automaticamente il prompt immagine (lo espande in inglese e sceglie il rapporto d'aspetto) con il modello di chat attivo, così bastano poche parole."
 				},
 				"mgcoding.mcp.maxTools": {
 					"type": "number",
