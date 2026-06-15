@@ -478,6 +478,123 @@ export async function installMissingNodesForWorkflow(endpoint: string, workflowN
 	vscode.window.showInformationMessage(`Nodi installati in custom_nodes/. RIAVVIA ComfyUI per caricarli${unresolved.length ? `. Da installare a mano: ${unresolved.join(', ')}` : '.'}`);
 }
 
+/** Cartella di models/ in base al nome del campo (ckpt_name → checkpoints, ecc.). */
+function keyToModelDir(key: string): string {
+	const k = key.toLowerCase();
+	if (k.includes('ckpt')) { return 'checkpoints'; }
+	if (k.includes('vae')) { return 'vae'; }
+	if (k.includes('lora')) { return 'loras'; }
+	if (k.includes('control_net') || k.includes('controlnet')) { return 'controlnet'; }
+	if (k.includes('unet') || k.includes('diffusion')) { return 'diffusion_models'; }
+	if (k.includes('clip') || k.includes('text_encoder')) { return 'text_encoders'; }
+	if (k.includes('style_model')) { return 'style_models'; }
+	if (k.includes('upscale')) { return 'upscale_models'; }
+	return 'checkpoints';
+}
+
+/** Modelli referenziati dal workflow con la cartella di destinazione dedotta dal campo. */
+function referencedModelsWithDir(workflow: Record<string, { inputs?: Record<string, unknown> }>): { filename: string; dir: string }[] {
+	const out = new Map<string, string>();
+	for (const node of Object.values(workflow)) {
+		for (const [k, v] of Object.entries(node.inputs ?? {})) {
+			if (typeof v === 'string' && /_name$/.test(k) && /\.(safetensors|ckpt|pt|pth|bin|gguf)$/i.test(v)) {
+				out.set(v, keyToModelDir(k));
+			}
+		}
+	}
+	return [...out.entries()].map(([filename, dir]) => ({ filename, dir }));
+}
+
+/**
+ * Scarica automaticamente i MODELLI mancanti di un workflow (come i tool della community):
+ * risolve i nomi file tramite la lista curata di ComfyUI-Manager (model-list.json) e li scarica
+ * nelle cartelle giuste. Per i non risolti offre l'incolla-URL. RICHIEDE CONFERMA.
+ */
+export async function installMissingModelsForWorkflow(endpoint: string, workflowName: string): Promise<void> {
+	const wf = await loadWorkflow(workflowName);
+	if (!wf) {
+		vscode.window.showWarningMessage(`Workflow «${workflowName}» non trovato.`);
+		return;
+	}
+	let missing: string[];
+	try {
+		missing = await missingModels(endpoint, wf);
+	} catch (err) {
+		vscode.window.showWarningMessage(`Non riesco a leggere i modelli da ComfyUI (${err instanceof Error ? err.message : String(err)}). È avviato su ${endpoint}?`);
+		return;
+	}
+	if (!missing.length) {
+		vscode.window.showInformationMessage('Nessun modello mancante per questo workflow.');
+		return;
+	}
+	const modelsDir = comfyModelsDir();
+	if (!modelsDir) {
+		vscode.window.showWarningMessage('Imposta prima la cartella di ComfyUI ("MGCoding: Seleziona cartella ComfyUI").');
+		return;
+	}
+	const refDirs = new Map(referencedModelsWithDir(wf).map(r => [r.filename, r.dir]));
+	// Lista curata di modelli di ComfyUI-Manager: filename -> {url, dir}.
+	const catalog = new Map<string, { url: string; dir: string }>();
+	try {
+		const res = await fetch('https://raw.githubusercontent.com/ltdrdata/ComfyUI-Manager/main/model-list.json', { signal: AbortSignal.timeout(20000) });
+		if (res.ok) {
+			const data = await res.json() as { models?: { filename?: string; url?: string; type?: string; save_path?: string }[] };
+			for (const m of data.models ?? []) {
+				if (m.filename && m.url) {
+					const dir = (m.save_path && m.save_path !== 'default') ? m.save_path : (m.type || 'checkpoints');
+					catalog.set(m.filename, { url: m.url, dir });
+				}
+			}
+		}
+	} catch {
+		// proseguo con catalog vuoto: tutti finiranno tra i "non risolti"
+	}
+	const resolved: { filename: string; url: string; dir: string }[] = [];
+	const unresolved: string[] = [];
+	for (const name of missing) {
+		const hit = catalog.get(name);
+		if (hit) {
+			resolved.push({ filename: name, url: hit.url, dir: hit.dir });
+		} else {
+			unresolved.push(name);
+		}
+	}
+	if (resolved.length) {
+		const ok = await vscode.window.showWarningMessage(
+			`Scarico ${resolved.length} modello/i mancante/i del workflow «${workflowName}»?`,
+			{ modal: true, detail: resolved.map(r => `• ${r.filename} → models/${r.dir}`).join('\n') + (unresolved.length ? `\n\nNon trovati nel catalogo (incolla URL a parte): ${unresolved.join(', ')}` : '') },
+			'Scarica'
+		);
+		if (ok === 'Scarica') {
+			for (const r of resolved) {
+				try {
+					await downloadFile(r.url, path.join(modelsDir, r.dir, r.filename), r.filename);
+				} catch (err) {
+					vscode.window.showWarningMessage(`Download di ${r.filename} fallito: ${err instanceof Error ? err.message : String(err)}`);
+				}
+			}
+		}
+	}
+	// Per i non risolti: offri l'incolla-URL uno per uno.
+	for (const name of unresolved) {
+		const url = (await vscode.window.showInputBox({ title: `Modello non trovato: ${name}`, prompt: `Incolla l'URL di download per "${name}" (vuoto = salta)`, placeHolder: 'https://...' }))?.trim();
+		if (url) {
+			try {
+				await downloadFile(url, path.join(modelsDir, refDirs.get(name) ?? 'checkpoints', name), name);
+			} catch (err) {
+				vscode.window.showWarningMessage(`Download di ${name} fallito: ${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
+	}
+	vscode.window.showInformationMessage('Download modelli completato. Se hai installato anche dei nodi, riavvia ComfyUI.');
+}
+
+/** Risolve un workflow: installa nodi mancanti E scarica i modelli mancanti. */
+export async function fixWorkflow(endpoint: string, workflowName: string): Promise<void> {
+	await installMissingNodesForWorkflow(endpoint, workflowName);
+	await installMissingModelsForWorkflow(endpoint, workflowName);
+}
+
 /** Modelli del workflow NON disponibili in ComfyUI (confronto con /object_info). */
 export async function missingModels(endpoint: string, workflow: Record<string, { inputs?: Record<string, unknown> }>): Promise<string[]> {
 	const referenced = referencedModels(workflow);

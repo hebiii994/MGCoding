@@ -5,7 +5,7 @@
 import * as vscode from 'vscode';
 import { runAgent } from './agent/agentLoop';
 import { initAgentStats, statsSummary } from './agent/agentStats';
-import { pickComfyFolder, downloadImageModel, listWorkflows, listCheckpoints, installMissingNodesForWorkflow, importWorkflow, pickGalleryFolder } from './media/comfyHelper';
+import { pickComfyFolder, downloadImageModel, listWorkflows, listCheckpoints, installMissingNodesForWorkflow, installMissingModelsForWorkflow, fixWorkflow, importWorkflow, pickGalleryFolder } from './media/comfyHelper';
 import { ImageStudioProvider } from './media/imageStudioView';
 import { ChatViewProvider } from './chat/chatViewProvider';
 import { registerDiffApproval } from './edit/diffApproval';
@@ -173,6 +173,24 @@ export function activate(context: vscode.ExtensionContext): void {
 				return;
 			}
 			await installMissingNodesForWorkflow(cfg.get<string>('image.comfyEndpoint', 'http://127.0.0.1:8188'), wf);
+		}),
+		vscode.commands.registerCommand('mgcoding.installMissingModels', async () => {
+			const cfg = vscode.workspace.getConfiguration('mgcoding');
+			const wf = cfg.get<string>('image.workflow', '');
+			if (!wf) {
+				vscode.window.showInformationMessage('Imposta prima un workflow con "MGCoding: Scegli workflow ComfyUI".');
+				return;
+			}
+			await installMissingModelsForWorkflow(cfg.get<string>('image.comfyEndpoint', 'http://127.0.0.1:8188'), wf);
+		}),
+		vscode.commands.registerCommand('mgcoding.fixWorkflow', async () => {
+			const cfg = vscode.workspace.getConfiguration('mgcoding');
+			const wf = cfg.get<string>('image.workflow', '');
+			if (!wf) {
+				vscode.window.showInformationMessage('Imposta prima un workflow con "MGCoding: Scegli workflow ComfyUI".');
+				return;
+			}
+			await fixWorkflow(cfg.get<string>('image.comfyEndpoint', 'http://127.0.0.1:8188'), wf);
 		}),
 		vscode.commands.registerCommand('mgcoding.selectWorkflow', async () => {
 			const wfs = await listWorkflows();
