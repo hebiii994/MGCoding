@@ -89,6 +89,13 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 		if (!this.view) {
 			return;
 		}
+		// Aggiorna i permessi di risorsa del webview alla cartella galleria CORRENTE: senza questo,
+		// se l'utente sceglie una cartella fuori dal workspace (es. output di ComfyUI) le anteprime
+		// non si caricano (il webview blocca i file fuori da localResourceRoots).
+		this.view.webview.options = {
+			enableScripts: true,
+			localResourceRoots: [this.extensionUri, generatedDirUri(), ...(vscode.workspace.workspaceFolders?.map(f => f.uri) ?? [])]
+		};
 		const cfg = vscode.workspace.getConfiguration('mgcoding');
 		const endpoint = cfg.get<string>('image.comfyEndpoint', 'http://127.0.0.1:8188');
 		const [checkpoints, workflows, gallery] = await Promise.all([listCheckpoints(endpoint), listWorkflows(), this.galleryUris()]);
