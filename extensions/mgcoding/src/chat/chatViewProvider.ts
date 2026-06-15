@@ -1031,11 +1031,13 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 		await this.compactIfNeeded(session);
 		this.abort = new AbortController();
 		const hasImg = !!images?.length;
-		const sys = `Sei un assistente AI utile, amichevole e diretto. Conversi liberamente con l'utente: rispondi in modo chiaro e utile, in italiano se l'utente scrive in italiano. NON sei legato ad alcun progetto o codice: non assumere che l'utente voglia sviluppare software se non lo chiede esplicitamente. Usa Markdown quando aiuta. NON puoi eseguire azioni, comandi o tool e NON puoi generare immagini tu stesso: NON scrivere blocchi tool/JSON né fingere di farlo.${hasImg ? ' L\'utente ha allegato un\'IMMAGINE: se chiede di modificarla, scrivi un prompt in INGLESE che descriva il RISULTATO desiderato (l\'immagine allegata verrà usata come base per img2img quando l\'utente preme "🎨 Genera immagine").' : ' Se ti chiedono un\'immagine, scrivi un ottimo prompt e di\' all\'utente di premere il pulsante "🎨 Genera immagine" sotto la tua risposta (oppure la modalità Img).'}`;
+		const sys = `Sei un assistente AI utile, amichevole e diretto. Conversi liberamente con l'utente: rispondi in modo chiaro e utile, in italiano se l'utente scrive in italiano. NON sei legato ad alcun progetto o codice: non assumere che l'utente voglia sviluppare software se non lo chiede esplicitamente. Usa Markdown quando aiuta. NON puoi eseguire azioni, comandi o tool e NON puoi generare immagini tu stesso: NON scrivere blocchi tool/JSON né fingere di farlo.${hasImg ? ' L\'utente ha allegato un\'IMMAGINE: se chiede di modificarla, scrivi un prompt in INGLESE che descriva il RISULTATO desiderato (l\'immagine allegata verrà usata come base per img2img quando l\'utente preme "🎨 Genera immagine").' : ' Se ti chiedono un\'immagine, scrivi un ottimo prompt e di\' all\'utente di premere il pulsante "🎨 Genera immagine" sotto la tua risposta (oppure la modalità Img).'} IMPORTANTE: NON ripetere a pappagallo le risposte precedenti; varia il contenuto. Se l'utente ti corregge o dice che hai sbagliato, NON riproporre la stessa cosa: cambia approccio e rispondi alla correzione.`;
 		let streamBuf = '';
 		try {
 			this.post({ type: 'streamStart' });
-			streamBuf = await streamPure(this.registry, session.messages, sys, t => this.post({ type: 'streamDelta', text: t }), this.abort.signal);
+			// Temperatura alta per la chat creativa (libera): meno ripetizioni/"pappagallo".
+			const chatTemp = vscode.workspace.getConfiguration('mgcoding').get<number>('chat.temperature', 0.8);
+			streamBuf = await streamPure(this.registry, session.messages, sys, t => this.post({ type: 'streamDelta', text: t }), this.abort.signal, undefined, chatTemp);
 			this.post({ type: 'streamEnd' });
 			if (streamBuf.trim()) {
 				session.messages.push({ role: 'assistant', content: streamBuf });

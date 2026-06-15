@@ -17,6 +17,8 @@ export interface LLMRequest {
 	/** Storico conversazione (senza system). */
 	messages: ChatMessage[];
 	maxTokens?: number;
+	/** Temperatura override (es. alta per la chat creativa "Libera"); se assente usa il default. */
+	temperature?: number;
 	signal?: AbortSignal;
 }
 

@@ -191,8 +191,16 @@ export class OllamaProvider implements LLMProvider {
 				return msg;
 			})
 		];
+		// Temperatura: override della richiesta (es. chat "Libera" creativa) o default di config.
+		// In modalità creativa (temp alta) aggiungo repeat_penalty per evitare il "pappagallo".
+		const temp = req.temperature ?? cfg.temperature ?? 0.2;
+		const options: Record<string, number> = { temperature: temp };
+		if (temp >= 0.5) {
+			options.repeat_penalty = 1.3;
+			options.top_p = 0.9;
+		}
 		let thinkOpen = false;
-		for await (const evt of this.postNdjson({ model: cfg.model, messages, options: { temperature: cfg.temperature ?? 0.2 }, ...(cfg.think ? { think: true } : {}) }, req.signal)) {
+		for await (const evt of this.postNdjson({ model: cfg.model, messages, options, ...(cfg.think ? { think: true } : {}) }, req.signal)) {
 			if (evt.error) {
 				throw new LLMError(`Ollama error: ${evt.error}`);
 			}
