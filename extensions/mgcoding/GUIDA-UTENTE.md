@@ -101,9 +101,14 @@ Tre modalità (pulsanti *Vibe* / *Spec* / *🎨 Img* in alto):
     *formato API* (Save → API Format), mettilo in `.mg/workflows/`, selezionalo. In modalità Img
     MGCoding inietta il prompt ed esegue quel workflow (FLUX, upscaler, LoRA…). Prima dell'avvio
     controlla se mancano modelli o **nodi custom** e te lo segnala.
-  - **`MGCoding: Installa nodi mancanti (ComfyUI)`** — per il workflow selezionato, individua i
-    nodi custom mancanti, li risolve tramite l'elenco di ComfyUI-Manager, e (con conferma) li
-    clona in `custom_nodes/` installandone le dipendenze. Poi riavvia ComfyUI.
+  - **`MGCoding: Risolvi workflow (nodi + modelli mancanti)`** — pulsante 🩹 nell'Image Studio:
+    per il workflow attivo installa i **nodi** custom mancanti (via l'elenco di ComfyUI-Manager,
+    git clone + dipendenze) **e scarica i modelli** mancanti (checkpoint/VAE/LoRA/encoder…)
+    risolvendoli dalla lista curata di modelli di ComfyUI-Manager, con incolla-URL per i casi
+    non trovati. Tutto con conferma; poi riavvia ComfyUI. Esistono anche i comandi separati
+    "Installa nodi mancanti" e "Scarica modelli mancanti del workflow".
+    Nota: MGCoding analizza il workflow ATTIVO in `.mg/workflows/` (formato API), non quello
+    aperto nella scheda di ComfyUI.
 
 Mentre l'agente lavora vedi l'indicatore **"MGCoding sta lavorando · *strumento*"** e, per le
 risposte, il pannello **Ragionamento** (think) espandibile. I blocchi di codice hanno i

@@ -3,7 +3,7 @@
 	"publisher": "mgcoding",
 	"displayName": "MGCoding",
 	"description": "Agente di sviluppo spec-driven (Specs, Steering, Hooks, MCP) con LLM locale o Claude.",
-	"version": "0.9.14",
+	"version": "0.9.15",
 	"license": "MIT",
 	"engines": {
 		"vscode": "^1.5.0"
@@ -151,6 +151,14 @@
 			{
 				"command": "mgcoding.installMissingNodes",
 				"title": "MGCoding: Installa nodi mancanti (ComfyUI)"
+			},
+			{
+				"command": "mgcoding.installMissingModels",
+				"title": "MGCoding: Scarica modelli mancanti del workflow (ComfyUI)"
+			},
+			{
+				"command": "mgcoding.fixWorkflow",
+				"title": "MGCoding: Risolvi workflow (nodi + modelli mancanti)"
 			},
 			{
 				"command": "mgcoding.importWorkflow",

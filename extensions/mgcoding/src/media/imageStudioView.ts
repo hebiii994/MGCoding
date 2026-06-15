@@ -218,7 +218,7 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 			<button data-cmd="mgcoding.selectCheckpoint">🎯 Checkpoint</button>
 			<button data-cmd="mgcoding.selectWorkflow">🎛 Workflow</button>
 			<button data-cmd="mgcoding.importWorkflow">⬆ Importa workflow</button>
-			<button data-cmd="mgcoding.installMissingNodes">🧩 Nodi mancanti</button>
+			<button data-cmd="mgcoding.fixWorkflow" class="primary">🩹 Risolvi workflow</button>
 			<button data-cmd="mgcoding.openChat" class="primary">💬 Apri chat Img</button>
 			<button data-cmd="mgcoding.recommendModel">💡 Consiglia modello</button>
 		</div>
