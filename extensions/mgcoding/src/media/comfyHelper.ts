@@ -359,15 +359,12 @@ export async function missingNodes(endpoint: string, workflow: Record<string, { 
 	if (!used.size) {
 		return [];
 	}
-	let known = new Set<string>();
-	try {
-		const res = await fetch(`${endpoint.replace(/\/$/, '')}/object_info`, { signal: AbortSignal.timeout(8000) });
-		if (res.ok) {
-			known = new Set(Object.keys(await res.json() as Record<string, unknown>));
-		}
-	} catch {
-		return []; // senza /object_info non possiamo sapere cosa manca
+	// object_info può essere grande su ComfyUI con molti nodi: timeout generoso.
+	const res = await fetch(`${endpoint.replace(/\/$/, '')}/object_info`, { signal: AbortSignal.timeout(25000) });
+	if (!res.ok) {
+		throw new Error(`ComfyUI /object_info ha risposto ${res.status}`);
 	}
+	const known = new Set(Object.keys(await res.json() as Record<string, unknown>));
 	return [...used].filter(c => !known.has(c));
 }
 
@@ -394,9 +391,21 @@ export async function installMissingNodesForWorkflow(endpoint: string, workflowN
 		vscode.window.showWarningMessage(`Workflow «${workflowName}» non trovato.`);
 		return;
 	}
-	const missing = await missingNodes(endpoint, wf);
+	// Se il workflow non ha class_type, è in formato UI (non API): non analizzabile.
+	const hasClassTypes = Object.values(wf).some(n => n && typeof (n as { class_type?: unknown }).class_type === 'string');
+	if (!hasClassTypes) {
+		vscode.window.showWarningMessage(`«${workflowName}» non è in formato API (manca class_type). In ComfyUI: Save → API Format, poi reimportalo. Per ora usa ComfyUI-Manager per i nodi mancanti.`);
+		return;
+	}
+	let missing: string[];
+	try {
+		missing = await missingNodes(endpoint, wf);
+	} catch (err) {
+		vscode.window.showWarningMessage(`Non riesco a leggere i nodi da ComfyUI (${err instanceof Error ? err.message : String(err)}). È avviato su ${endpoint}? In alternativa usa ComfyUI-Manager (più completo).`);
+		return;
+	}
 	if (!missing.length) {
-		vscode.window.showInformationMessage('Nessun nodo mancante: il workflow è completo.');
+		vscode.window.showInformationMessage('Per QUESTO workflow non risultano nodi mancanti. Nota: MGCoding controlla il workflow attivo in .mg/workflows, non quello aperto nella scheda di ComfyUI. Per workflow complessi usa ComfyUI-Manager (Install Missing Custom Nodes + Models).');
 		return;
 	}
 	const { customNodes, python } = comfyPaths();
