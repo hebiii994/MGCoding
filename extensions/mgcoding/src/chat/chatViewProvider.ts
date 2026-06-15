@@ -1149,7 +1149,10 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 				// "Porta il tuo workflow": controlla modelli E nodi mancanti, poi esegui.
 				const wf = await loadWorkflow(workflowName);
 				if (wf) {
-					const [missing, nodes] = await Promise.all([missingModels(backend.endpoint!, wf), missingNodes(backend.endpoint!, wf)]);
+					const [missing, nodes] = await Promise.all([
+						missingModels(backend.endpoint!, wf).catch(() => [] as string[]),
+						missingNodes(backend.endpoint!, wf).catch(() => [] as string[])
+					]);
 					if (missing.length) {
 						this.post({ type: 'assistant', text: `⚠ Il workflow «${workflowName}» richiede modelli non installati: ${missing.join(', ')}.\nScaricali con **MGCoding: Scarica modello immagini**.` });
 					}
