@@ -249,11 +249,12 @@ export async function streamPure(
 	system: string,
 	onDelta: (text: string) => void,
 	signal?: AbortSignal,
-	providerOverride?: LLMProvider
+	providerOverride?: LLMProvider,
+	temperature?: number
 ): Promise<string> {
 	const provider = providerOverride ?? registry.current();
 	let full = '';
-	for await (const delta of provider.stream({ system, messages, signal })) {
+	for await (const delta of provider.stream({ system, messages, signal, temperature })) {
 		full += delta;
 		onDelta(delta);
 	}

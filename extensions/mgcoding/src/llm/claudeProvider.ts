@@ -114,7 +114,7 @@ export class ClaudeProvider implements LLMProvider {
 	/** Streaming di solo testo (chat semplice / fallback). */
 	async *stream(req: LLMRequest): AsyncIterable<string> {
 		const cfg = this.getConfig();
-		const body = {
+		const body: Record<string, unknown> = {
 			model: cfg.model,
 			max_tokens: req.maxTokens ?? cfg.maxTokens,
 			system: cachedSystem(req.system),
@@ -122,6 +122,9 @@ export class ClaudeProvider implements LLMProvider {
 				.filter(m => m.role !== 'system')
 				.map((m: ChatMessage) => ({ role: m.role, content: m.content }))
 		};
+		if (typeof req.temperature === 'number') {
+			body.temperature = req.temperature;
+		}
 		for await (const evt of this.postStream(body, req.signal)) {
 			if (evt.type === 'content_block_delta' && evt.delta?.type === 'text_delta' && evt.delta.text) {
 				yield evt.delta.text;

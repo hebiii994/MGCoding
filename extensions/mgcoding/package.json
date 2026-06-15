@@ -3,7 +3,7 @@
 	"publisher": "mgcoding",
 	"displayName": "MGCoding",
 	"description": "Agente di sviluppo spec-driven (Specs, Steering, Hooks, MCP) con LLM locale o Claude.",
-	"version": "0.9.10",
+	"version": "0.9.11",
 	"license": "MIT",
 	"engines": {
 		"vscode": "^1.5.0"
@@ -820,7 +820,12 @@
 				"mgcoding.ollama.temperature": {
 					"type": "number",
 					"default": 0.2,
-					"description": "Temperatura dei modelli Ollama: bassa (0–0.2) consigliata per i task con tool/codice (meno errori e JSON malformato)."
+					"description": "Temperatura dei modelli Ollama per i task con tool/codice (agente): bassa (0–0.2) consigliata (meno errori e JSON malformato). Per la chat libera si usa invece mgcoding.chat.temperature."
+				},
+				"mgcoding.chat.temperature": {
+					"type": "number",
+					"default": 0.8,
+					"description": "Temperatura per la chat libera/creativa (modalità Libera): alta (0.7–0.9) per risposte varie e meno ripetitive. Con valori ≥0.5 si attiva anche una penalità anti-ripetizione."
 				},
 				"mgcoding.ollama.structuredTools": {
 					"type": "boolean",

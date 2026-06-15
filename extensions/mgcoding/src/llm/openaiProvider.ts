@@ -158,7 +158,12 @@ export class OpenAIProvider implements LLMProvider {
 			...(req.system ? [{ role: 'system', content: req.system }] : []),
 			...req.messages.map(m => ({ role: m.role, content: m.content }))
 		];
-		for await (const evt of this.postStream({ model: cfg.model, messages }, req.signal)) {
+		const body: Record<string, unknown> = { model: cfg.model, messages };
+		if (typeof req.temperature === 'number') {
+			body.temperature = req.temperature;
+			body.frequency_penalty = 0.4; // riduce le ripetizioni nella chat creativa
+		}
+		for await (const evt of this.postStream(body, req.signal)) {
 			const delta = evt.choices?.[0]?.delta?.content;
 			if (delta) {
 				yield delta as string;
