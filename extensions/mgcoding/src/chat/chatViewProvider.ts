@@ -1678,7 +1678,7 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 	.modebtn.active { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
 	#newbtn { flex: 0 0 auto; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; border-radius: 6px; padding: 3px 9px; cursor: pointer; }
 	#delbtn { flex: 0 0 auto; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; border-radius: 6px; padding: 3px 7px; cursor: pointer; }
-	#log { flex: 1 1 auto; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+	#log { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
 	.empty { margin: auto; text-align: center; opacity: 0.6; line-height: 1.7; padding: 16px; }
 	.welcome { margin: auto; width: 100%; max-width: 520px; padding: 24px 18px; box-sizing: border-box; }
 	.welcome-icon { text-align: center; font-size: 26px; line-height: 1; margin-bottom: 10px; }
@@ -1819,7 +1819,7 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 	#thumbs img { height: 46px; border-radius: 4px; display: block; }
 	#thumbs .x { position: absolute; top: -6px; right: -6px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border-radius: 50%; width: 16px; height: 16px; font-size: 11px; line-height: 16px; text-align: center; cursor: pointer; }
 	.msg img.thumb { max-height: 140px; border-radius: 6px; margin: 4px 4px 0 0; }
-	.msg img.genimg { max-width: 100%; border-radius: 8px; margin: 4px 0; cursor: zoom-in; display: block; }
+	.msg img.genimg { max-width: 100%; max-height: 60vh; object-fit: contain; border-radius: 8px; margin: 4px 0; cursor: zoom-in; display: block; }
 	.genimg-cap { font-size: 11px; opacity: 0.75; margin-top: 2px; }
 </style>
 </head>
@@ -2267,13 +2267,14 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 		});
 	}
 	function addThumbsTo(el, imgs) {
-		for (var i = 0; i < imgs.length; i++) { var im = document.createElement('img'); im.className = 'thumb'; im.src = imgs[i]; el.appendChild(im); }
+		for (var i = 0; i < imgs.length; i++) { var im = document.createElement('img'); im.className = 'thumb'; im.src = imgs[i]; im.addEventListener('load', function () { log.scrollTop = log.scrollHeight; }); el.appendChild(im); }
 	}
 	function addGenImages(images, caption, prompt) {
 		ensureCleared();
 		var el = document.createElement('div'); el.className = 'msg assistant';
 		for (var i = 0; i < images.length; i++) {
 			var im = document.createElement('img'); im.className = 'genimg'; im.src = images[i]; im.title = prompt || '';
+			im.addEventListener('load', function () { log.scrollTop = log.scrollHeight; });
 			(function (src) { im.addEventListener('click', function () { vscode.postMessage({ type: 'openImage', dataUrl: src }); }); })(images[i]);
 			el.appendChild(im);
 		}
