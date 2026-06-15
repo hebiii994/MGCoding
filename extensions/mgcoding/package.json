@@ -3,7 +3,7 @@
 	"publisher": "mgcoding",
 	"displayName": "MGCoding",
 	"description": "Agente di sviluppo spec-driven (Specs, Steering, Hooks, MCP) con LLM locale o Claude.",
-	"version": "0.9.11",
+	"version": "0.9.12",
 	"license": "MIT",
 	"engines": {
 		"vscode": "^1.5.0"
@@ -801,6 +801,27 @@
 					"enumDescriptions": ["Lo sceglie l'ottimizzatore in base alla richiesta", "Quadrato", "Verticale (ritratti, full body)", "Orizzontale (foto)", "Verticale alto (telefono, full body)", "Orizzontale ampio (panorami)", "Verticale 3:4", "Orizzontale 4:3"],
 					"default": "auto",
 					"description": "Rapporto d'aspetto delle immagini generate. Per una persona a figura intera (full body) usa un formato VERTICALE come 2:3 o 9:16. 'auto' lo fa scegliere all'ottimizzatore del prompt."
+				},
+				"mgcoding.image.steps": {
+					"type": "number",
+					"default": 0,
+					"description": "Passi di campionamento (steps) per la generazione immagini. 0 = automatico in base al modello (SDXL ~28, FLUX schnell ~4)."
+				},
+				"mgcoding.image.cfg": {
+					"type": "number",
+					"default": 0,
+					"description": "CFG scale (aderenza al prompt). 0 = automatico (SDXL ~6, FLUX ~1). Valori alti = più fedele ma rischio artefatti."
+				},
+				"mgcoding.image.sampler": {
+					"type": "string",
+					"enum": ["auto", "euler", "euler_ancestral", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "ddim", "uni_pc"],
+					"default": "auto",
+					"description": "Sampler per ComfyUI/A1111. 'auto' = euler (consigliato). dpmpp_2m è un'ottima alternativa per SDXL."
+				},
+				"mgcoding.image.seed": {
+					"type": "number",
+					"default": -1,
+					"description": "Seed della generazione. -1 = casuale ogni volta; un valore fisso riproduce lo stesso risultato (utile per confronti)."
 				},
 				"mgcoding.image.denoise": {
 					"type": "number",

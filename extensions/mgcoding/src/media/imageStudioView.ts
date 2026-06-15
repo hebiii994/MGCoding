@@ -105,6 +105,11 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 			enhanceModel: cfg.get<string>('image.enhanceModel', ''),
 			aspect: cfg.get<string>('image.aspect', 'auto'),
 			denoise: cfg.get<number>('image.denoise', 0.6),
+			steps: cfg.get<number>('image.steps', 0),
+			cfg: cfg.get<number>('image.cfg', 0),
+			sampler: cfg.get<string>('image.sampler', 'auto'),
+			seed: cfg.get<number>('image.seed', -1),
+			chatTemp: cfg.get<number>('chat.temperature', 0.8),
 			comfyRoot: cfg.get<string>('image.comfyRoot', ''),
 			galleryFolder: generatedDirUri().fsPath,
 			gallery
@@ -184,6 +189,21 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 	</div>
 
 	<div class="card">
+		<h3><span class="ic">🔧</span> Avanzate <span class="muted" style="text-transform:none;letter-spacing:0">(0/auto = automatico)</span></h3>
+		<div class="row"><label>Steps</label><input type="number" id="steps" min="0" max="100" step="1" /><span class="muted">0 = auto</span></div>
+		<div class="row"><label>CFG</label><input type="number" id="cfg" min="0" max="20" step="0.5" /><span class="muted">0 = auto</span></div>
+		<div class="row"><label>Sampler</label>
+			<select id="sampler">
+				<option value="auto">auto (euler)</option><option value="euler">euler</option><option value="euler_ancestral">euler ancestral</option>
+				<option value="dpmpp_2m">dpmpp 2m</option><option value="dpmpp_2m_sde">dpmpp 2m sde</option><option value="dpmpp_sde">dpmpp sde</option><option value="ddim">ddim</option><option value="uni_pc">uni_pc</option>
+			</select></div>
+		<div class="row"><label>Seed</label><input type="number" id="seed" step="1" /><button id="randSeed" title="Casuale">🎲</button></div>
+		<div class="hint">Seed -1 = casuale. Imposta un valore fisso per riprodurre lo stesso risultato.</div>
+		<div class="row"><label>Temp. chat</label><input type="range" id="chatTemp" min="0" max="1.2" step="0.05" /><span class="val" id="chatTempVal"></span></div>
+		<div class="hint">Temperatura della chat Libera: alta = risposte più varie e meno ripetitive.</div>
+	</div>
+
+	<div class="card">
 		<h3><span class="ic">⚡</span> Azioni rapide</h3>
 		<div class="actions">
 			<button data-cmd="mgcoding.pickComfyFolder">📁 Cartella ComfyUI</button>
@@ -224,6 +244,13 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 	$('enhanceModel').addEventListener('change', function(){ send({type:'setConfig', key:'image.enhanceModel', value:this.value}); });
 	$('denoise').addEventListener('input', function(){ $('denoiseVal').textContent = (+this.value).toFixed(2); });
 	$('denoise').addEventListener('change', function(){ send({type:'setConfig', key:'image.denoise', value:+this.value}); });
+	$('steps').addEventListener('change', function(){ send({type:'setConfig', key:'image.steps', value:+this.value||0}); });
+	$('cfg').addEventListener('change', function(){ send({type:'setConfig', key:'image.cfg', value:+this.value||0}); });
+	$('sampler').addEventListener('change', function(){ send({type:'setConfig', key:'image.sampler', value:this.value}); });
+	$('seed').addEventListener('change', function(){ send({type:'setConfig', key:'image.seed', value:+this.value}); });
+	$('randSeed').addEventListener('click', function(){ $('seed').value = -1; send({type:'setConfig', key:'image.seed', value:-1}); });
+	$('chatTemp').addEventListener('input', function(){ $('chatTempVal').textContent = (+this.value).toFixed(2); });
+	$('chatTemp').addEventListener('change', function(){ send({type:'setConfig', key:'chat.temperature', value:+this.value}); });
 	$('browseGal').addEventListener('click', function(){ send({type:'cmd', command:'mgcoding.pickGalleryFolder'}); });
 	$('openGal').addEventListener('click', function(){ send({type:'openFolder'}); });
 	$('refreshGal').addEventListener('click', function(){ send({type:'refresh'}); });
@@ -244,6 +271,8 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 		$('enhance').checked = !!m.enhancePrompt;
 		$('enhanceModel').value = m.enhanceModel || '';
 		$('denoise').value = m.denoise; $('denoiseVal').textContent = (+m.denoise).toFixed(2);
+		$('steps').value = m.steps; $('cfg').value = m.cfg; $('sampler').value = m.sampler || 'auto'; $('seed').value = m.seed;
+		$('chatTemp').value = m.chatTemp; $('chatTempVal').textContent = (+m.chatTemp).toFixed(2);
 		$('rootHint').textContent = m.comfyRoot ? ('ComfyUI: ' + m.comfyRoot) : 'Cartella ComfyUI non impostata (usa 📁).';
 		$('galPath').textContent = 'Cartella galleria: ' + m.galleryFolder;
 		var g = $('gallery'); g.innerHTML='';

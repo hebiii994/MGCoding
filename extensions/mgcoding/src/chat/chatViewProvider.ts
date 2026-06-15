@@ -1138,11 +1138,13 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 			const workflowName = cfg.get<string>('image.workflow', '');
 			const denoise = cfg.get<number>('image.denoise', 0.6);
 			const checkpoint = cfg.get<string>('image.checkpoint', '').trim() || undefined;
+			// Parametri avanzati (Image Studio → Avanzate): 0/auto/-1 = automatico per modello.
+			const adv = { steps: cfg.get<number>('image.steps', 0), cfg: cfg.get<number>('image.cfg', 0), sampler: cfg.get<string>('image.sampler', 'auto'), seed: cfg.get<number>('image.seed', -1) };
 			let result;
 			if (initImage) {
 				// Image-to-image: usa l'immagine allegata come base.
 				this.post({ type: 'toolResult', text: `${backend.label} · img2img (forza ${denoise})` });
-				result = await generateImage(backend, prompt, { aspect, count: 1, negative, initImage, denoise, checkpoint }, keys, this.abort.signal);
+				result = await generateImage(backend, prompt, { aspect, count: 1, negative, initImage, denoise, checkpoint, ...adv }, keys, this.abort.signal);
 			} else if (backend.id === 'comfyui' && workflowName) {
 				// "Porta il tuo workflow": controlla modelli E nodi mancanti, poi esegui.
 				const wf = await loadWorkflow(workflowName);
@@ -1160,7 +1162,7 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 				result = { images: imgs, mediaType: 'image/png', backendLabel: `ComfyUI · ${workflowName}` };
 			} else {
 				this.post({ type: 'toolResult', text: `${backend.label} · ${aspect}` });
-				result = await generateImage(backend, prompt, { aspect, count: 1, negative, checkpoint }, keys, this.abort.signal);
+				result = await generateImage(backend, prompt, { aspect, count: 1, negative, checkpoint, ...adv }, keys, this.abort.signal);
 			}
 			const saved: string[] = [];
 			const dataUrls: string[] = [];
