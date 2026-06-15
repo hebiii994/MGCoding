@@ -28,6 +28,12 @@ export interface ImageGenOptions {
 	denoise?: number;
 	/** Checkpoint ComfyUI da usare (nome file); se assente o non disponibile usa il primo. */
 	checkpoint?: string;
+	/** Override avanzati (0/'' = automatico in base al modello). */
+	steps?: number;
+	cfg?: number;
+	sampler?: string;
+	/** Seed: -1 (o assente) = casuale; valore fisso per riprodurre lo stesso risultato. */
+	seed?: number;
 }
 
 /** Sceglie il checkpoint: quello richiesto se disponibile, altrimenti il primo della lista. */
@@ -46,10 +52,25 @@ function pickCheckpoint(list: string[] | undefined, preferred?: string): string 
  * SD/SDXL usano cfg 6, 28 step e il negative prompt.
  */
 function samplerParams(ckpt: string, opts: ImageGenOptions): { steps: number; cfg: number; negative: string; sampler: string; scheduler: string } {
-	if (/flux/i.test(ckpt)) {
-		return { steps: /schnell/i.test(ckpt) ? 4 : 20, cfg: 1, negative: '', sampler: 'euler', scheduler: 'simple' };
+	const base = /flux/i.test(ckpt)
+		? { steps: /schnell/i.test(ckpt) ? 4 : 20, cfg: 1, negative: '', sampler: 'euler', scheduler: 'simple' }
+		: { steps: 28, cfg: 6, negative: opts.negative ?? DEFAULT_NEGATIVE, sampler: 'euler', scheduler: 'normal' };
+	// Override avanzati dall'utente (Image Studio → Avanzate).
+	if (opts.steps && opts.steps > 0) {
+		base.steps = opts.steps;
 	}
-	return { steps: 28, cfg: 6, negative: opts.negative ?? DEFAULT_NEGATIVE, sampler: 'euler', scheduler: 'normal' };
+	if (opts.cfg && opts.cfg > 0) {
+		base.cfg = opts.cfg;
+	}
+	if (opts.sampler && opts.sampler !== 'auto') {
+		base.sampler = opts.sampler;
+	}
+	return base;
+}
+
+/** Seed da usare: quello fisso indicato (>=0) o uno casuale. */
+function pickSeed(opts: ImageGenOptions): number {
+	return typeof opts.seed === 'number' && opts.seed >= 0 ? opts.seed : Math.floor(Math.random() * 1e15);
 }
 
 const DEFAULT_NEGATIVE = 'low quality, blurry, deformed, bad anatomy, extra limbs, extra arms, extra fingers, fused fingers, mutated hands, missing fingers, malformed, disfigured, watermark, text';
@@ -166,7 +187,7 @@ async function genA1111(endpoint: string, prompt: string, opts: ImageGenOptions,
 	const res = await fetch(`${endpoint}/sdapi/v1/txt2img`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify({ prompt, negative_prompt: opts.negative ?? DEFAULT_NEGATIVE, steps: 28, width, height, batch_size: Math.min(opts.count ?? 1, 4), cfg_scale: 6 }),
+		body: JSON.stringify({ prompt, negative_prompt: opts.negative ?? DEFAULT_NEGATIVE, steps: opts.steps && opts.steps > 0 ? opts.steps : 28, width, height, batch_size: Math.min(opts.count ?? 1, 4), cfg_scale: opts.cfg && opts.cfg > 0 ? opts.cfg : 6, ...(opts.sampler && opts.sampler !== 'auto' ? { sampler_name: opts.sampler } : {}), ...(typeof opts.seed === 'number' && opts.seed >= 0 ? { seed: opts.seed } : {}) }),
 		signal
 	});
 	if (!res.ok) {
@@ -192,7 +213,7 @@ async function genComfy(endpoint: string, prompt: string, opts: ImageGenOptions,
 		throw new Error('ComfyUI è attivo ma non ha nessun checkpoint installato. Scaricane uno con il comando "MGCoding: Scarica modello immagini" (es. SDXL Base), poi riprova.');
 	}
 	const { width, height } = aspectToSize(opts.aspect);
-	const seed = Math.floor(Math.random() * 1e15);
+	const seed = pickSeed(opts);
 	const sp = samplerParams(ckpt, opts); // parametri adatti al modello (FLUX vs SD/SDXL)
 	// Workflow txt2img minimale standard.
 	const workflow = {
@@ -305,7 +326,7 @@ async function genA1111Img2Img(endpoint: string, prompt: string, opts: ImageGenO
 	const res = await fetch(`${endpoint}/sdapi/v1/img2img`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify({ init_images: [opts.initImage], prompt, negative_prompt: opts.negative ?? DEFAULT_NEGATIVE, denoising_strength: opts.denoise ?? 0.6, steps: 28, width, height, cfg_scale: 6, batch_size: Math.min(opts.count ?? 1, 4) }),
+		body: JSON.stringify({ init_images: [opts.initImage], prompt, negative_prompt: opts.negative ?? DEFAULT_NEGATIVE, denoising_strength: opts.denoise ?? 0.6, steps: opts.steps && opts.steps > 0 ? opts.steps : 28, width, height, cfg_scale: opts.cfg && opts.cfg > 0 ? opts.cfg : 6, batch_size: Math.min(opts.count ?? 1, 4), ...(opts.sampler && opts.sampler !== 'auto' ? { sampler_name: opts.sampler } : {}), ...(typeof opts.seed === 'number' && opts.seed >= 0 ? { seed: opts.seed } : {}) }),
 		signal
 	});
 	if (!res.ok) {
@@ -338,7 +359,7 @@ async function genComfyImg2Img(endpoint: string, prompt: string, opts: ImageGenO
 		throw new Error('ComfyUI è attivo ma non ha nessun checkpoint installato. Scaricane uno con "MGCoding: Scarica modello immagini".');
 	}
 	const imageRef = uploaded.subfolder ? `${uploaded.subfolder}/${uploaded.name}` : uploaded.name;
-	const seed = Math.floor(Math.random() * 1e15);
+	const seed = pickSeed(opts);
 	const sp = samplerParams(ckpt, opts);
 	// 3) Workflow img2img: LoadImage -> VAEEncode -> KSampler(denoise) -> VAEDecode -> Save.
 	const workflow = {
