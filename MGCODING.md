@@ -48,17 +48,21 @@ git commit -m "0.9.18 - <descrizione breve>"
 ```
 
 ### 3. Build dell'installer
-Tre task gulp in sequenza (il wrapper `npm run gulp` usa già `--experimental-strip-types`):
+Quattro task gulp in sequenza (il wrapper `npm run gulp` usa già `--experimental-strip-types`):
 
 ```bash
-npm run gulp vscode-win32-x64-min            # ~4 min: compila tutto (incl. estensione mgcoding) e impacchetta in ../VSCode-win32-x64
+npm run gulp compile-extension:mgcoding      # ⚠️ OBBLIGATORIO: ricompila out/ dell'estensione mgcoding
+npm run gulp vscode-win32-x64-min            # ~4 min: impacchetta il prodotto in ../VSCode-win32-x64
 npm run gulp vscode-win32-x64-inno-updater   # pochi secondi: prepara l'updater
 npm run gulp vscode-win32-x64-user-setup     # ~6 min: Inno Setup → installer
 ```
 
-> `vscode-win32-x64-min` ricompila e include automaticamente l'estensione `mgcoding`:
-> non serve un passo separato. Il prodotto viene scritto in `../VSCode-win32-x64`
-> (cartella sorella del repo).
+> ⚠️ **IMPORTANTE — non saltare il primo passo.** A differenza delle altre estensioni built-in,
+> `mgcoding` **non** viene ricompilata da `vscode-win32-x64-min`: il packaging copia la cartella
+> `extensions/mgcoding/out/` così com'è sul disco. Se non lanci prima
+> `compile-extension:mgcoding` (oppure tieni attivo `npm run watch`), l'installer conterrà il
+> **codice compilato vecchio** e le tue modifiche non finiranno nella release. In alternativa
+> al primo comando puoi usare `npm --prefix extensions/mgcoding run compile`.
 
 Output: `.build/win32-x64/user-setup/MGCodingSetup.exe`. I numerosi `Warning` di Inno Setup
 sulle lingue (korean/chinese/hungarian) e su `x64`/variabili inutilizzate sono normali e non
