@@ -3,7 +3,7 @@
 	"publisher": "mgcoding",
 	"displayName": "MGCoding",
 	"description": "Agente di sviluppo spec-driven (Specs, Steering, Hooks, MCP) con LLM locale o Claude.",
-	"version": "0.9.17",
+	"version": "0.9.18",
 	"license": "MIT",
 	"engines": {
 		"vscode": "^1.5.0"
@@ -801,6 +801,16 @@
 					"type": "string",
 					"default": "",
 					"description": "Checkpoint ComfyUI da usare nel workflow predefinito (modalità Img). Vuoto = primo disponibile. Impostalo con 'MGCoding: Scegli checkpoint immagini'. I modelli FLUX vengono rilevati dal nome e usano automaticamente i parametri giusti (cfg basso, pochi step)."
+				},
+				"mgcoding.image.lora": {
+					"type": "string",
+					"default": "",
+					"description": "LoRA ComfyUI (file in models/loras) da applicare sopra il checkpoint nel workflow predefinito (modalità Img/batch). Vuoto = nessun LoRA. Utile per uno stile coerente (es. un LoRA 'painterly'/'oil painting'). Selezionalo dall'Image Studio (richiede ComfyUI avviato)."
+				},
+				"mgcoding.image.loraStrength": {
+					"type": "number",
+					"default": 0.8,
+					"description": "Forza del LoRA (model + clip) quando 'mgcoding.image.lora' è impostato. 0.8 è un buon punto di partenza; valori più alti accentuano lo stile, più bassi lo attenuano."
 				},
 				"mgcoding.image.enhancePrompt": {
 					"type": "boolean",

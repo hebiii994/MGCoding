@@ -5,7 +5,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
-import { listCheckpoints, listWorkflows, generatedDirUri } from './comfyHelper';
+import { listCheckpoints, listLoras, listWorkflows, generatedDirUri } from './comfyHelper';
 
 export class ImageStudioProvider implements vscode.WebviewViewProvider {
 	static readonly viewType = 'mgcoding.imageStudio';
@@ -98,7 +98,7 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 		};
 		const cfg = vscode.workspace.getConfiguration('mgcoding');
 		const endpoint = cfg.get<string>('image.comfyEndpoint', 'http://127.0.0.1:8188');
-		const [checkpoints, workflows, gallery] = await Promise.all([listCheckpoints(endpoint), listWorkflows(), this.galleryUris()]);
+		const [checkpoints, loras, workflows, gallery] = await Promise.all([listCheckpoints(endpoint), listLoras(endpoint), listWorkflows(), this.galleryUris()]);
 		this.view.webview.postMessage({
 			type: 'state',
 			connected: checkpoints.length > 0,
@@ -106,6 +106,9 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 			backend: cfg.get<string>('image.backend', 'auto'),
 			checkpoints,
 			checkpoint: cfg.get<string>('image.checkpoint', ''),
+			loras,
+			lora: cfg.get<string>('image.lora', ''),
+			loraStrength: cfg.get<number>('image.loraStrength', 0.8),
 			workflows,
 			workflow: cfg.get<string>('image.workflow', ''),
 			enhancePrompt: cfg.get<boolean>('image.enhancePrompt', true),
@@ -175,6 +178,9 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 			</select></div>
 		<div class="row"><label>Checkpoint</label><select id="checkpoint"></select></div>
 		<div class="hint">FLUX = ottimo su mani/anatomia. SDXL fine-tune (Juggernaut/RealVis) = miglior controllo coi negativi.</div>
+		<div class="row"><label>LoRA</label><select id="lora"></select></div>
+		<div class="row"><label>Forza LoRA</label><input type="range" id="loraStrength" min="0" max="1.5" step="0.05" /><span class="val" id="loraStrengthVal"></span></div>
+		<div class="hint">Applica un LoRA dello stile (es. "painterly"/"oil painting") sopra il checkpoint. (nessuno) = disattivato · forza 0.8 consigliata.</div>
 		<div class="row"><label>Workflow</label><select id="workflow"></select></div>
 	</div>
 
@@ -246,6 +252,9 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 	function send(m){ vscode.postMessage(m); }
 	$('backend').addEventListener('change', function(){ send({type:'setConfig', key:'image.backend', value:this.value}); });
 	$('checkpoint').addEventListener('change', function(){ send({type:'setConfig', key:'image.checkpoint', value:this.value}); });
+	$('lora').addEventListener('change', function(){ send({type:'setConfig', key:'image.lora', value:this.value}); });
+	$('loraStrength').addEventListener('input', function(){ $('loraStrengthVal').textContent = (+this.value).toFixed(2); });
+	$('loraStrength').addEventListener('change', function(){ send({type:'setConfig', key:'image.loraStrength', value:+this.value}); });
 	$('workflow').addEventListener('change', function(){ send({type:'setConfig', key:'image.workflow', value:this.value}); });
 	$('aspect').addEventListener('change', function(){ send({type:'setConfig', key:'image.aspect', value:this.value}); });
 	$('enhance').addEventListener('change', function(){ send({type:'setConfig', key:'image.enhancePrompt', value:this.checked}); });
@@ -273,6 +282,9 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 		$('backend').value = m.backend;
 		var cs = $('checkpoint'); cs.innerHTML=''; cs.appendChild(opt('', '(auto: primo disponibile)', m.checkpoint));
 		for (var i=0;i<m.checkpoints.length;i++){ cs.appendChild(opt(m.checkpoints[i], m.checkpoints[i], m.checkpoint)); }
+		var ls = $('lora'); ls.innerHTML=''; ls.appendChild(opt('', '(nessuno)', m.lora||''));
+		var loras = m.loras||[]; for (var li=0;li<loras.length;li++){ ls.appendChild(opt(loras[li], loras[li], m.lora||'')); }
+		$('loraStrength').value = (m.loraStrength==null?0.8:m.loraStrength); $('loraStrengthVal').textContent = (+$('loraStrength').value).toFixed(2);
 		var ws = $('workflow'); ws.innerHTML=''; ws.appendChild(opt('', '(predefinito txt2img)', m.workflow));
 		for (var j=0;j<m.workflows.length;j++){ ws.appendChild(opt(m.workflows[j], m.workflows[j], m.workflow)); }
 		$('aspect').value = m.aspect || 'auto';

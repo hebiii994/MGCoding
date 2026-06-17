@@ -34,6 +34,10 @@ export interface ImageGenOptions {
 	sampler?: string;
 	/** Seed: -1 (o assente) = casuale; valore fisso per riprodurre lo stesso risultato. */
 	seed?: number;
+	/** LoRA da applicare (nome file in models/loras); vuoto/none = nessuno. */
+	lora?: string;
+	/** Forza del LoRA (model+clip), default 0.8. */
+	loraStrength?: number;
 }
 
 /** Sceglie il checkpoint: quello richiesto se disponibile, altrimenti il primo della lista. */
@@ -71,6 +75,22 @@ function samplerParams(ckpt: string, opts: ImageGenOptions): { steps: number; cf
 /** Seed da usare: quello fisso indicato (>=0) o uno casuale. */
 function pickSeed(opts: ImageGenOptions): number {
 	return typeof opts.seed === 'number' && opts.seed >= 0 ? opts.seed : Math.floor(Math.random() * 1e15);
+}
+
+/**
+ * Se è impostato un LoRA, prepara il nodo LoraLoader (id '12') e ritorna i riferimenti
+ * model/clip da usare a valle (LoraLoader) invece di quelli del checkpoint.
+ */
+function loraSetup(opts: ImageGenOptions): { node?: object; modelRef: [string, number]; clipRef: [string, number] } {
+	const use = !!opts.lora && opts.lora !== 'none' && opts.lora.trim() !== '';
+	if (!use) {
+		return { modelRef: ['4', 0], clipRef: ['4', 1] };
+	}
+	const s = opts.loraStrength ?? 0.8;
+	return {
+		node: { class_type: 'LoraLoader', inputs: { lora_name: opts.lora, strength_model: s, strength_clip: s, model: ['4', 0], clip: ['4', 1] } },
+		modelRef: ['12', 0], clipRef: ['12', 1]
+	};
 }
 
 const DEFAULT_NEGATIVE = 'low quality, blurry, deformed, bad anatomy, extra limbs, extra arms, extra fingers, fused fingers, mutated hands, missing fingers, malformed, disfigured, watermark, text';
@@ -217,15 +237,17 @@ async function genComfy(endpoint: string, prompt: string, opts: ImageGenOptions,
 	const { width, height } = aspectToSize(opts.aspect);
 	const seed = pickSeed(opts);
 	const sp = samplerParams(ckpt, opts); // parametri adatti al modello (FLUX vs SD/SDXL)
-	// Workflow txt2img minimale standard.
+	const lora = loraSetup(opts);
+	// Workflow txt2img minimale standard (con LoraLoader opzionale).
 	const workflow = {
-		'3': { class_type: 'KSampler', inputs: { seed, steps: sp.steps, cfg: sp.cfg, sampler_name: sp.sampler, scheduler: sp.scheduler, denoise: 1, model: ['4', 0], positive: ['6', 0], negative: ['7', 0], latent_image: ['5', 0] } },
+		'3': { class_type: 'KSampler', inputs: { seed, steps: sp.steps, cfg: sp.cfg, sampler_name: sp.sampler, scheduler: sp.scheduler, denoise: 1, model: lora.modelRef, positive: ['6', 0], negative: ['7', 0], latent_image: ['5', 0] } },
 		'4': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: ckpt } },
 		'5': { class_type: 'EmptyLatentImage', inputs: { width, height, batch_size: 1 } },
-		'6': { class_type: 'CLIPTextEncode', inputs: { text: prompt, clip: ['4', 1] } },
-		'7': { class_type: 'CLIPTextEncode', inputs: { text: sp.negative, clip: ['4', 1] } },
+		'6': { class_type: 'CLIPTextEncode', inputs: { text: prompt, clip: lora.clipRef } },
+		'7': { class_type: 'CLIPTextEncode', inputs: { text: sp.negative, clip: lora.clipRef } },
 		'8': { class_type: 'VAEDecode', inputs: { samples: ['3', 0], vae: ['4', 2] } },
-		'9': { class_type: 'SaveImage', inputs: { filename_prefix: 'MGCoding', images: ['8', 0] } }
+		'9': { class_type: 'SaveImage', inputs: { filename_prefix: 'MGCoding', images: ['8', 0] } },
+		...(lora.node ? { '12': lora.node } : {})
 	};
 	const images = await queueAndCollect(endpoint, workflow, signal);
 	return { images, mediaType: 'image/png', backendLabel: `ComfyUI · ${ckpt}` };
@@ -363,16 +385,18 @@ async function genComfyImg2Img(endpoint: string, prompt: string, opts: ImageGenO
 	const imageRef = uploaded.subfolder ? `${uploaded.subfolder}/${uploaded.name}` : uploaded.name;
 	const seed = pickSeed(opts);
 	const sp = samplerParams(ckpt, opts);
-	// 3) Workflow img2img: LoadImage -> VAEEncode -> KSampler(denoise) -> VAEDecode -> Save.
+	const lora = loraSetup(opts);
+	// 3) Workflow img2img: LoadImage -> VAEEncode -> KSampler(denoise) -> VAEDecode -> Save (LoraLoader opzionale).
 	const workflow = {
-		'3': { class_type: 'KSampler', inputs: { seed, steps: sp.steps, cfg: sp.cfg, sampler_name: sp.sampler, scheduler: sp.scheduler, denoise: opts.denoise ?? 0.6, model: ['4', 0], positive: ['6', 0], negative: ['7', 0], latent_image: ['10', 0] } },
+		'3': { class_type: 'KSampler', inputs: { seed, steps: sp.steps, cfg: sp.cfg, sampler_name: sp.sampler, scheduler: sp.scheduler, denoise: opts.denoise ?? 0.6, model: lora.modelRef, positive: ['6', 0], negative: ['7', 0], latent_image: ['10', 0] } },
 		'4': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: ckpt } },
-		'6': { class_type: 'CLIPTextEncode', inputs: { text: prompt, clip: ['4', 1] } },
-		'7': { class_type: 'CLIPTextEncode', inputs: { text: sp.negative, clip: ['4', 1] } },
+		'6': { class_type: 'CLIPTextEncode', inputs: { text: prompt, clip: lora.clipRef } },
+		'7': { class_type: 'CLIPTextEncode', inputs: { text: sp.negative, clip: lora.clipRef } },
 		'8': { class_type: 'VAEDecode', inputs: { samples: ['3', 0], vae: ['4', 2] } },
 		'9': { class_type: 'SaveImage', inputs: { filename_prefix: 'MGCoding', images: ['8', 0] } },
 		'10': { class_type: 'VAEEncode', inputs: { pixels: ['11', 0], vae: ['4', 2] } },
-		'11': { class_type: 'LoadImage', inputs: { image: imageRef } }
+		'11': { class_type: 'LoadImage', inputs: { image: imageRef } },
+		...(lora.node ? { '12': lora.node } : {})
 	};
 	const images = await queueAndCollect(ep, workflow, signal);
 	return { images, mediaType: 'image/png', backendLabel: `ComfyUI · ${ckpt} (img2img)` };

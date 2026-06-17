@@ -348,6 +348,20 @@ export async function listCheckpoints(endpoint: string): Promise<string[]> {
 	}
 }
 
+/** Elenca i LoRA installati in ComfyUI (da /object_info LoraLoader). */
+export async function listLoras(endpoint: string): Promise<string[]> {
+	try {
+		const res = await fetch(`${endpoint.replace(/\/$/, '')}/object_info/LoraLoader`, { signal: AbortSignal.timeout(8000) });
+		if (!res.ok) {
+			return [];
+		}
+		const info = await res.json() as Record<string, { input?: { required?: { lora_name?: unknown[][] } } }>;
+		return (info?.LoraLoader?.input?.required?.lora_name?.[0] as string[] | undefined) ?? [];
+	} catch {
+		return [];
+	}
+}
+
 /** Le class_type usate dal workflow che NON sono registrate in ComfyUI (nodi custom mancanti). */
 export async function missingNodes(endpoint: string, workflow: Record<string, { class_type?: string }>): Promise<string[]> {
 	const used = new Set<string>();

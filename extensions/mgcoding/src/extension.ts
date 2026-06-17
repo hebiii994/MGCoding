@@ -166,14 +166,13 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('mgcoding.importWorkflow', () => importWorkflow()),
 		vscode.commands.registerCommand('mgcoding.pickGalleryFolder', () => pickGalleryFolder()),
 		vscode.commands.registerCommand('mgcoding.generateBatch', async () => {
+			// Default sul file .md aperto (se c'è), ma lascia SEMPRE scegliere: evita di usare per
+			// sbaglio un altro markdown aperto nell'editor.
 			const ed = vscode.window.activeTextEditor;
-			let file = ed && ed.document.uri.fsPath.toLowerCase().endsWith('.md') ? ed.document.uri : undefined;
-			if (!file) {
-				const sel = await vscode.window.showOpenDialog({ canSelectMany: false, filters: { 'Markdown prompt': ['md', 'txt'] }, title: 'File dei prompt (markdown)', openLabel: 'Genera in batch' });
-				file = sel?.[0];
-			}
-			if (file) {
-				await chat.generateBatchFromFile(file);
+			const defaultUri = ed && ed.document.uri.fsPath.toLowerCase().endsWith('.md') ? ed.document.uri : undefined;
+			const sel = await vscode.window.showOpenDialog({ canSelectMany: false, defaultUri, filters: { 'Prompt (markdown/testo)': ['md', 'txt'] }, title: 'Scegli il file dei prompt (formato "### Titolo" + descrizione)', openLabel: 'Genera in batch' });
+			if (sel?.[0]) {
+				await chat.generateBatchFromFile(sel[0]);
 			}
 		}),
 		vscode.commands.registerCommand('mgcoding.installMissingNodes', async () => {
