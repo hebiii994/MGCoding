@@ -161,7 +161,7 @@ function aspectToSize(aspect?: string): { width: number; height: number } {
 		case '4:3': return { width: 1152, height: 896 };
 		case '3:4': return { width: 896, height: 1152 };
 		case '3:2': return { width: 1216, height: 832 };
-		case '2:3': return { width: 832, height: 1216 }; // verticale: ideale per full body / ritratti
+		case '2:3': return { width: 896, height: 1344 }; // verticale 2:3 SDXL-safe: ideale per le carte (riempie il frame, no bande)
 		case '4:5': return { width: 1024, height: 1280 }; // ritratto carte (DogmaShutdown)
 		case '5:4': return { width: 1280, height: 1024 };
 		default: return { width: 1024, height: 1024 };

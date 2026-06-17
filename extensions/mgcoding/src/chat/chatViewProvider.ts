@@ -1326,7 +1326,7 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 		}
 		const dir = await this.generatedDir();
 		const aspectPref = cfg.get<string>('image.aspect', 'auto');
-		const aspect = aspectPref && aspectPref !== 'auto' ? aspectPref : '4:5';
+		const aspect = aspectPref && aspectPref !== 'auto' ? aspectPref : '2:3';
 		const negative = 'text, words, letters, frame, border, ui, watermark, signature, logo, low quality, blurry, deformed, extra limbs, extra fingers, bad anatomy';
 		const checkpoint = cfg.get<string>('image.checkpoint', '').trim() || undefined;
 		const adv = { steps: cfg.get<number>('image.steps', 0), cfg: cfg.get<number>('image.cfg', 0), sampler: cfg.get<string>('image.sampler', 'auto'), seed: -1, lora: cfg.get<string>('image.lora', '').trim() || undefined, loraStrength: cfg.get<number>('image.loraStrength', 0.8) };
