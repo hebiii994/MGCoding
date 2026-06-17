@@ -246,7 +246,7 @@ async function genComfy(endpoint: string, prompt: string, opts: ImageGenOptions,
 		'6': { class_type: 'CLIPTextEncode', inputs: { text: prompt, clip: lora.clipRef } },
 		'7': { class_type: 'CLIPTextEncode', inputs: { text: sp.negative, clip: lora.clipRef } },
 		'8': { class_type: 'VAEDecode', inputs: { samples: ['3', 0], vae: ['4', 2] } },
-		'9': { class_type: 'SaveImage', inputs: { filename_prefix: 'MGCoding', images: ['8', 0] } },
+		'9': { class_type: 'PreviewImage', inputs: { images: ['8', 0] } },
 		...(lora.node ? { '12': lora.node } : {})
 	};
 	const images = await queueAndCollect(endpoint, workflow, signal);
@@ -393,7 +393,7 @@ async function genComfyImg2Img(endpoint: string, prompt: string, opts: ImageGenO
 		'6': { class_type: 'CLIPTextEncode', inputs: { text: prompt, clip: lora.clipRef } },
 		'7': { class_type: 'CLIPTextEncode', inputs: { text: sp.negative, clip: lora.clipRef } },
 		'8': { class_type: 'VAEDecode', inputs: { samples: ['3', 0], vae: ['4', 2] } },
-		'9': { class_type: 'SaveImage', inputs: { filename_prefix: 'MGCoding', images: ['8', 0] } },
+		'9': { class_type: 'PreviewImage', inputs: { images: ['8', 0] } },
 		'10': { class_type: 'VAEEncode', inputs: { pixels: ['11', 0], vae: ['4', 2] } },
 		'11': { class_type: 'LoadImage', inputs: { image: imageRef } },
 		...(lora.node ? { '12': lora.node } : {})
