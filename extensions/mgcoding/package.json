@@ -3,7 +3,7 @@
 	"publisher": "mgcoding",
 	"displayName": "MGCoding",
 	"description": "Agente di sviluppo spec-driven (Specs, Steering, Hooks, MCP) con LLM locale o Claude.",
-	"version": "0.9.16",
+	"version": "0.9.17",
 	"license": "MIT",
 	"engines": {
 		"vscode": "^1.5.0"
@@ -159,6 +159,10 @@
 			{
 				"command": "mgcoding.fixWorkflow",
 				"title": "MGCoding: Risolvi workflow (nodi + modelli mancanti)"
+			},
+			{
+				"command": "mgcoding.generateBatch",
+				"title": "MGCoding: Genera immagini in batch (da file prompt)"
 			},
 			{
 				"command": "mgcoding.importWorkflow",
@@ -805,8 +809,8 @@
 				},
 				"mgcoding.image.aspect": {
 					"type": "string",
-					"enum": ["auto", "1:1", "2:3", "3:2", "9:16", "16:9", "3:4", "4:3"],
-					"enumDescriptions": ["Lo sceglie l'ottimizzatore in base alla richiesta", "Quadrato", "Verticale (ritratti, full body)", "Orizzontale (foto)", "Verticale alto (telefono, full body)", "Orizzontale ampio (panorami)", "Verticale 3:4", "Orizzontale 4:3"],
+					"enum": ["auto", "1:1", "2:3", "4:5", "3:2", "5:4", "9:16", "16:9", "3:4", "4:3"],
+					"enumDescriptions": ["Lo sceglie l'ottimizzatore in base alla richiesta", "Quadrato", "Verticale (ritratti, full body)", "Ritratto 4:5 (carte, 1024x1280)", "Orizzontale (foto)", "Orizzontale 5:4", "Verticale alto (telefono, full body)", "Orizzontale ampio (panorami)", "Verticale 3:4", "Orizzontale 4:3"],
 					"default": "auto",
 					"description": "Rapporto d'aspetto delle immagini generate. Per una persona a figura intera (full body) usa un formato VERTICALE come 2:3 o 9:16. 'auto' lo fa scegliere all'ottimizzatore del prompt."
 				},

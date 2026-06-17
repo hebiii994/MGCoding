@@ -165,6 +165,17 @@ export function activate(context: vscode.ExtensionContext): void {
 		}),
 		vscode.commands.registerCommand('mgcoding.importWorkflow', () => importWorkflow()),
 		vscode.commands.registerCommand('mgcoding.pickGalleryFolder', () => pickGalleryFolder()),
+		vscode.commands.registerCommand('mgcoding.generateBatch', async () => {
+			const ed = vscode.window.activeTextEditor;
+			let file = ed && ed.document.uri.fsPath.toLowerCase().endsWith('.md') ? ed.document.uri : undefined;
+			if (!file) {
+				const sel = await vscode.window.showOpenDialog({ canSelectMany: false, filters: { 'Markdown prompt': ['md', 'txt'] }, title: 'File dei prompt (markdown)', openLabel: 'Genera in batch' });
+				file = sel?.[0];
+			}
+			if (file) {
+				await chat.generateBatchFromFile(file);
+			}
+		}),
 		vscode.commands.registerCommand('mgcoding.installMissingNodes', async () => {
 			const cfg = vscode.workspace.getConfiguration('mgcoding');
 			const wf = cfg.get<string>('image.workflow', '');
