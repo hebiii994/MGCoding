@@ -183,8 +183,8 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 		<div class="row"><label>Aspetto</label>
 			<select id="aspect">
 				<option value="auto">Auto</option><option value="1:1">1:1 quadrato</option>
-				<option value="2:3">2:3 verticale (full body)</option><option value="9:16">9:16 verticale alto</option>
-				<option value="3:2">3:2 orizzontale</option><option value="16:9">16:9 panorama</option>
+				<option value="2:3">2:3 verticale (full body)</option><option value="4:5">4:5 ritratto (carte)</option><option value="9:16">9:16 verticale alto</option>
+				<option value="3:2">3:2 orizzontale</option><option value="5:4">5:4</option><option value="16:9">16:9 panorama</option>
 				<option value="3:4">3:4</option><option value="4:3">4:3</option>
 			</select></div>
 		<div class="hint">Persona a figura intera → verticale (2:3 o 9:16); a 1:1 esce mezzo busto.</div>
@@ -219,6 +219,7 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 			<button data-cmd="mgcoding.selectWorkflow">🎛 Workflow</button>
 			<button data-cmd="mgcoding.importWorkflow">⬆ Importa workflow</button>
 			<button data-cmd="mgcoding.fixWorkflow" class="primary">🩹 Risolvi workflow</button>
+			<button data-cmd="mgcoding.generateBatch" class="primary">📦 Batch da file</button>
 			<button data-cmd="mgcoding.openChat" class="primary">💬 Apri chat Img</button>
 			<button data-cmd="mgcoding.recommendModel">💡 Consiglia modello</button>
 		</div>

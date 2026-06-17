@@ -1083,7 +1083,7 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 			const m = raw.match(/\{[\s\S]*\}/);
 			if (m) {
 				const obj = JSON.parse(m[0]) as { prompt?: string; negative?: string; aspect?: string };
-				const aspect = ['1:1', '16:9', '9:16', '4:3', '3:4', '2:3', '3:2'].includes(obj.aspect ?? '') ? obj.aspect! : '1:1';
+				const aspect = ['1:1', '16:9', '9:16', '4:3', '3:4', '2:3', '3:2', '4:5', '5:4'].includes(obj.aspect ?? '') ? obj.aspect! : '1:1';
 				if (obj.prompt && obj.prompt.trim()) {
 					const prompt = /detail|8k|quality|focus/i.test(obj.prompt) ? obj.prompt.trim() : `${obj.prompt.trim()}, ${QUALITY}`;
 					return { prompt, negative: (obj.negative?.trim() || DEFAULT_NEG), aspect };
@@ -1212,6 +1212,97 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 		const file = vscode.Uri.joinPath(vscode.Uri.file(os.tmpdir()), `mgcoding-img-${Date.now()}.${ext}`);
 		await vscode.workspace.fs.writeFile(file, Buffer.from(m.groups.data, 'base64'));
 		await vscode.commands.executeCommand('vscode.open', file);
+	}
+
+	/**
+	 * Genera in BATCH le immagini da un file markdown di prompt (es. Card_Art_Prompts.md):
+	 * usa lo STYLE PREFIX (blocco ``` dopo "STYLE PREFIX") come prefisso comune, estrae ogni
+	 * voce "### Titolo\nprompt", genera SENZA enhancer (rispetta lo stile esatto) e salva un PNG
+	 * per carta col nome del titolo nella cartella galleria.
+	 */
+	async generateBatchFromFile(fileUri: vscode.Uri): Promise<void> {
+		const dec = new TextDecoder();
+		let text: string;
+		try {
+			text = dec.decode(await vscode.workspace.fs.readFile(fileUri));
+		} catch {
+			vscode.window.showErrorMessage('Impossibile leggere il file dei prompt.');
+			return;
+		}
+		// STYLE PREFIX: primo blocco ``` dopo la dicitura "STYLE PREFIX".
+		const pfx = /STYLE PREFIX[\s\S]*?```([\s\S]*?)```/i.exec(text);
+		const prefix = pfx ? pfx[1].trim().replace(/\s*\n\s*/g, ' ') : '';
+		// Voci: "### Titolo" seguito dal testo fino alla prossima intestazione/--- .
+		const lines = text.split('\n');
+		const cards: { title: string; prompt: string }[] = [];
+		let title = ''; let body: string[] = [];
+		const flush = () => {
+			const p = body.join(' ').trim();
+			if (title && p) {
+				cards.push({ title, prompt: p });
+			}
+			title = ''; body = [];
+		};
+		for (const ln of lines) {
+			const h = /^###\s+(.+)$/.exec(ln);
+			if (h) {
+				flush();
+				title = h[1].trim();
+			} else if (/^(#{1,2}\s|---\s*$)/.test(ln)) {
+				flush();
+			} else if (title) {
+				body.push(ln.trim());
+			}
+		}
+		flush();
+		if (!cards.length) {
+			vscode.window.showWarningMessage('Nessun prompt trovato (atteso il formato "### Titolo" seguito dalla descrizione).');
+			return;
+		}
+		const pick = await vscode.window.showQuickPick(
+			[`Genera tutte (${cards.length})`, 'Solo le prime 5 (prova)', 'Annulla'],
+			{ title: `Batch immagini: ${cards.length} carte trovate`, placeHolder: 'Consiglio: prova prima con 5' }
+		);
+		if (!pick || pick === 'Annulla') {
+			return;
+		}
+		const todo = pick.startsWith('Solo') ? cards.slice(0, 5) : cards;
+		const cfg = vscode.workspace.getConfiguration('mgcoding');
+		const keys = await this.registry.getMediaKeys();
+		const backend = await detectImageBackend(cfg.get('image.backend', 'auto'), cfg.get('image.localEndpoint', 'http://127.0.0.1:7860'), cfg.get('image.comfyEndpoint', 'http://127.0.0.1:8188'), keys);
+		if (!backend) {
+			vscode.window.showWarningMessage('Nessun generatore disponibile (avvia ComfyUI o imposta una API key).');
+			return;
+		}
+		const dir = await this.generatedDir();
+		const aspectPref = cfg.get<string>('image.aspect', 'auto');
+		const aspect = aspectPref && aspectPref !== 'auto' ? aspectPref : '4:5';
+		const negative = 'text, words, letters, frame, border, ui, watermark, signature, logo, low quality, blurry, deformed, extra limbs, extra fingers, bad anatomy';
+		const checkpoint = cfg.get<string>('image.checkpoint', '').trim() || undefined;
+		const adv = { steps: cfg.get<number>('image.steps', 0), cfg: cfg.get<number>('image.cfg', 0), sampler: cfg.get<string>('image.sampler', 'auto'), seed: -1 };
+		const sani = (s: string) => s.replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'card';
+
+		await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Genero ${todo.length} immagini (${backend.label})`, cancellable: true }, async (progress, token) => {
+			let done = 0; let failed = 0;
+			for (const card of todo) {
+				if (token.isCancellationRequested) {
+					break;
+				}
+				progress.report({ message: card.title.slice(0, 50), increment: 100 / todo.length });
+				const fullPrompt = prefix ? `${prefix} ${card.prompt}` : card.prompt;
+				try {
+					const res = await generateImage(backend, fullPrompt, { aspect, count: 1, negative, checkpoint, ...adv }, keys);
+					if (dir && res.images[0]) {
+						await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(dir, `${sani(card.title)}.png`), Buffer.from(res.images[0], 'base64'));
+					}
+					done++;
+				} catch {
+					failed++;
+				}
+			}
+			this.onImageGenerated?.();
+			vscode.window.showInformationMessage(`Batch completato: ${done} immagini generate${failed ? `, ${failed} fallite` : ''}. Salvate nella cartella galleria.`);
+		});
 	}
 
 	/** Cartella .mg/generated/ del workspace (creata se manca), o undefined senza workspace. */
