@@ -2655,7 +2655,7 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 		else if (m.type === 'tool') { lastToolResult = addTool(m.name, m.args); workSub('· ' + m.name); }
 		else if (m.type === 'toolResult') { if (lastToolResult) { lastToolResult.textContent = m.text; log.scrollTop = log.scrollHeight; } }
 		else if (m.type === 'error') { addStatic('error', '⚠ ' + m.text); }
-		else if (m.type === 'busy') { document.body.classList.toggle('busy', m.value); if (m.value) { mgTurnStart = Date.now(); } else { workSub(''); } }
+		else if (m.type === 'busy') { document.body.classList.toggle('busy', m.value); if (m.value) { mgTurnStart = Date.now(); } else { workSub(''); setTimeout(function () { log.scrollTop = log.scrollHeight; }, 120); } }
 		else if (m.type === 'changes') { renderChanges(m.count || 0); }
 		else if (m.type === 'sttResult') {
 			if (m.text) { input.value = (input.value ? input.value + ' ' : '') + m.text; autoGrow(); input.focus(); if (m.autoSend) { send(); } }
