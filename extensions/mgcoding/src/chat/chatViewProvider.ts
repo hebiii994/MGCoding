@@ -54,6 +54,45 @@ interface Session {
 	specOfferDismissed?: boolean;
 }
 
+/**
+ * Estrae da un testo markdown lo STYLE PREFIX (primo blocco ``` dopo "STYLE PREFIX")
+ * e l'elenco di carte: ogni voce è una intestazione "### Titolo" seguita dalla
+ * descrizione fino alla prossima intestazione. Robusto a: BOM iniziale, terminatori
+ * CRLF/CR/LF, spazi iniziali, e contenuto dentro blocchi ``` (che viene ignorato per
+ * non scambiare il blocco STYLE PREFIX per una descrizione).
+ */
+export function parsePromptCards(raw: string): { prefix: string; cards: { title: string; prompt: string }[] } {
+	const text = (raw || '').replace(/^\uFEFF/, '');
+	const pfx = /STYLE PREFIX[\s\S]*?```([\s\S]*?)```/i.exec(text);
+	const prefix = pfx ? pfx[1].trim().replace(/\s*\n\s*/g, ' ') : '';
+	const lines = text.split(/\r\n|\r|\n/);
+	const cards: { title: string; prompt: string }[] = [];
+	let title = ''; let body: string[] = [];
+	let inFence = false;
+	const flush = () => {
+		const p = body.join(' ').trim();
+		if (title && p) {
+			cards.push({ title, prompt: p });
+		}
+		title = ''; body = [];
+	};
+	for (const ln of lines) {
+		if (/^\s*```/.test(ln)) { inFence = !inFence; continue; }
+		if (inFence) { continue; }
+		const h = /^\s*###\s+(.+?)\s*$/.exec(ln);
+		if (h) {
+			flush();
+			title = h[1].trim();
+		} else if (/^\s*(#{1,2}\s|#{4,6}\s|---\s*$)/.test(ln)) {
+			flush();
+		} else if (title) {
+			body.push(ln.trim());
+		}
+	}
+	flush();
+	return { prefix, cards };
+}
+
 /** Nome leggibile del servizio in base all'endpoint OpenAI-compatibile. */
 function openAiProviderLabel(endpoint: string): string {
 	const e = (endpoint || '').toLowerCase();
@@ -1104,8 +1143,34 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 	 *  Se è allegata un'immagine, fa image-to-image (la usa come base). */
 	private async handleImageMessage(text: string, images?: string[]): Promise<void> {
 		const session = this.active();
-		const userMsg: ChatMessage = { role: 'user', content: text };
 		const initImage = images?.length ? (parseDataUrl(images[0])?.data) : undefined;
+		// Se il testo è un documento di prompt ("### Titolo" + descrizione, tipico dei file
+		// di card art) e NON c'è un'immagine base, offri il batch: altrimenti l'intero
+		// documento finirebbe come un unico prompt enorme → immagine confusa.
+		if (!initImage) {
+			const parsed = parsePromptCards(text);
+			if (parsed.cards.length >= 2 || (parsed.cards.length >= 1 && parsed.prefix)) {
+				const choice = await vscode.window.showInformationMessage(
+					`Questo testo contiene ${parsed.cards.length} prompt in formato "### Titolo". Vuoi generarli in batch (un'immagine per voce) invece di una sola immagine dall'intero testo?`,
+					{ modal: true },
+					'Genera in batch', 'Una sola immagine'
+				);
+				if (choice === undefined) {
+					return;
+				}
+				if (choice === 'Genera in batch') {
+					session.messages.push({ role: 'user', content: text });
+					this.mirror?.('user', text);
+					this.post({ type: 'assistant', text: `Trovati ${parsed.cards.length} prompt nel testo: avvio la generazione in batch.` });
+					session.messages.push({ role: 'assistant', content: `Avvio batch di ${parsed.cards.length} immagini.` });
+					await this.save();
+					await this.runCardsBatch(parsed.cards, parsed.prefix);
+					return;
+				}
+				// 'Una sola immagine' → prosegui col flusso normale.
+			}
+		}
+		const userMsg: ChatMessage = { role: 'user', content: text };
 		if (images?.length) {
 			userMsg.images = images.slice(0, 1);
 		}
@@ -1229,42 +1294,24 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 			vscode.window.showErrorMessage('Impossibile leggere il file dei prompt.');
 			return;
 		}
-		// STYLE PREFIX: primo blocco ``` dopo la dicitura "STYLE PREFIX".
-		const pfx = /STYLE PREFIX[\s\S]*?```([\s\S]*?)```/i.exec(text);
-		const prefix = pfx ? pfx[1].trim().replace(/\s*\n\s*/g, ' ') : '';
-		// Voci: "### Titolo" seguito dal testo fino alla prossima intestazione/--- .
-		// split su \r?\n per gestire file con terminatori CRLF (Windows): altrimenti
-		// il \r residuo a fine riga impedisce il match di /^###\s+(.+)$/ e nessun
-		// prompt verrebbe trovato.
-		const lines = text.split(/\r?\n/);
-		const cards: { title: string; prompt: string }[] = [];
-		let title = ''; let body: string[] = [];
-		const flush = () => {
-			const p = body.join(' ').trim();
-			if (title && p) {
-				cards.push({ title, prompt: p });
-			}
-			title = ''; body = [];
-		};
-		for (const ln of lines) {
-			const h = /^###\s+(.+)$/.exec(ln);
-			if (h) {
-				flush();
-				title = h[1].trim();
-			} else if (/^(#{1,2}\s|---\s*$)/.test(ln)) {
-				flush();
-			} else if (title) {
-				body.push(ln.trim());
-			}
-		}
-		flush();
+		const { prefix, cards } = parsePromptCards(text);
 		if (!cards.length) {
-			vscode.window.showWarningMessage('Nessun prompt trovato (atteso il formato "### Titolo" seguito dalla descrizione).');
+			const heads = (text.match(/^[ \t]*#{1,6}[ \t]+/gm) || []).length;
+			vscode.window.showWarningMessage(`Nessun prompt trovato. Atteso il formato "### Titolo" con una riga di descrizione sotto. Intestazioni "#" rilevate nel file: ${heads}. Verifica che ogni voce inizi con "### " (tre cancelletti) e abbia del testo nella riga seguente.`);
 			return;
 		}
+		await this.runCardsBatch(cards, prefix);
+	}
+
+	/**
+	 * Esegue la generazione in batch di una lista di carte (titolo + prompt) con un eventuale
+	 * STYLE PREFIX comune: chiede se generarle tutte o solo le prime 5, poi genera SENZA enhancer
+	 * (rispetta lo stile esatto) e salva un PNG per carta nella cartella galleria.
+	 */
+	private async runCardsBatch(cards: { title: string; prompt: string }[], prefix: string): Promise<void> {
 		const pick = await vscode.window.showQuickPick(
 			[`Genera tutte (${cards.length})`, 'Solo le prime 5 (prova)', 'Annulla'],
-			{ title: `Batch immagini: ${cards.length} carte trovate`, placeHolder: 'Consiglio: prova prima con 5' }
+			{ title: `Batch immagini: ${cards.length} prompt trovati`, placeHolder: 'Consiglio: prova prima con 5' }
 		);
 		if (!pick || pick === 'Annulla') {
 			return;
