@@ -1204,7 +1204,7 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 			const denoise = cfg.get<number>('image.denoise', 0.6);
 			const checkpoint = cfg.get<string>('image.checkpoint', '').trim() || undefined;
 			// Parametri avanzati (Image Studio → Avanzate): 0/auto/-1 = automatico per modello.
-			const adv = { steps: cfg.get<number>('image.steps', 0), cfg: cfg.get<number>('image.cfg', 0), sampler: cfg.get<string>('image.sampler', 'auto'), seed: cfg.get<number>('image.seed', -1), lora: cfg.get<string>('image.lora', '').trim() || undefined, loraStrength: cfg.get<number>('image.loraStrength', 0.8) };
+			const adv = { steps: cfg.get<number>('image.steps', 0), cfg: cfg.get<number>('image.cfg', 0), sampler: cfg.get<string>('image.sampler', 'auto'), seed: cfg.get<number>('image.seed', -1), lora: cfg.get<string>('image.lora', '').trim() || undefined, loraStrength: cfg.get<number>('image.loraStrength', 0.8), transparent: cfg.get<boolean>('image.transparentBackground', false) };
 			let result;
 			if (initImage) {
 				// Image-to-image: usa l'immagine allegata come base.
@@ -1310,13 +1310,12 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 	 */
 	private async runCardsBatch(cards: { title: string; prompt: string }[], prefix: string): Promise<void> {
 		const pick = await vscode.window.showQuickPick(
-			[`Genera tutte (${cards.length})`, 'Solo le prime 5 (prova)', 'Annulla'],
+			[`Genera tutte (${cards.length})`, 'Solo le prime 5 (prova)', 'Solo le mancanti (salta già generate)', 'Annulla'],
 			{ title: `Batch immagini: ${cards.length} prompt trovati`, placeHolder: 'Consiglio: prova prima con 5' }
 		);
 		if (!pick || pick === 'Annulla') {
 			return;
 		}
-		const todo = pick.startsWith('Solo') ? cards.slice(0, 5) : cards;
 		const cfg = vscode.workspace.getConfiguration('mgcoding');
 		const keys = await this.registry.getMediaKeys();
 		const backend = await detectImageBackend(cfg.get('image.backend', 'auto'), cfg.get('image.localEndpoint', 'http://127.0.0.1:7860'), cfg.get('image.comfyEndpoint', 'http://127.0.0.1:8188'), keys);
@@ -1329,8 +1328,29 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 		const aspect = aspectPref && aspectPref !== 'auto' ? aspectPref : '2:3';
 		const negative = 'text, words, letters, frame, border, ui, watermark, signature, logo, low quality, blurry, deformed, extra limbs, extra fingers, bad anatomy';
 		const checkpoint = cfg.get<string>('image.checkpoint', '').trim() || undefined;
-		const adv = { steps: cfg.get<number>('image.steps', 0), cfg: cfg.get<number>('image.cfg', 0), sampler: cfg.get<string>('image.sampler', 'auto'), seed: -1, lora: cfg.get<string>('image.lora', '').trim() || undefined, loraStrength: cfg.get<number>('image.loraStrength', 0.8) };
+		const adv = { steps: cfg.get<number>('image.steps', 0), cfg: cfg.get<number>('image.cfg', 0), sampler: cfg.get<string>('image.sampler', 'auto'), seed: -1, lora: cfg.get<string>('image.lora', '').trim() || undefined, loraStrength: cfg.get<number>('image.loraStrength', 0.8), transparent: cfg.get<boolean>('image.transparentBackground', false) };
 		const sani = (s: string) => s.replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'card';
+
+		// Selezione carte in base alla scelta (tutte / prime 5 / solo le mancanti su disco).
+		let todo = cards;
+		if (pick.startsWith('Solo le prime')) {
+			todo = cards.slice(0, 5);
+		} else if (pick.startsWith('Solo le mancanti') && dir) {
+			const exists = async (t: string): Promise<boolean> => {
+				try {
+					await vscode.workspace.fs.stat(vscode.Uri.joinPath(dir, `${sani(t)}.png`));
+					return true;
+				} catch {
+					return false;
+				}
+			};
+			const flags = await Promise.all(cards.map(c => exists(c.title)));
+			todo = cards.filter((_, i) => !flags[i]);
+			if (!todo.length) {
+				vscode.window.showInformationMessage('Tutte le carte sono già generate nella cartella galleria.');
+				return;
+			}
+		}
 
 		await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Genero ${todo.length} immagini (${backend.label})`, cancellable: true }, async (progress, token) => {
 			let done = 0; let failed = 0;
