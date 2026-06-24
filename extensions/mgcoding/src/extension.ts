@@ -7,6 +7,7 @@ import { runAgent } from './agent/agentLoop';
 import { initAgentStats, statsSummary } from './agent/agentStats';
 import { pickComfyFolder, downloadImageModel, listWorkflows, listCheckpoints, installMissingNodesForWorkflow, installMissingModelsForWorkflow, fixWorkflow, importWorkflow, pickGalleryFolder } from './media/comfyHelper';
 import { ImageStudioProvider } from './media/imageStudioView';
+import { openComfyCanvas } from './media/comfyCanvas';
 import { ChatViewProvider } from './chat/chatViewProvider';
 import { registerDiffApproval } from './edit/diffApproval';
 import { inlineEdit } from './edit/inlineEdit';
@@ -165,6 +166,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		}),
 		vscode.commands.registerCommand('mgcoding.importWorkflow', () => importWorkflow()),
 		vscode.commands.registerCommand('mgcoding.pickGalleryFolder', () => pickGalleryFolder()),
+		vscode.commands.registerCommand('mgcoding.openComfyCanvas', () => openComfyCanvas()),
 		vscode.commands.registerCommand('mgcoding.generateBatch', async () => {
 			// Default sul file .md aperto (se c'è), ma lascia SEMPRE scegliere: evita di usare per
 			// sbaglio un altro markdown aperto nell'editor.

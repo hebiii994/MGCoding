@@ -3,7 +3,7 @@
 	"publisher": "mgcoding",
 	"displayName": "MGCoding",
 	"description": "Agente di sviluppo spec-driven (Specs, Steering, Hooks, MCP) con LLM locale o Claude.",
-	"version": "0.9.23",
+	"version": "0.9.24",
 	"license": "MIT",
 	"engines": {
 		"vscode": "^1.5.0"
@@ -163,6 +163,10 @@
 			{
 				"command": "mgcoding.generateBatch",
 				"title": "MGCoding: Genera immagini in batch (da file prompt)"
+			},
+			{
+				"command": "mgcoding.openComfyCanvas",
+				"title": "MGCoding: Apri canvas ComfyUI (editor a nodi)"
 			},
 			{
 				"command": "mgcoding.importWorkflow",
@@ -844,6 +848,11 @@
 					"type": "number",
 					"default": -1,
 					"description": "Seed della generazione. -1 = casuale ogni volta; un valore fisso riproduce lo stesso risultato (utile per confronti)."
+				},
+				"mgcoding.image.transparentBackground": {
+					"type": "boolean",
+					"default": false,
+					"description": "Genera PNG con sfondo trasparente aggiungendo un nodo di rimozione sfondo al workflow ComfyUI. Richiede il custom node ComfyUI-RMBG installato (nodo 'RMBG'). Utile per icone/token; per le carte che riempiono il frame non serve."
 				},
 				"mgcoding.image.denoise": {
 					"type": "number",

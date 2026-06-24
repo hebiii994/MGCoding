@@ -112,6 +112,7 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 			workflows,
 			workflow: cfg.get<string>('image.workflow', ''),
 			enhancePrompt: cfg.get<boolean>('image.enhancePrompt', true),
+			transparent: cfg.get<boolean>('image.transparentBackground', false),
 			enhanceModel: cfg.get<string>('image.enhanceModel', ''),
 			aspect: cfg.get<string>('image.aspect', 'auto'),
 			denoise: cfg.get<number>('image.denoise', 0.6),
@@ -163,6 +164,9 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 	.muted { opacity: .55; }
 	.val { flex: 0 0 36px; text-align: right; font-variant-numeric: tabular-nums; opacity: .85; }
 	.path { font-size: 10px; opacity: .5; margin-top: 6px; word-break: break-all; }
+	.lb { position: fixed; inset: 0; background: rgba(0,0,0,.85); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 50; padding: 10px; }
+	.lb-bar { position: absolute; top: 8px; right: 8px; display: flex; gap: 6px; }
+	.lb img { max-width: 96%; max-height: 88%; object-fit: contain; border-radius: 8px; background: repeating-conic-gradient(#666 0% 25%, #888 0% 50%) 0 0 / 18px 18px; }
 </style></head><body>
 	<div class="card">
 		<div class="status"><span id="dot" class="dot"></span><span id="statusText">…</span></div>
@@ -195,6 +199,7 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 			</select></div>
 		<div class="hint">Persona a figura intera → verticale (2:3 o 9:16); a 1:1 esce mezzo busto.</div>
 		<div class="row"><label>Migliora prompt</label><input type="checkbox" id="enhance" /><span class="muted">amplifica e traduce</span></div>
+		<div class="row"><label>Sfondo trasp.</label><input type="checkbox" id="transparent" /><span class="muted">PNG trasparente (richiede ComfyUI-RMBG)</span></div>
 		<div class="row"><label>Modello prompt</label><input type="text" id="enhanceModel" placeholder="(usa il modello di chat)" /></div>
 		<div class="hint">Per i prompt puoi usare un modello creativo/uncensored separato.</div>
 		<div class="row"><label>Forza img2img</label><input type="range" id="denoise" min="0" max="1" step="0.05" /><span class="val" id="denoiseVal"></span></div>
@@ -226,6 +231,7 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 			<button data-cmd="mgcoding.importWorkflow">⬆ Importa workflow</button>
 			<button data-cmd="mgcoding.fixWorkflow" class="primary">🩹 Risolvi workflow</button>
 			<button data-cmd="mgcoding.generateBatch" class="primary">📦 Batch da file</button>
+			<button data-cmd="mgcoding.openComfyCanvas" class="primary">🧩 Canvas ComfyUI</button>
 			<button data-cmd="mgcoding.openChat" class="primary">💬 Apri chat Img</button>
 			<button data-cmd="mgcoding.recommendModel">💡 Consiglia modello</button>
 		</div>
@@ -246,6 +252,11 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 		<div class="path" id="galPath"></div>
 	</div>
 
+	<div id="lightbox" class="lb" style="display:none">
+		<div class="lb-bar"><button id="lbOpen">↗ Apri nell'editor</button><button id="lbClose">✕ Chiudi</button></div>
+		<img id="lbImg" src="" />
+	</div>
+
 <script nonce="${nonce}">
 	var vscode = acquireVsCodeApi();
 	function $(id){ return document.getElementById(id); }
@@ -258,6 +269,12 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 	$('workflow').addEventListener('change', function(){ send({type:'setConfig', key:'image.workflow', value:this.value}); });
 	$('aspect').addEventListener('change', function(){ send({type:'setConfig', key:'image.aspect', value:this.value}); });
 	$('enhance').addEventListener('change', function(){ send({type:'setConfig', key:'image.enhancePrompt', value:this.checked}); });
+	$('transparent').addEventListener('change', function(){ send({type:'setConfig', key:'image.transparentBackground', value:this.checked}); });
+	var lbPath = '';
+	function showLightbox(src, path){ lbPath = path; $('lbImg').src = src; $('lightbox').style.display = 'flex'; }
+	$('lbClose').addEventListener('click', function(){ $('lightbox').style.display = 'none'; });
+	$('lightbox').addEventListener('click', function(e){ if (e.target === $('lightbox')) { $('lightbox').style.display = 'none'; } });
+	$('lbOpen').addEventListener('click', function(){ if (lbPath) { send({type:'openImage', path: lbPath}); } });
 	$('enhanceModel').addEventListener('change', function(){ send({type:'setConfig', key:'image.enhanceModel', value:this.value}); });
 	$('denoise').addEventListener('input', function(){ $('denoiseVal').textContent = (+this.value).toFixed(2); });
 	$('denoise').addEventListener('change', function(){ send({type:'setConfig', key:'image.denoise', value:+this.value}); });
@@ -289,6 +306,7 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 		for (var j=0;j<m.workflows.length;j++){ ws.appendChild(opt(m.workflows[j], m.workflows[j], m.workflow)); }
 		$('aspect').value = m.aspect || 'auto';
 		$('enhance').checked = !!m.enhancePrompt;
+		$('transparent').checked = !!m.transparent;
 		$('enhanceModel').value = m.enhanceModel || '';
 		$('denoise').value = m.denoise; $('denoiseVal').textContent = (+m.denoise).toFixed(2);
 		$('steps').value = m.steps; $('cfg').value = m.cfg; $('sampler').value = m.sampler || 'auto'; $('seed').value = m.seed;
@@ -298,7 +316,7 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 		var g = $('gallery'); g.innerHTML='';
 		for (var k=0;k<m.gallery.length;k++){ (function(it){
 			var d=document.createElement('div'); d.className='thumb';
-			var im=document.createElement('img'); im.src=it.src; im.title='Apri'; im.addEventListener('click', function(){ send({type:'openImage', path:it.path}); });
+			var im=document.createElement('img'); im.src=it.src; im.title='Anteprima'; im.addEventListener('click', function(){ showLightbox(it.src, it.path); });
 			var del=document.createElement('button'); del.className='del'; del.textContent='\\u2715'; del.title='Elimina';
 			del.addEventListener('click', function(ev){ ev.stopPropagation(); send({type:'deleteImage', path:it.path}); });
 			d.appendChild(im); d.appendChild(del); g.appendChild(d);

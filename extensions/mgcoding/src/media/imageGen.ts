@@ -38,6 +38,8 @@ export interface ImageGenOptions {
 	lora?: string;
 	/** Forza del LoRA (model+clip), default 0.8. */
 	loraStrength?: number;
+	/** Sfondo trasparente: aggiunge un nodo RMBG (richiede il custom node ComfyUI-RMBG). */
+	transparent?: boolean;
 }
 
 /** Sceglie il checkpoint: quello richiesto se disponibile, altrimenti il primo della lista. */
@@ -70,6 +72,18 @@ function samplerParams(ckpt: string, opts: ImageGenOptions): { steps: number; cf
 		base.sampler = opts.sampler;
 	}
 	return base;
+}
+
+/**
+ * Se richiesto lo sfondo trasparente, prepara un nodo RMBG (id '13') che rimuove lo sfondo
+ * dall'immagine decodificata e ritorna il riferimento immagine finale da salvare.
+ * Richiede il custom node ComfyUI-RMBG installato in ComfyUI.
+ */
+function rmbgSetup(opts: ImageGenOptions): { node?: object; imageRef: [string, number] } {
+	if (!opts.transparent) {
+		return { imageRef: ['8', 0] };
+	}
+	return { node: { class_type: 'RMBG', inputs: { image: ['8', 0] } }, imageRef: ['13', 0] };
 }
 
 /** Seed da usare: quello fisso indicato (>=0) o uno casuale. */
@@ -238,7 +252,8 @@ async function genComfy(endpoint: string, prompt: string, opts: ImageGenOptions,
 	const seed = pickSeed(opts);
 	const sp = samplerParams(ckpt, opts); // parametri adatti al modello (FLUX vs SD/SDXL)
 	const lora = loraSetup(opts);
-	// Workflow txt2img minimale standard (con LoraLoader opzionale).
+	const rmbg = rmbgSetup(opts);
+	// Workflow txt2img minimale standard (con LoraLoader e RMBG opzionali).
 	const workflow = {
 		'3': { class_type: 'KSampler', inputs: { seed, steps: sp.steps, cfg: sp.cfg, sampler_name: sp.sampler, scheduler: sp.scheduler, denoise: 1, model: lora.modelRef, positive: ['6', 0], negative: ['7', 0], latent_image: ['5', 0] } },
 		'4': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: ckpt } },
@@ -246,8 +261,9 @@ async function genComfy(endpoint: string, prompt: string, opts: ImageGenOptions,
 		'6': { class_type: 'CLIPTextEncode', inputs: { text: prompt, clip: lora.clipRef } },
 		'7': { class_type: 'CLIPTextEncode', inputs: { text: sp.negative, clip: lora.clipRef } },
 		'8': { class_type: 'VAEDecode', inputs: { samples: ['3', 0], vae: ['4', 2] } },
-		'9': { class_type: 'PreviewImage', inputs: { images: ['8', 0] } },
-		...(lora.node ? { '12': lora.node } : {})
+		'9': { class_type: 'PreviewImage', inputs: { images: rmbg.imageRef } },
+		...(lora.node ? { '12': lora.node } : {}),
+		...(rmbg.node ? { '13': rmbg.node } : {})
 	};
 	const images = await queueAndCollect(endpoint, workflow, signal);
 	return { images, mediaType: 'image/png', backendLabel: `ComfyUI · ${ckpt}` };
@@ -386,17 +402,19 @@ async function genComfyImg2Img(endpoint: string, prompt: string, opts: ImageGenO
 	const seed = pickSeed(opts);
 	const sp = samplerParams(ckpt, opts);
 	const lora = loraSetup(opts);
-	// 3) Workflow img2img: LoadImage -> VAEEncode -> KSampler(denoise) -> VAEDecode -> Save (LoraLoader opzionale).
+	const rmbg = rmbgSetup(opts);
+	// 3) Workflow img2img: LoadImage -> VAEEncode -> KSampler(denoise) -> VAEDecode -> Save (LoraLoader/RMBG opzionali).
 	const workflow = {
 		'3': { class_type: 'KSampler', inputs: { seed, steps: sp.steps, cfg: sp.cfg, sampler_name: sp.sampler, scheduler: sp.scheduler, denoise: opts.denoise ?? 0.6, model: lora.modelRef, positive: ['6', 0], negative: ['7', 0], latent_image: ['10', 0] } },
 		'4': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: ckpt } },
 		'6': { class_type: 'CLIPTextEncode', inputs: { text: prompt, clip: lora.clipRef } },
 		'7': { class_type: 'CLIPTextEncode', inputs: { text: sp.negative, clip: lora.clipRef } },
 		'8': { class_type: 'VAEDecode', inputs: { samples: ['3', 0], vae: ['4', 2] } },
-		'9': { class_type: 'PreviewImage', inputs: { images: ['8', 0] } },
+		'9': { class_type: 'PreviewImage', inputs: { images: rmbg.imageRef } },
 		'10': { class_type: 'VAEEncode', inputs: { pixels: ['11', 0], vae: ['4', 2] } },
 		'11': { class_type: 'LoadImage', inputs: { image: imageRef } },
-		...(lora.node ? { '12': lora.node } : {})
+		...(lora.node ? { '12': lora.node } : {}),
+		...(rmbg.node ? { '13': rmbg.node } : {})
 	};
 	const images = await queueAndCollect(ep, workflow, signal);
 	return { images, mediaType: 'image/png', backendLabel: `ComfyUI · ${ckpt} (img2img)` };
