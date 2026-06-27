@@ -26,7 +26,9 @@
 	"scripts": {
 		"compile": "gulp compile-extension:mgcoding",
 		"watch": "gulp watch-extension:mgcoding",
-		"test": "node ./out/test/parsing.test.js"
+		"compile-tests": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json",
+		"pretest": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json",
+		"test": "node scripts/run-tests.mjs"
 	},
 	"devDependencies": {
 		"fast-check": "^3.23.2"

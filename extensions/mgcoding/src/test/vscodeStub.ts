@@ -30,3 +30,44 @@ M._load = function (request: string, ...args: unknown[]): unknown {
 	}
 	return originalLoad.apply(this, [request, ...args]);
 };
+
+/**
+ * ⚠️ TRAPPOLA DA CONOSCERE — snapshot di `vscode` a load-time.
+ *
+ * I moduli sotto test sono compilati con `esModuleInterop`, quindi un
+ * `import * as vscode from 'vscode'` diventa `__importStar(require('vscode'))`. Per uno stub
+ * che NON è un modulo ES (come `vscodeMock`), `__importStar` **copia** le proprietà proprie
+ * dell'oggetto al momento del `require`: il modulo cattura cioè uno SNAPSHOT dello stub fatto
+ * quando viene caricato, non un riferimento vivo. Di conseguenza, se un modulo legge
+ * `vscode.window`/`vscode.workspace`/... A LOAD-TIME (es. `llm/registry.ts` nel costruttore, o
+ * qualunque accesso in cima al file), un `import` in testa al file di test lo carica PRIMA che
+ * il test abbia popolato `vscodeMock`, e quelle proprietà restano `undefined` per sempre — con
+ * errori opachi tipo «Cannot read properties of undefined».
+ *
+ * Due modi sicuri per evitarla:
+ *  1. Popolare `vscodeMock` con la superficie necessaria PRIMA di caricare il modulo, poi
+ *     caricarlo con `require` (non con un `import` in testa). Vedi `loadAfterMock`.
+ *  2. Per le sole funzioni pure (che non toccano `vscode` a load-time) l'`import` in testa va
+ *     bene: lo snapshot vuoto è sufficiente.
+ */
+
+/**
+ * Carica un modulo DOPO aver popolato lo stub `vscode`, evitando lo snapshot vuoto descritto
+ * sopra. Usare con un percorso relativo alla cartella `out/test/` (come un normale `require`):
+ *
+ * ```ts
+ * import { vscodeMock, loadAfterMock } from './vscodeStub';
+ * Object.assign(vscodeMock, { window: { createStatusBarItem: () => ({ ... }) }, workspace: { ... } });
+ * const { ProviderRegistry } = loadAfterMock<typeof import('../llm/registry')>('../llm/registry');
+ * ```
+ *
+ * @param request percorso del modulo, identico a quello che passeresti a `require`.
+ * @returns gli export del modulo, tipizzati dal chiamante.
+ */
+export function loadAfterMock<T>(request: string): T {
+	// La risoluzione del percorso relativo deve avvenire rispetto al MODULO CHIAMANTE, non a
+	// questo file: si usa quindi il `require` del chiamante. Poiché `vscodeStub` è importato dai
+	// file di test (stessa cartella `out/test/`), i percorsi relativi `../llm/...` coincidono.
+	// eslint-disable-next-line @typescript-eslint/no-require-imports
+	return require(request) as T;
+}

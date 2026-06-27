@@ -81,8 +81,9 @@ di proprietà e i criteri EARS validati. I default preservano il comportamento e
     - **Property 21: Composizione del prompt in funzione del solo budget**
     - **Validates: Requirements 7.1, 7.2, 7.3, 7.4, 7.5**
 
-- [~] 5. Checkpoint - Verifica dei nuclei puri di base
+- [x] 5. Checkpoint - Verifica dei nuclei puri di base
   - Ensure all tests pass, ask the user if questions arise.
+  - Verificato: suite completa verde (`npm test`).
 
 - [x] 6. Autonomy_Controller (gating, checkpoint, revert)
   - [x] 6.1 Implementare la logica pura di decisione delle azioni
@@ -140,8 +141,9 @@ di proprietà e i criteri EARS validati. I default preservano il comportamento e
     - Verificare che la fase successiva non parta finché l'approvazione della fase corrente non è registrata
     - _Requirements: 6.6_
 
-- [~] 8. Checkpoint - Verifica di autonomia e validazione Spec
+- [x] 8. Checkpoint - Verifica di autonomia e validazione Spec
   - Ensure all tests pass, ask the user if questions arise.
+  - Verificato: suite completa verde (`npm test`).
 
 - [x] 9. Provider_Router con consapevolezza di tier, GLM e costo
   - [x] 9.1 Estendere `chooseProvider` con RouteResult, tier e catena di ripiego
@@ -223,8 +225,10 @@ di proprietà e i criteri EARS validati. I default preservano il comportamento e
     - Ollama irraggiungibile → `LLMError` con endpoint citato; comandi eseguiti tramite `cmd`
     - _Requirements: 9.1, 11.5_
 
-- [~] 13. Checkpoint finale - Verifica end-to-end
+- [x] 13. Checkpoint finale - Verifica end-to-end
   - Ensure all tests pass, ask the user if questions arise.
+  - Verificato: 65/65 file di test verdi (`npm test`), inclusa l'orchestrazione end-to-end del
+    percorso structured/retry/fallback per iterazione (`iterationDrive.test.ts`).
 
 ## Notes
 

@@ -193,6 +193,56 @@ export function onSchemaViolation(state: IterationRetryState): 'retry' | 'fallba
 	return 'fallback';
 }
 
+/**
+ * Esito di un singolo tentativo dello Structured_Tool_Engine per l'iterazione corrente:
+ *  - `continue`: tool eseguito (o verifica iniettata), l'iterazione è conclusa e il loop prosegue;
+ *  - `return`: il modello ha prodotto la risposta finale, il loop termina;
+ *  - `violation`: output non conforme allo schema (o parse/connessione), gestito dal retry.
+ */
+export type StructuredAttemptOutcome = 'continue' | 'return' | 'violation';
+
+/**
+ * Decisione del loop per l'iterazione corrente dopo l'orchestrazione structured:
+ *  - `return`: termina il loop (risposta finale);
+ *  - `continue`: passa all'iterazione successiva;
+ *  - `fallback`: prosegui sul percorso testuale `mg-tool` per QUESTA iterazione.
+ */
+export type StructuredIterationDecision = 'return' | 'continue' | 'fallback';
+
+/**
+ * Orchestrazione del percorso structured per UNA iterazione (Req. 2.1-2.4). È la logica che
+ * lega `chooseIterationPath` e `onSchemaViolation` in una sequenza completa, estratta dal loop
+ * per renderla verificabile end-to-end con un `attempt` finto (senza dipendere da vscode/rete):
+ *  - se il percorso scelto NON è structured → `fallback` (si va sul testuale) senza tentativi;
+ *  - altrimenti, stato di retry FRESCO a questa iterazione (`maxRetries`, default 1): tenta lo
+ *    structured; su `violation` ritenta finché restano retry; poi mappa l'esito finale su
+ *    `return`/`continue`, oppure su `fallback` quando i retry sono esauriti (Req. 2.3).
+ * Lo stato di retry è locale: un fallback in questa iterazione NON influenza le successive
+ * (la decisione di percorso è ricalcolata ogni volta da `chooseIterationPath`, Req. 2.4).
+ */
+export async function driveStructuredIteration(
+	tier: CapabilityTier,
+	structuredToolsEnabled: boolean,
+	attempt: () => Promise<StructuredAttemptOutcome>,
+	maxRetries = 1
+): Promise<StructuredIterationDecision> {
+	if (chooseIterationPath(tier, structuredToolsEnabled) !== 'structured') {
+		return 'fallback';
+	}
+	const retry: IterationRetryState = { retries: 0, maxRetries, usedFallback: false };
+	let step = await attempt();
+	while (step === 'violation' && onSchemaViolation(retry) === 'retry') {
+		step = await attempt();
+	}
+	if (step === 'return') {
+		return 'return';
+	}
+	if (step === 'continue') {
+		return 'continue';
+	}
+	return 'fallback';
+}
+
 /** Tool senza effetti collaterali: eseguibili in parallelo nello stesso turno. */
 const READ_ONLY_TOOLS = new Set(['read_file', 'list_dir', 'find_files', 'search_text', 'search_code', 'get_diagnostics', 'get_command_output', 'fetch_url']);
 
@@ -792,24 +842,18 @@ async function runJsonAgent(
 			// --- Percorso di tool-calling per QUESTA iterazione (Req. 2.1, 2.4, 2.5) ---
 			// La decisione è ricalcolata a ogni iterazione: un fallback testuale pregresso NON
 			// disabilita lo structured nelle iterazioni successive (lo stato di retry è locale).
-			if (chooseIterationPath(tier, structuredToolsEnabled) === 'structured') {
-				// Stato di retry LOCALE a questa iterazione: un retry, poi fallback `mg-tool`
-				// solo per questa iterazione (Req. 2.2, 2.3). Ricreato a ogni giro (Req. 2.4).
-				const retry: IterationRetryState = { retries: 0, maxRetries: 1, usedFallback: false };
-				let step = await attemptStructured();
-				while (step === 'violation' && onSchemaViolation(retry) === 'retry') {
-					// Ritenta lo Structured_Tool_Engine nella STESSA iterazione (Req. 2.2).
-					step = await attemptStructured();
-				}
-				if (step === 'return') {
-					return;
-				}
-				if (step === 'continue') {
-					continue;
-				}
-				// step === 'violation' con retry esauriti → fallback testuale `mg-tool` per QUESTA
-				// iterazione (Req. 2.3): si prosegue sul percorso testuale qui sotto.
+			// `attemptStructured` esegue UN tentativo; l'orchestrazione di retry/fallback per
+			// iterazione è centralizzata in `driveStructuredIteration` (testata a parte), che
+			// riparte da uno stato di retry fresco a ogni giro (Req. 2.2, 2.3, 2.4).
+			const structuredDecision = await driveStructuredIteration(tier, structuredToolsEnabled, attemptStructured);
+			if (structuredDecision === 'return') {
+				return;
 			}
+			if (structuredDecision === 'continue') {
+				continue;
+			}
+			// structuredDecision === 'fallback' → percorso testuale `mg-tool` per QUESTA iterazione
+			// (sia quando il percorso scelto è già testuale, sia quando i retry structured sono esauriti).
 
 			let reply: string;
 			if (streaming) {
