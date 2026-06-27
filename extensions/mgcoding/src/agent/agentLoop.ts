@@ -4,15 +4,194 @@
 
 import * as vscode from 'vscode';
 import { ProviderRegistry } from '../llm/registry';
-import { AnthropicBlock, AnthropicMessage, ChatMessage, LLMProvider, parseDataUrl } from '../llm/types';
+import { AnthropicBlock, AnthropicMessage, CapabilityTier, ChatMessage, LLMProvider, parseDataUrl } from '../llm/types';
+import { CapabilityCache, classifyTier, downgradeTier } from '../llm/capability';
+import { computeBudget, estimateTokens, reduceHistory } from '../llm/contextManager';
+import { compose } from './promptComposer';
 import { getMcpManager } from '../mcp/mcpClient';
 import { beginCheckpoint } from '../edit/checkpoint';
 import { parseToolCall, parseAllToolCalls, extractShellCommands, TOOL_RE } from '../util/parsing';
-import { buildSystemPrompt, complete, streamChat } from './agent';
+import { buildSystemPrompt, complete, setActiveComposition, streamChat } from './agent';
 import { statsBeginRun, statsEndRun, statsIteration, statsMarkLimit, statsTool } from './agentStats';
 import { activeDevServer, anthropicBuiltinTools, errorsForPaths, executeTool, ToolCall, ToolSpec, TOOL_SPECS } from './tools';
 
 const MAX_ITERATIONS = 30;
+
+/* -------------------------------------------------------------------------------------------
+ * Cache delle capacità per la SESSIONE corrente (Req. 9.6).
+ *
+ * Vive a livello di modulo nell'Agent_Loop: i declassamenti dovuti all'assenza di tool-call
+ * valide persistono tra run successivi della stessa sessione, così che le esecuzioni
+ * seguenti usino il tier più basso. La risoluzione completa del tier (override di config →
+ * probe funzionale → classifyTier) è cablata in `resolveTier` e memorizzata qui per la
+ * durata della sessione (Req. 3.4, 3.6, 9.6).
+ * ----------------------------------------------------------------------------------------- */
+const sessionCapabilityCache = new CapabilityCache();
+
+/** Chiave di cache del modello attivo per il provider corrente. */
+function activeModelKey(registry: ProviderRegistry, provider: LLMProvider): string {
+	return provider.id === 'ollama' ? registry.currentOllamaModel() : provider.modelName();
+}
+
+/**
+ * Interfaccia minima del guscio Ollama usata dall'Agent_Loop per la risoluzione del tier
+ * (probe funzionale + capability dichiarata) e per il budgeting del contesto (num_ctx).
+ */
+interface OllamaCapabilities {
+	supportsTools(model: string): Promise<boolean>;
+	probeToolUse(model: string): Promise<boolean>;
+	effectiveNumCtx(model?: string): Promise<number>;
+}
+
+/** Restituisce il guscio Ollama se il provider lo è e ne espone i metodi, altrimenti undefined. */
+function asOllama(provider: LLMProvider): OllamaCapabilities | undefined {
+	const p = provider as Partial<OllamaCapabilities> & LLMProvider;
+	if (provider.id === 'ollama'
+		&& typeof p.supportsTools === 'function'
+		&& typeof p.probeToolUse === 'function'
+		&& typeof p.effectiveNumCtx === 'function') {
+		return p as OllamaCapabilities;
+	}
+	return undefined;
+}
+
+/** Type guard per i valori di Capability_Tier provenienti dalla config (untyped). */
+function isCapabilityTier(value: unknown): value is CapabilityTier {
+	return value === 'native' || value === 'structured' || value === 'textual';
+}
+
+/** num_ctx oltre la soglia compatta usato per i provider cloud (finestra ampia → variante completa). */
+const CLOUD_NUM_CTX = 131072;
+
+/**
+ * num_ctx effettivo del modello attivo (Req. 1.5, 7.1): per Ollama riusa la risoluzione del
+ * guscio (config > finestra max del modello > default); per i provider cloud usa una finestra
+ * ampia, così la composizione del prompt resta sulla variante completa.
+ */
+async function activeNumCtx(provider: LLMProvider): Promise<number> {
+	const ollama = asOllama(provider);
+	if (ollama) {
+		try {
+			return await ollama.effectiveNumCtx();
+		} catch {
+			// best-effort: in caso di errore I/O si ripiega sul default cloud
+		}
+	}
+	return CLOUD_NUM_CTX;
+}
+
+/**
+ * Risoluzione del Capability_Tier del modello attivo (Capability_Detector, Req. 3.1-3.6):
+ *  - se la sessione ha già un tier per il modello (risolto o declassato) lo riusa (Req. 3.4, 9.6);
+ *  - se esiste l'override `mgcoding.model.capabilityTier[model]` vince e salta la probe (Req. 3.5);
+ *  - per Ollama interroga la capability `tools` dichiarata e, se presente, la verifica con la
+ *    probe funzionale: `native` solo se la probe passa, altrimenti al massimo `structured` (Req. 3.2, 3.3);
+ *  - per i provider senza guscio di probe la classificazione si basa solo su override/declaresTools.
+ * L'esito viene memorizzato nella cache di sessione.
+ */
+async function resolveTier(provider: LLMProvider, modelKey: string): Promise<CapabilityTier> {
+	const cached = sessionCapabilityCache.get(modelKey);
+	if (cached !== undefined) {
+		return cached;
+	}
+	const overrides = vscode.workspace.getConfiguration('mgcoding').get<Record<string, string>>('model.capabilityTier', {}) ?? {};
+	const configOverride = isCapabilityTier(overrides[modelKey]) ? overrides[modelKey] as CapabilityTier : undefined;
+
+	let declaresTools = false;
+	let functionalProbePassed: boolean | undefined;
+	const ollama = asOllama(provider);
+	if (configOverride === undefined && ollama) {
+		try {
+			declaresTools = await ollama.supportsTools(modelKey);
+			// La probe funzionale si esegue solo se il modello dichiara `tools` (Req. 3.2, 3.3).
+			if (declaresTools) {
+				functionalProbePassed = await ollama.probeToolUse(modelKey);
+			}
+		} catch {
+			// best-effort: in caso di errore I/O si ricade su una classificazione conservativa
+		}
+	}
+	const tier = classifyTier({ declaresTools, functionalProbePassed, configOverride });
+	sessionCapabilityCache.set(modelKey, tier);
+	return tier;
+}
+
+/**
+ * Declassa il tier del modello per la sessione corrente (Req. 9.6): invocato quando un
+ * modello che dichiara tool-use NON emette alcuna chiamata a tool valida entro le iterazioni
+ * configurate. Al primo declassamento parte dal tier effettivo corrente applicando
+ * `downgradeTier`; ai declassamenti successivi delega a `CapabilityCache.downgrade` (che a
+ * sua volta applica `downgradeTier` sul valore già in cache). Il limite inferiore è `textual`.
+ */
+function downgradeSessionTier(modelKey: string, currentTier: CapabilityTier): CapabilityTier {
+	if (sessionCapabilityCache.get(modelKey) === undefined) {
+		const lowered = downgradeTier(currentTier);
+		sessionCapabilityCache.set(modelKey, lowered);
+		return lowered;
+	}
+	return sessionCapabilityCache.downgrade(modelKey);
+}
+
+/* -------------------------------------------------------------------------------------------
+ * Logica pura del percorso di tool-calling per iterazione (Req. 2.1-2.5, 3.6).
+ *
+ * Queste funzioni e tipi sono PURI (nessuna dipendenza da `vscode`, da `fetch` o dal
+ * filesystem): concentrano le decisioni sul percorso di tool-calling di una singola
+ * iterazione e sono verificabili con property-based testing. Il cablaggio nel loop
+ * effettivo avverrà in un task successivo.
+ * ----------------------------------------------------------------------------------------- */
+
+/**
+ * Esito del percorso di tool-calling per una singola iterazione.
+ *  - `tool`: il modello ha richiesto l'esecuzione di un tool;
+ *  - `final`: il modello ha prodotto la risposta finale (nessun tool);
+ *  - `fallback`: l'iterazione è ricaduta sul percorso testuale `mg-tool`.
+ */
+export interface IterationToolOutcome {
+	kind: 'tool' | 'final' | 'fallback';
+	tool?: string;
+	args?: Record<string, unknown>;
+	finalText?: string;
+}
+
+/** Stato di retry locale a UNA iterazione (Req. 2.2, 2.3). */
+export interface IterationRetryState {
+	retries: number;       // azzerato a ogni nuova iterazione
+	maxRetries: number;    // default 1 → un retry prima di cambiare percorso
+	usedFallback: boolean; // true se questa iterazione è ricaduta su mg-tool
+}
+
+/**
+ * Decide il percorso della prossima iterazione (Req. 2.1, 2.4, 2.5, 3.6):
+ *  - tier∈{structured,native} e structuredToolsEnabled → 'structured';
+ *  - structuredToolsEnabled==false → sempre 'textual';
+ *  - tier=='textual' → 'textual'.
+ * Ogni iterazione riparte da capo: un fallback pregresso non disabilita le iterazioni
+ * successive (la decisione non dipende dalle iterazioni precedenti).
+ */
+export function chooseIterationPath(
+	tier: CapabilityTier,
+	structuredToolsEnabled: boolean
+): 'structured' | 'textual' {
+	if (structuredToolsEnabled && (tier === 'structured' || tier === 'native')) {
+		return 'structured';
+	}
+	return 'textual';
+}
+
+/**
+ * Aggiorna lo stato di retry su output non conforme allo schema (Req. 2.2, 2.3):
+ *  - se retries < maxRetries → incrementa di esattamente uno e ritenta structured;
+ *  - altrimenti → segna usedFallback e passa a mg-tool per QUESTA iterazione.
+ */
+export function onSchemaViolation(state: IterationRetryState): 'retry' | 'fallback' {
+	if (state.retries < state.maxRetries) {
+		state.retries += 1;
+		return 'retry';
+	}
+	state.usedFallback = true;
+	return 'fallback';
+}
 
 /** Tool senza effetti collaterali: eseguibili in parallelo nello stesso turno. */
 const READ_ONLY_TOOLS = new Set(['read_file', 'list_dir', 'find_files', 'search_text', 'search_code', 'get_diagnostics', 'get_command_output', 'fetch_url']);
@@ -130,8 +309,13 @@ async function autoWebVerify(runStart: number, cb: AgentCallbacks): Promise<stri
 	}
 }
 
-function toolSystemPrompt(hint?: string): string {
-	const specs = [...TOOL_SPECS, ...filteredMcpSpecs(hint)];
+function toolSystemPrompt(hint?: string, exposedTools?: readonly string[]): string {
+	let specs = [...TOOL_SPECS, ...filteredMcpSpecs(hint)];
+	// In variante compatta espone esclusivamente il sottoinsieme ridotto di tool (Req. 7.3).
+	if (exposedTools) {
+		const allow = new Set(exposedTools);
+		specs = specs.filter(t => allow.has(t.name));
+	}
 	const list = specs.map(t => `- ${t.name}: ${t.description} args: ${t.args}`).join('\n');
 	return `Puoi AGIRE sul progetto SOLO tramite i tool: per eseguire un'azione (leggere/scrivere file, lanciare comandi) DEVI emettere un blocco tool, non descriverla.
 Quando usi un tool, rispondi ESCLUSIVAMENTE con UN blocco così e nient'altro (un solo tool per messaggio), poi FERMATI e ASPETTA:
@@ -211,12 +395,17 @@ const NUDGE_MESSAGE = '[Sistema] NON hai usato alcuno strumento: hai solo descri
  * Il nome del tool è vincolato con un enum ai tool realmente esistenti (+ "respond"):
  * la grammar impedisce fisicamente al modello di inventare tool inesistenti.
  */
-function toolActionSchema(): object {
-	const names = [
+function toolActionSchema(exposedTools?: readonly string[]): object {
+	let names = [
 		...TOOL_SPECS.map(t => t.name),
-		...(getMcpManager()?.toolSpecs().map(t => t.name) ?? []),
-		'respond'
+		...(getMcpManager()?.toolSpecs().map(t => t.name) ?? [])
 	];
+	// In variante compatta vincola l'enum al solo sottoinsieme esposto (Req. 7.3).
+	if (exposedTools) {
+		const allow = new Set(exposedTools);
+		names = names.filter(n => allow.has(n));
+	}
+	names.push('respond');
 	return {
 		type: 'object',
 		properties: {
@@ -280,27 +469,8 @@ function mcpImageDataUrls(): string[] {
 	return (getMcpManager()?.takeLastImages() ?? []).map(im => `data:${im.mediaType};base64,${im.data}`);
 }
 
-/** Quanti risultati tool recenti tenere integri e taglio per i più vecchi (solo percorso Ollama). */
+/** Quanti risultati tool recenti tenere integri durante la riduzione della cronologia. */
 const TRIM_KEEP_RECENT = 4;
-const TRIM_MAX_CHARS = 700;
-
-/**
- * Tronca i risultati tool più VECCHI nello storico del run (percorso testuale/structured,
- * cioè modelli locali con contesto piccolo): gli ultimi restano integri, i precedenti
- * vengono accorciati per non saturare il contesto nei run lunghi.
- */
-function trimOldToolResults(msgs: ChatMessage[]): void {
-	let recent = 0;
-	for (let k = msgs.length - 1; k >= 0; k--) {
-		const m = msgs[k];
-		if (m.role === 'user' && /^Risultato del (?:tool|comando)/.test(m.content)) {
-			recent++;
-			if (recent > TRIM_KEEP_RECENT && m.content.length > TRIM_MAX_CHARS) {
-				m.content = `${m.content.slice(0, TRIM_MAX_CHARS)}\n… [risultato più vecchio troncato per non saturare il contesto]`;
-			}
-		}
-	}
-}
 /** Istruzione aggiunta al system prompt in modalità strutturata. */
 const STRUCTURED_INSTRUCTION = '\n\nRISPONDI SEMPRE con un oggetto JSON {"reasoning": "...", "tool": "<nome_tool o respond>", "args": {...}}. Per usare un tool metti il suo nome in "tool" e i parametri in "args". Per dare la risposta finale all\'utente usa "tool":"respond" e metti il testo in "args":{"message":"..."}. Un solo tool per volta.';
 
@@ -485,7 +655,6 @@ async function runJsonAgent(
 ): Promise<void> {
 	const runStart = Date.now();
 	const reqHint = [...messages].reverse().find(m => m.role === 'user')?.content;
-	const sys = systemExtra ? `${toolSystemPrompt(reqHint)}\n\n${systemExtra}` : toolSystemPrompt(reqHint);
 	const streaming = typeof cb.onStreamDelta === 'function';
 	const callCounts = new Map<string, number>();
 	let sawAnyTool = false;
@@ -506,179 +675,261 @@ async function runJsonAgent(
 		return dedup(toolName, args, raw);
 	};
 
-	// Tool calling RIGOROSO (Ollama): output vincolato a uno schema → niente JSON spazzatura.
-	let structuredOllama = provider.id === 'ollama'
-		&& vscode.workspace.getConfiguration('mgcoding').get<boolean>('ollama.structuredTools', false)
+	// Tool calling RIGOROSO (Ollama structured): output vincolato a uno schema (Req. 2.1).
+	// `canStructured` indica la sola DISPONIBILITÀ del motore strutturato (provider locale che
+	// espone chatStructured); il flag utente `ollama.structuredTools` lo abilita.
+	const canStructured = provider.id === 'ollama'
 		&& typeof (provider as { chatStructured?: unknown }).chatStructured === 'function';
+	// Flag che abilita lo Structured_Tool_Engine: con `false` l'Agent_Loop usa SEMPRE il
+	// percorso testuale `mg-tool` senza tentare lo structured (Req. 2.5).
+	const structuredToolsEnabled = canStructured
+		&& vscode.workspace.getConfiguration('mgcoding').get<boolean>('ollama.structuredTools', false);
+	// Capability_Detector: risoluzione reale del Capability_Tier del modello attivo (Req. 3.6),
+	// tramite override di config → probe funzionale → classifyTier, con cache di sessione.
+	// La scelta del percorso per iterazione resta delegata a `chooseIterationPath`.
+	const modelKey = activeModelKey(registry, provider);
+	const tier = await resolveTier(provider, modelKey);
 
-	for (let i = 0; i < MAX_ITERATIONS; i++) {
-		if (signal?.aborted) {
-			return;
-		}
-		statsIteration();
-		// Nei run lunghi accorcia i risultati tool più vecchi (contesto piccolo dei locali).
-		if (i > 0) {
-			trimOldToolResults(messages);
-		}
-		// Anti-deriva: ogni 8 iterazioni ricorda l'obiettivo (i modelli deboli lo perdono).
-		if (i > 0 && i % 8 === 0 && reqHint) {
-			messages.push({ role: 'user', content: `[Promemoria] L'obiettivo resta: "${reqHint.slice(0, 300)}". Non ricominciare da capo e non deviare: completa solo ciò che manca, poi concludi.` });
-		}
+	// Context_Manager + Prompt_Composer: num_ctx effettivo del modello, budget per la cronologia
+	// e composizione (variante prompt + sottoinsieme tool) in base al budget effettivo (Req. 1.5, 7.1, 7.4).
+	const numCtx = await activeNumCtx(provider);
+	const allToolNames = [...TOOL_SPECS.map(t => t.name), ...filteredMcpSpecs(reqHint).map(t => t.name)];
+	const composition = compose(tier, numCtx, allToolNames);
+	// In variante compatta si filtra al sottoinsieme ridotto; in completa nessun filtro (Req. 7.3, 7.5).
+	const exposed = composition.variant === 'compact' ? composition.exposedTools : undefined;
+	const sys = systemExtra
+		? `${toolSystemPrompt(reqHint, exposed)}\n\n${systemExtra}`
+		: toolSystemPrompt(reqHint, exposed);
+	// Comunica la composizione a buildSystemPrompt così la variante (compact/full) del system
+	// prompt dipenda dal Context_Budget e non dal solo nome del modello (Req. 7.1, 7.4).
+	setActiveComposition(composition);
 
-		// --- Percorso RIGOROSO (Ollama structured): output vincolato a schema JSON ---
-		if (structuredOllama) {
-			try {
-				const raw = await (provider as unknown as { chatStructured(s: string | undefined, m: { role: string; content: string }[], schema: object, sig?: AbortSignal): Promise<string> })
-					.chatStructured(sys + STRUCTURED_INSTRUCTION, messages.map(m => ({ role: m.role, content: m.content })), toolActionSchema(), signal);
-				const parsed = JSON.parse(raw) as { reasoning?: string; tool?: string; args?: Record<string, unknown> };
-				const tool = String(parsed.tool ?? '').trim();
-				const reasoning = String(parsed.reasoning ?? '').trim();
-				const args = (parsed.args && typeof parsed.args === 'object') ? parsed.args : {};
-				if (!tool || /^(?:respond|final|none|answer|done)$/i.test(tool)) {
-					const finalText = reasoning || String((args as { message?: unknown }).message ?? '');
-					messages.push({ role: 'assistant', content: finalText });
-					cb.onAssistantText(finalText);
-					if (verifyRounds < MAX_VERIFY_ROUNDS) {
-						const verify = (await autoVerify(changed)) || (await autoWebVerify(runStart, cb));
-						if (verify) { verifyRounds++; changed.clear(); cb.onToolStart({ tool: 'verifica', args: {} }); cb.onToolResult(verify); messages.push({ role: 'user', content: verify }); continue; }
-					}
+	// Parametri di riduzione della cronologia (Context_Manager, Req. 1.5, 4.2, 4.6).
+	const ctxCfg = vscode.workspace.getConfiguration('mgcoding');
+	const responseReserve = ctxCfg.get<number>('context.responseReserve', 1024);
+	const summarize = ctxCfg.get<boolean>('context.summarize', true);
+	// historyBudget = num_ctx − (token di system+tool stimati) − riserva risposta. La stima usa
+	// `sys` (che include già le definizioni dei tool esposti); i token aggiuntivi del prompt di
+	// base sono trascurati nell'euristica.
+	const historyBudget = computeBudget({
+		configNumCtx: numCtx,
+		systemTokens: estimateTokens(sys),
+		toolTokens: 0,
+		responseReserve
+	}).historyBudget;
+
+	/**
+	 * Tenta UNA chiamata allo Structured_Tool_Engine per l'iterazione corrente (Req. 2.1).
+	 * Esegue il tool richiesto o gestisce la risposta finale, aggiornando storico e UI.
+	 * Ritorna:
+	 *  - 'continue': l'iterazione è conclusa sul percorso structured (il loop prosegue);
+	 *  - 'return': il modello ha prodotto la risposta finale (il loop termina);
+	 *  - 'violation': output non conforme/parse/connessione → gestito dal retry per iterazione.
+	 */
+	const attemptStructured = async (): Promise<'continue' | 'return' | 'violation'> => {
+		try {
+			const raw = await (provider as unknown as { chatStructured(s: string | undefined, m: { role: string; content: string }[], schema: object, sig?: AbortSignal): Promise<string> })
+				.chatStructured(sys + STRUCTURED_INSTRUCTION, messages.map(m => ({ role: m.role, content: m.content })), toolActionSchema(exposed), signal);
+			const parsed = JSON.parse(raw) as { reasoning?: string; tool?: string; args?: Record<string, unknown> };
+			const tool = String(parsed.tool ?? '').trim();
+			const reasoning = String(parsed.reasoning ?? '').trim();
+			const args = (parsed.args && typeof parsed.args === 'object') ? parsed.args : {};
+			if (!tool || /^(?:respond|final|none|answer|done)$/i.test(tool)) {
+				const finalText = reasoning || String((args as { message?: unknown }).message ?? '');
+				messages.push({ role: 'assistant', content: finalText });
+				cb.onAssistantText(finalText);
+				if (verifyRounds < MAX_VERIFY_ROUNDS) {
+					const verify = (await autoVerify(changed)) || (await autoWebVerify(runStart, cb));
+					if (verify) { verifyRounds++; changed.clear(); cb.onToolStart({ tool: 'verifica', args: {} }); cb.onToolResult(verify); messages.push({ role: 'user', content: verify }); return 'continue'; }
+				}
+				return 'return';
+			}
+			sawAnyTool = true;
+			if (reasoning) {
+				cb.onAssistantText(reasoning);
+			}
+			// Nello storico va la forma mg-tool leggibile (non il JSON grezzo), così un
+			// eventuale fallback al percorso testuale vede una conversazione coerente.
+			messages.push({ role: 'assistant', content: `${reasoning ? `${reasoning}\n` : ''}\`\`\`mg-tool\n${JSON.stringify({ tool, args })}\n\`\`\`` });
+			if (WRITE_TOOLS.has(tool) && typeof args.path === 'string') {
+				changed.add(args.path);
+			}
+			cb.onToolStart({ tool, args });
+			const result = await execOne(tool, args);
+			cb.onToolResult(result);
+			const structuredUserMsg: ChatMessage = { role: 'user', content: `Risultato del tool ${tool} (${resultLabel(result)}):\n${result}` };
+			const structuredImgs = mcpImageDataUrls();
+			if (structuredImgs.length) {
+				structuredUserMsg.images = structuredImgs;
+			}
+			messages.push(structuredUserMsg);
+			return 'continue';
+		} catch {
+			// Output non conforme allo schema (o parse/connessione): segnala la violazione,
+			// la gestione del retry/fallback per iterazione decide il da farsi (Req. 2.2, 2.3).
+			return 'violation';
+		}
+	};
+
+	try {
+		for (let i = 0; i < MAX_ITERATIONS; i++) {
+			if (signal?.aborted) {
+				return;
+			}
+			statsIteration();
+			// Context_Manager: riduce la cronologia INVIATA per rientrare nel budget di contesto
+			// (Req. 1.5) — riassume/tronca i risultati tool più vecchi e, se serve, rimuove i turni
+			// più vecchi, mantenendo integri i più recenti e l'ultimo messaggio utente.
+			if (i > 0) {
+				const reduced = reduceHistory({ messages, historyBudget, summarize, keepRecent: TRIM_KEEP_RECENT }).messages;
+				messages.splice(0, messages.length, ...reduced);
+			}
+			// Anti-deriva: ogni 8 iterazioni ricorda l'obiettivo (i modelli deboli lo perdono).
+			if (i > 0 && i % 8 === 0 && reqHint) {
+				messages.push({ role: 'user', content: `[Promemoria] L'obiettivo resta: "${reqHint.slice(0, 300)}". Non ricominciare da capo e non deviare: completa solo ciò che manca, poi concludi.` });
+			}
+
+			// --- Percorso di tool-calling per QUESTA iterazione (Req. 2.1, 2.4, 2.5) ---
+			// La decisione è ricalcolata a ogni iterazione: un fallback testuale pregresso NON
+			// disabilita lo structured nelle iterazioni successive (lo stato di retry è locale).
+			if (chooseIterationPath(tier, structuredToolsEnabled) === 'structured') {
+				// Stato di retry LOCALE a questa iterazione: un retry, poi fallback `mg-tool`
+				// solo per questa iterazione (Req. 2.2, 2.3). Ricreato a ogni giro (Req. 2.4).
+				const retry: IterationRetryState = { retries: 0, maxRetries: 1, usedFallback: false };
+				let step = await attemptStructured();
+				while (step === 'violation' && onSchemaViolation(retry) === 'retry') {
+					// Ritenta lo Structured_Tool_Engine nella STESSA iterazione (Req. 2.2).
+					step = await attemptStructured();
+				}
+				if (step === 'return') {
 					return;
 				}
-				sawAnyTool = true;
-				if (reasoning) {
-					cb.onAssistantText(reasoning);
-				}
-				// Nello storico va la forma mg-tool leggibile (non il JSON grezzo), così un
-				// eventuale fallback al percorso testuale vede una conversazione coerente.
-				messages.push({ role: 'assistant', content: `${reasoning ? `${reasoning}\n` : ''}\`\`\`mg-tool\n${JSON.stringify({ tool, args })}\n\`\`\`` });
-				if (WRITE_TOOLS.has(tool) && typeof args.path === 'string') {
-					changed.add(args.path);
-				}
-				cb.onToolStart({ tool, args });
-				const result = await execOne(tool, args);
-				cb.onToolResult(result);
-				const structuredUserMsg: ChatMessage = { role: 'user', content: `Risultato del tool ${tool} (${resultLabel(result)}):\n${result}` };
-				const structuredImgs = mcpImageDataUrls();
-				if (structuredImgs.length) {
-					structuredUserMsg.images = structuredImgs;
-				}
-				messages.push(structuredUserMsg);
-				continue;
-			} catch {
-				// Errore (schema/parse/connessione): disattiva la modalità strutturata per il
-				// resto del run e prosegui col percorso testuale (niente retry sprecati).
-				structuredOllama = false;
-			}
-		}
-
-		let reply: string;
-		if (streaming) {
-			cb.onStreamStart?.();
-			reply = await streamChat(registry, messages, d => cb.onStreamDelta!(d), signal, sys, provider);
-		} else {
-			reply = await complete(registry, messages, sys, signal, provider);
-		}
-
-		const calls = parseAllToolCalls(reply);
-		const call = calls[0];
-
-		if (!call) {
-			if (streaming) {
-				cb.onStreamEnd?.();
-			} else {
-				cb.onAssistantText(reply);
-			}
-			messages.push({ role: 'assistant', content: reply });
-			// Se il modello ha SCRITTO comandi da terminale invece di chiamare il tool,
-			// eseguili noi (così "scrivere il comando" = eseguirlo, niente giro sprecato).
-			const shellCmds = extractShellCommands(reply);
-			if (shellCmds.length && shellRuns < 5) {
-				shellRuns++;
-				sawAnyTool = true;
-				const parts: string[] = [];
-				for (const cmd of shellCmds.slice(0, 4)) {
-					cb.onToolStart({ tool: 'run_command', args: { command: cmd } });
-					const r = await executeTool({ tool: 'run_command', args: { command: cmd } });
-					cb.onToolResult(r);
-					parts.push(`Risultato del comando "${cmd}":\n${r}`);
-				}
-				messages.push({ role: 'user', content: `${parts.join('\n\n')}\n\n(Ho eseguito io i comandi che avevi scritto: NON riscriverli. Prosegui in base al risultato reale qui sopra.)` });
-				continue;
-			}
-			// Nudge: ha annunciato un'azione ma non ha usato tool → invitalo a farlo davvero.
-			if (!sawAnyTool && nudges < 2 && looksLikeUnfulfilledAnnouncement(reply)) {
-				nudges++;
-				messages.push({ role: 'user', content: NUDGE_MESSAGE });
-				continue;
-			}
-			// Auto-verifica: se ha modificato file, controlla gli errori e fagli correggere.
-			if (verifyRounds < MAX_VERIFY_ROUNDS) {
-				const verify = (await autoVerify(changed)) || (await autoWebVerify(runStart, cb));
-				if (verify) {
-					verifyRounds++;
-					changed.clear();
-					cb.onToolStart({ tool: 'verifica', args: {} });
-					cb.onToolResult(verify);
-					messages.push({ role: 'user', content: verify });
+				if (step === 'continue') {
 					continue;
 				}
+				// step === 'violation' con retry esauriti → fallback testuale `mg-tool` per QUESTA
+				// iterazione (Req. 2.3): si prosegue sul percorso testuale qui sotto.
 			}
-			return;
-		}
-		sawAnyTool = true;
-		if (WRITE_TOOLS.has(call.tool) && call.args.path) {
-			changed.add(String(call.args.path));
+
+			let reply: string;
+			if (streaming) {
+				cb.onStreamStart?.();
+				reply = await streamChat(registry, messages, d => cb.onStreamDelta!(d), signal, sys, provider);
+			} else {
+				reply = await complete(registry, messages, sys, signal, provider);
+			}
+
+			const calls = parseAllToolCalls(reply);
+			const call = calls[0];
+
+			if (!call) {
+				if (streaming) {
+					cb.onStreamEnd?.();
+				} else {
+					cb.onAssistantText(reply);
+				}
+				messages.push({ role: 'assistant', content: reply });
+				// Se il modello ha SCRITTO comandi da terminale invece di chiamare il tool,
+				// eseguili noi (così "scrivere il comando" = eseguirlo, niente giro sprecato).
+				const shellCmds = extractShellCommands(reply);
+				if (shellCmds.length && shellRuns < 5) {
+					shellRuns++;
+					sawAnyTool = true;
+					const parts: string[] = [];
+					for (const cmd of shellCmds.slice(0, 4)) {
+						cb.onToolStart({ tool: 'run_command', args: { command: cmd } });
+						const r = await executeTool({ tool: 'run_command', args: { command: cmd } });
+						cb.onToolResult(r);
+						parts.push(`Risultato del comando "${cmd}":\n${r}`);
+					}
+					messages.push({ role: 'user', content: `${parts.join('\n\n')}\n\n(Ho eseguito io i comandi che avevi scritto: NON riscriverli. Prosegui in base al risultato reale qui sopra.)` });
+					continue;
+				}
+				// Nudge: ha annunciato un'azione ma non ha usato tool → invitalo a farlo davvero.
+				if (!sawAnyTool && nudges < 2 && looksLikeUnfulfilledAnnouncement(reply)) {
+					nudges++;
+					messages.push({ role: 'user', content: NUDGE_MESSAGE });
+					continue;
+				}
+				// Auto-verifica: se ha modificato file, controlla gli errori e fagli correggere.
+				if (verifyRounds < MAX_VERIFY_ROUNDS) {
+					const verify = (await autoVerify(changed)) || (await autoWebVerify(runStart, cb));
+					if (verify) {
+						verifyRounds++;
+						changed.clear();
+						cb.onToolStart({ tool: 'verifica', args: {} });
+						cb.onToolResult(verify);
+						messages.push({ role: 'user', content: verify });
+						continue;
+					}
+				}
+				return;
+			}
+			sawAnyTool = true;
+			if (WRITE_TOOLS.has(call.tool) && call.args.path) {
+				changed.add(String(call.args.path));
+			}
+
+			// È una tool-call: in streaming annulliamo la bolla mostrata (conteneva il JSON del tool)
+			if (streaming) {
+				cb.onStreamCancel?.();
+			}
+			// testo eventuale prima del blocco tool (ragionamento) mostrato come testo statico
+			const before = reply.slice(0, TOOL_RE.exec(reply)?.index ?? 0).trim();
+			if (before) {
+				cb.onAssistantText(before);
+			}
+			messages.push({ role: 'assistant', content: reply });
+
+			// BATCH: se il modello ha emesso PIÙ tool di sola lettura nello stesso messaggio,
+			// eseguili tutti insieme (in parallelo) → molti meno turni nelle fasi di indagine.
+			if (calls.length > 1 && calls.every(c => READ_ONLY_TOOLS.has(c.tool))) {
+				const results = await Promise.all(calls.map(async c => {
+					cb.onToolStart(c);
+					const rawBatch = await executeTool({ tool: c.tool, args: c.args });
+					statsTool(c.tool, resultLabel(rawBatch) === 'OK');
+					const r = dedup(c.tool, c.args, rawBatch);
+					cb.onToolResult(r);
+					return `Risultato del tool ${c.tool} (${JSON.stringify(c.args)}) — ${resultLabel(r)}:\n${r}`;
+				}));
+				messages.push({ role: 'user', content: results.join('\n\n') });
+				continue;
+			}
+
+			// Guard anti-loop: i modelli deboli ripetono la stessa chiamata all'infinito.
+			const sig = `${call.tool}:${JSON.stringify(call.args)}`;
+			const n = (callCounts.get(sig) ?? 0) + 1;
+			callCounts.set(sig, n);
+			if (n > 4) {
+				cb.onAssistantText('_(interrotto: chiamata ripetuta troppe volte allo stesso tool senza progresso)_');
+				return;
+			}
+
+			cb.onToolStart(call);
+			const result = await execOne(call.tool, call.args);
+			cb.onToolResult(result);
+			const hint = n >= 3 ? `\n\n[AVVISO: hai già chiamato ${call.tool} con questi stessi argomenti ${n} volte. Cambia approccio (altro tool/argomenti) oppure, se hai le informazioni, procedi o concludi.]` : '';
+			const toolUserMsg: ChatMessage = { role: 'user', content: `Risultato del tool ${call.tool} (${resultLabel(result)}):\n${result}${hint}` };
+			const toolImgs = mcpImageDataUrls();
+			if (toolImgs.length) {
+				toolUserMsg.images = toolImgs;
+			}
+			messages.push(toolUserMsg);
 		}
 
-		// È una tool-call: in streaming annulliamo la bolla mostrata (conteneva il JSON del tool)
-		if (streaming) {
-			cb.onStreamCancel?.();
+		statsMarkLimit();
+		cb.onAssistantText('_(raggiunto il limite massimo di passi dell\'agente)_');
+	} finally {
+		// Azzera la composizione del prompt impostata per questo run (Req. 7.1).
+		setActiveComposition(undefined);
+		// Declassamento di sessione (Req. 9.6): se il modello dichiara tool-use (tier capace)
+		// ma NON ha emesso alcuna chiamata a tool valida entro le iterazioni configurate,
+		// abbassa il suo Capability_Tier per la sessione corrente, così i run successivi
+		// useranno un percorso più robusto. Saltato in caso di abort (run interrotto).
+		if (!signal?.aborted && !sawAnyTool && tier !== 'textual') {
+			downgradeSessionTier(modelKey, tier);
 		}
-		// testo eventuale prima del blocco tool (ragionamento) mostrato come testo statico
-		const before = reply.slice(0, TOOL_RE.exec(reply)?.index ?? 0).trim();
-		if (before) {
-			cb.onAssistantText(before);
-		}
-		messages.push({ role: 'assistant', content: reply });
-
-		// BATCH: se il modello ha emesso PIÙ tool di sola lettura nello stesso messaggio,
-		// eseguili tutti insieme (in parallelo) → molti meno turni nelle fasi di indagine.
-		if (calls.length > 1 && calls.every(c => READ_ONLY_TOOLS.has(c.tool))) {
-			const results = await Promise.all(calls.map(async c => {
-				cb.onToolStart(c);
-				const rawBatch = await executeTool({ tool: c.tool, args: c.args });
-				statsTool(c.tool, resultLabel(rawBatch) === 'OK');
-				const r = dedup(c.tool, c.args, rawBatch);
-				cb.onToolResult(r);
-				return `Risultato del tool ${c.tool} (${JSON.stringify(c.args)}) — ${resultLabel(r)}:\n${r}`;
-			}));
-			messages.push({ role: 'user', content: results.join('\n\n') });
-			continue;
-		}
-
-		// Guard anti-loop: i modelli deboli ripetono la stessa chiamata all'infinito.
-		const sig = `${call.tool}:${JSON.stringify(call.args)}`;
-		const n = (callCounts.get(sig) ?? 0) + 1;
-		callCounts.set(sig, n);
-		if (n > 4) {
-			cb.onAssistantText('_(interrotto: chiamata ripetuta troppe volte allo stesso tool senza progresso)_');
-			return;
-		}
-
-		cb.onToolStart(call);
-		const result = await execOne(call.tool, call.args);
-		cb.onToolResult(result);
-		const hint = n >= 3 ? `\n\n[AVVISO: hai già chiamato ${call.tool} con questi stessi argomenti ${n} volte. Cambia approccio (altro tool/argomenti) oppure, se hai le informazioni, procedi o concludi.]` : '';
-		const toolUserMsg: ChatMessage = { role: 'user', content: `Risultato del tool ${call.tool} (${resultLabel(result)}):\n${result}${hint}` };
-		const toolImgs = mcpImageDataUrls();
-		if (toolImgs.length) {
-			toolUserMsg.images = toolImgs;
-		}
-		messages.push(toolUserMsg);
 	}
-
-	statsMarkLimit();
-	cb.onAssistantText('_(raggiunto il limite massimo di passi dell\'agente)_');
 }
 
 // --- Percorso tool-use NATIVO (Claude) ---
@@ -708,6 +959,11 @@ async function runNativeAgent(
 ): Promise<void> {
 	const runStart = Date.now();
 	const lastUserMsg = [...history].reverse().find(m => m.role === 'user');
+	// Prompt_Composer: la variante del system prompt dipende dal Context_Budget effettivo
+	// (Req. 7.1, 7.4). Il percorso nativo usa tool-use nativo (tier `native`); la scelta della
+	// variante resta governata dal solo budget. I tool nativi restano completi (ask/delegate/plan).
+	const numCtx = await activeNumCtx(provider);
+	setActiveComposition(compose('native', numCtx, []));
 	const system = await buildSystemPrompt(systemExtra, lastUserMsg?.content);
 	// Un subagent (depth>0) non espone il tool delegate, per evitare ricorsione.
 	// I tool MCP sono filtrati per pertinenza alla richiesta (vedi filteredMcpSpecs).
@@ -723,6 +979,9 @@ async function runNativeAgent(
 	let shellRuns = 0;
 	const changed = new Set<string>();
 	let verifyRounds = 0;
+	// Chiave del modello attivo per il declassamento di sessione (Req. 9.6): il percorso
+	// nativo usa tool-use NATIVO, quindi il tier effettivo è `native`.
+	const modelKey = activeModelKey(registry, provider);
 	const dedup = makeResultDedup();
 	// Esegue un tool con guard anti-loop (modelli che ripetono la stessa chiamata).
 	const runToolGuarded = async (name: string, input: unknown): Promise<string> => {
@@ -768,213 +1027,224 @@ async function runNativeAgent(
 		return { role: m.role === 'assistant' ? 'assistant' : 'user', content };
 	});
 
-	for (let i = 0; i < MAX_ITERATIONS; i++) {
-		if (signal?.aborted) {
-			return;
-		}
-		statsIteration();
-
-		if (streaming) {
-			cb.onStreamStart?.();
-		}
-
-		const blocks = new Map<number, AccBlock>();
-		let textAcc = '';
-		let stopReason: string | undefined;
-		let thinkingOpen = false;
-
-		for await (const evt of provider.streamAgent!({ system, messages, tools, signal })) {
-			if (evt.type === 'content_block_start' && evt.content_block && evt.index !== undefined) {
-				if (evt.content_block.type === 'tool_use') {
-					blocks.set(evt.index, { type: 'tool_use', id: evt.content_block.id, name: evt.content_block.name, json: '' });
-				} else if (evt.content_block.type === 'thinking') {
-					blocks.set(evt.index, { type: 'thinking', text: '', sig: '' });
-				} else if (evt.content_block.type === 'text') {
-					blocks.set(evt.index, { type: 'text', text: '' });
-				}
-			} else if (evt.type === 'content_block_delta' && evt.delta && evt.index !== undefined) {
-				const b = blocks.get(evt.index);
-				if (evt.delta.type === 'thinking_delta' && evt.delta.thinking) {
-					if (streaming && !thinkingOpen) {
-						cb.onStreamDelta!('<think>');
-						thinkingOpen = true;
-					}
-					if (streaming) {
-						cb.onStreamDelta!(evt.delta.thinking);
-					}
-					if (b && b.type === 'thinking') {
-						b.text = (b.text ?? '') + evt.delta.thinking;
-					}
-				} else if (evt.delta.type === 'signature_delta' && evt.delta.signature && b && b.type === 'thinking') {
-					b.sig = (b.sig ?? '') + evt.delta.signature;
-				} else if (evt.delta.type === 'text_delta' && evt.delta.text) {
-					if (streaming && thinkingOpen) {
-						cb.onStreamDelta!('</think>');
-						thinkingOpen = false;
-					}
-					textAcc += evt.delta.text;
-					if (streaming) {
-						cb.onStreamDelta!(evt.delta.text);
-					}
-					if (b && b.type === 'text') {
-						b.text = (b.text ?? '') + evt.delta.text;
-					}
-				} else if (evt.delta.type === 'input_json_delta' && evt.delta.partial_json && b && b.type === 'tool_use') {
-					b.json = (b.json ?? '') + evt.delta.partial_json;
-				}
-			} else if (evt.type === 'message_delta' && evt.delta?.stop_reason) {
-				stopReason = evt.delta.stop_reason;
-			} else if (evt.type === 'error') {
-				throw new Error('Errore nello stream Anthropic.');
+	try {
+		for (let i = 0; i < MAX_ITERATIONS; i++) {
+			if (signal?.aborted) {
+				return;
 			}
-		}
-		if (streaming && thinkingOpen) {
-			cb.onStreamDelta!('</think>');
-			thinkingOpen = false;
-		}
+			statsIteration();
 
-		// Ricostruisce i blocchi della risposta in ordine di indice.
-		const assistantContent: AnthropicBlock[] = [];
-		for (const [, b] of [...blocks.entries()].sort((a, c) => a[0] - c[0])) {
-			if (b.type === 'thinking' && b.text) {
-				assistantContent.push({ type: 'thinking', thinking: b.text, ...(b.sig ? { signature: b.sig } : {}) });
-			} else if (b.type === 'text' && b.text) {
-				assistantContent.push({ type: 'text', text: b.text });
-			} else if (b.type === 'tool_use' && b.id && b.name) {
-				let input: Record<string, unknown> = {};
-				try {
-					input = b.json ? JSON.parse(b.json) : {};
-				} catch {
-					input = {};
-				}
-				assistantContent.push({ type: 'tool_use', id: b.id, name: b.name, input });
-			}
-		}
-		if (assistantContent.length === 0) {
-			assistantContent.push({ type: 'text', text: textAcc });
-		}
-		messages.push({ role: 'assistant', content: assistantContent });
-
-		const toolUses = assistantContent.filter((b): b is Extract<AnthropicBlock, { type: 'tool_use' }> => b.type === 'tool_use');
-
-		if (stopReason !== 'tool_use' || toolUses.length === 0) {
-			// FALLBACK: alcuni modelli (es. coder) scrivono la tool-call come TESTO invece di
-			// chiamarla nativamente. Se nel testo c'è una tool-call valida e nota, eseguila
-			// davvero (così non "racconta" e non inventa l'output).
-			const textCall = parseToolCall(textAcc);
-			const isKnownTool = !!textCall && (TOOL_SPECS.some(t => t.name === textCall.tool)
-				|| ['ask_user', 'remember', 'delegate'].includes(textCall.tool)
-				|| !!getMcpManager()?.hasTool(textCall.tool));
-			if (textCall && isKnownTool && textFallbacks < 8) {
-				textFallbacks++;
-				sawAnyTool = true;
-				if (streaming) {
-					cb.onStreamCancel?.();
-				}
-				cb.onToolStart({ tool: textCall.tool, args: textCall.args });
-				const result = await runToolGuarded(textCall.tool, textCall.args);
-				cb.onToolResult(result);
-				const p = (textCall.args as { path?: unknown }).path;
-				if (WRITE_TOOLS.has(textCall.tool) && typeof p === 'string') {
-					changed.add(p);
-				}
-				messages.push({ role: 'user', content: [{ type: 'text', text: `Risultato REALE del tool ${textCall.tool}:\n${result}\n(Non inventare l'output: usa questo.)` }] });
-				continue;
-			}
-			// Risposta finale.
 			if (streaming) {
-				cb.onStreamEnd?.();
-			} else {
-				cb.onAssistantText(textAcc);
+				cb.onStreamStart?.();
 			}
-			history.push({ role: 'assistant', content: textAcc });
-			// Se il modello ha SCRITTO comandi da terminale invece di chiamarli, eseguili noi.
-			const shellCmds = extractShellCommands(textAcc);
-			if (shellCmds.length && shellRuns < 5) {
-				shellRuns++;
-				sawAnyTool = true;
-				const parts: string[] = [];
-				for (const cmd of shellCmds.slice(0, 4)) {
-					cb.onToolStart({ tool: 'run_command', args: { command: cmd } });
-					const r = await runToolGuarded('run_command', { command: cmd });
-					cb.onToolResult(r);
-					parts.push(`Risultato del comando "${cmd}":\n${r}`);
+
+			const blocks = new Map<number, AccBlock>();
+			let textAcc = '';
+			let stopReason: string | undefined;
+			let thinkingOpen = false;
+
+			for await (const evt of provider.streamAgent!({ system, messages, tools, signal })) {
+				if (evt.type === 'content_block_start' && evt.content_block && evt.index !== undefined) {
+					if (evt.content_block.type === 'tool_use') {
+						blocks.set(evt.index, { type: 'tool_use', id: evt.content_block.id, name: evt.content_block.name, json: '' });
+					} else if (evt.content_block.type === 'thinking') {
+						blocks.set(evt.index, { type: 'thinking', text: '', sig: '' });
+					} else if (evt.content_block.type === 'text') {
+						blocks.set(evt.index, { type: 'text', text: '' });
+					}
+				} else if (evt.type === 'content_block_delta' && evt.delta && evt.index !== undefined) {
+					const b = blocks.get(evt.index);
+					if (evt.delta.type === 'thinking_delta' && evt.delta.thinking) {
+						if (streaming && !thinkingOpen) {
+							cb.onStreamDelta!('<think>');
+							thinkingOpen = true;
+						}
+						if (streaming) {
+							cb.onStreamDelta!(evt.delta.thinking);
+						}
+						if (b && b.type === 'thinking') {
+							b.text = (b.text ?? '') + evt.delta.thinking;
+						}
+					} else if (evt.delta.type === 'signature_delta' && evt.delta.signature && b && b.type === 'thinking') {
+						b.sig = (b.sig ?? '') + evt.delta.signature;
+					} else if (evt.delta.type === 'text_delta' && evt.delta.text) {
+						if (streaming && thinkingOpen) {
+							cb.onStreamDelta!('</think>');
+							thinkingOpen = false;
+						}
+						textAcc += evt.delta.text;
+						if (streaming) {
+							cb.onStreamDelta!(evt.delta.text);
+						}
+						if (b && b.type === 'text') {
+							b.text = (b.text ?? '') + evt.delta.text;
+						}
+					} else if (evt.delta.type === 'input_json_delta' && evt.delta.partial_json && b && b.type === 'tool_use') {
+						b.json = (b.json ?? '') + evt.delta.partial_json;
+					}
+				} else if (evt.type === 'message_delta' && evt.delta?.stop_reason) {
+					stopReason = evt.delta.stop_reason;
+				} else if (evt.type === 'error') {
+					throw new Error('Errore nello stream Anthropic.');
 				}
-				messages.push({ role: 'user', content: [{ type: 'text', text: `${parts.join('\n\n')}\n\n(Ho eseguito io i comandi che avevi scritto: NON riscriverli. Prosegui in base al risultato reale.)` }] });
-				continue;
 			}
-			// Nudge: ha annunciato un'azione ma non ha usato tool → invitalo a farlo davvero.
-			if (!sawAnyTool && nudges < 2 && looksLikeUnfulfilledAnnouncement(textAcc)) {
-				nudges++;
-				messages.push({ role: 'user', content: [{ type: 'text', text: NUDGE_MESSAGE }] });
-				continue;
+			if (streaming && thinkingOpen) {
+				cb.onStreamDelta!('</think>');
+				thinkingOpen = false;
 			}
-			// Auto-verifica: se ha modificato file, controlla gli errori e fagli correggere.
-			if (verifyRounds < MAX_VERIFY_ROUNDS) {
-				const verify = (await autoVerify(changed)) || (await autoWebVerify(runStart, cb));
-				if (verify) {
-					verifyRounds++;
-					changed.clear();
-					cb.onToolStart({ tool: 'verifica', args: {} });
-					cb.onToolResult(verify);
-					messages.push({ role: 'user', content: [{ type: 'text', text: verify }] });
+
+			// Ricostruisce i blocchi della risposta in ordine di indice.
+			const assistantContent: AnthropicBlock[] = [];
+			for (const [, b] of [...blocks.entries()].sort((a, c) => a[0] - c[0])) {
+				if (b.type === 'thinking' && b.text) {
+					assistantContent.push({ type: 'thinking', thinking: b.text, ...(b.sig ? { signature: b.sig } : {}) });
+				} else if (b.type === 'text' && b.text) {
+					assistantContent.push({ type: 'text', text: b.text });
+				} else if (b.type === 'tool_use' && b.id && b.name) {
+					let input: Record<string, unknown> = {};
+					try {
+						input = b.json ? JSON.parse(b.json) : {};
+					} catch {
+						input = {};
+					}
+					assistantContent.push({ type: 'tool_use', id: b.id, name: b.name, input });
+				}
+			}
+			if (assistantContent.length === 0) {
+				assistantContent.push({ type: 'text', text: textAcc });
+			}
+			messages.push({ role: 'assistant', content: assistantContent });
+
+			const toolUses = assistantContent.filter((b): b is Extract<AnthropicBlock, { type: 'tool_use' }> => b.type === 'tool_use');
+
+			if (stopReason !== 'tool_use' || toolUses.length === 0) {
+				// FALLBACK: alcuni modelli (es. coder) scrivono la tool-call come TESTO invece di
+				// chiamarla nativamente. Se nel testo c'è una tool-call valida e nota, eseguila
+				// davvero (così non "racconta" e non inventa l'output).
+				const textCall = parseToolCall(textAcc);
+				const isKnownTool = !!textCall && (TOOL_SPECS.some(t => t.name === textCall.tool)
+					|| ['ask_user', 'remember', 'delegate'].includes(textCall.tool)
+					|| !!getMcpManager()?.hasTool(textCall.tool));
+				if (textCall && isKnownTool && textFallbacks < 8) {
+					textFallbacks++;
+					sawAnyTool = true;
+					if (streaming) {
+						cb.onStreamCancel?.();
+					}
+					cb.onToolStart({ tool: textCall.tool, args: textCall.args });
+					const result = await runToolGuarded(textCall.tool, textCall.args);
+					cb.onToolResult(result);
+					const p = (textCall.args as { path?: unknown }).path;
+					if (WRITE_TOOLS.has(textCall.tool) && typeof p === 'string') {
+						changed.add(p);
+					}
+					messages.push({ role: 'user', content: [{ type: 'text', text: `Risultato REALE del tool ${textCall.tool}:\n${result}\n(Non inventare l'output: usa questo.)` }] });
 					continue;
 				}
-			}
-			return;
-		}
-		sawAnyTool = true;
-
-		// Chiude la bolla di testo (vuota -> annulla; con testo -> mantiene).
-		if (streaming) {
-			if (textAcc.trim()) {
-				cb.onStreamEnd?.();
-			} else {
-				cb.onStreamCancel?.();
-			}
-		} else if (textAcc.trim()) {
-			cb.onAssistantText(textAcc);
-		}
-
-		// Esegue i tool e prepara i tool_result. Se nella stessa risposta ci sono PIÙ
-		// tool di sola lettura, li esegue in PARALLELO (più veloce); le scritture/comandi
-		// restano sequenziali (ordine e conferme).
-		const resultBlocks: AnthropicBlock[] = [];
-		if (toolUses.length > 1 && toolUses.every(tu => READ_ONLY_TOOLS.has(tu.name))) {
-			const results = await Promise.all(toolUses.map(async tu => {
-				cb.onToolStart({ tool: tu.name, args: tu.input });
-				const result = await runToolGuarded(tu.name, tu.input);
-				cb.onToolResult(result);
-				return { id: tu.id, result };
-			}));
-			for (const r of results) {
-				resultBlocks.push({ type: 'tool_result', tool_use_id: r.id, content: r.result });
-			}
-		} else {
-			for (const tu of toolUses) {
-				cb.onToolStart({ tool: tu.name, args: tu.input });
-				const result = await runToolGuarded(tu.name, tu.input);
-				cb.onToolResult(result);
-				const p = (tu.input as { path?: unknown })?.path;
-				if (WRITE_TOOLS.has(tu.name) && typeof p === 'string') {
-					changed.add(p);
+				// Risposta finale.
+				if (streaming) {
+					cb.onStreamEnd?.();
+				} else {
+					cb.onAssistantText(textAcc);
 				}
-				// Immagini dai tool MCP (es. screenshot della scena Unity): allegate al
-				// tool_result così i modelli vision le VEDONO davvero.
-				const mcpImgs = getMcpManager()?.takeLastImages() ?? [];
-				resultBlocks.push(mcpImgs.length
-					? {
-						type: 'tool_result', tool_use_id: tu.id, content: [
-							{ type: 'text', text: result },
-							...mcpImgs.map(im => ({ type: 'image' as const, source: { type: 'base64' as const, media_type: im.mediaType, data: im.data } }))
-						]
+				history.push({ role: 'assistant', content: textAcc });
+				// Se il modello ha SCRITTO comandi da terminale invece di chiamarli, eseguili noi.
+				const shellCmds = extractShellCommands(textAcc);
+				if (shellCmds.length && shellRuns < 5) {
+					shellRuns++;
+					sawAnyTool = true;
+					const parts: string[] = [];
+					for (const cmd of shellCmds.slice(0, 4)) {
+						cb.onToolStart({ tool: 'run_command', args: { command: cmd } });
+						const r = await runToolGuarded('run_command', { command: cmd });
+						cb.onToolResult(r);
+						parts.push(`Risultato del comando "${cmd}":\n${r}`);
 					}
-					: { type: 'tool_result', tool_use_id: tu.id, content: result });
+					messages.push({ role: 'user', content: [{ type: 'text', text: `${parts.join('\n\n')}\n\n(Ho eseguito io i comandi che avevi scritto: NON riscriverli. Prosegui in base al risultato reale.)` }] });
+					continue;
+				}
+				// Nudge: ha annunciato un'azione ma non ha usato tool → invitalo a farlo davvero.
+				if (!sawAnyTool && nudges < 2 && looksLikeUnfulfilledAnnouncement(textAcc)) {
+					nudges++;
+					messages.push({ role: 'user', content: [{ type: 'text', text: NUDGE_MESSAGE }] });
+					continue;
+				}
+				// Auto-verifica: se ha modificato file, controlla gli errori e fagli correggere.
+				if (verifyRounds < MAX_VERIFY_ROUNDS) {
+					const verify = (await autoVerify(changed)) || (await autoWebVerify(runStart, cb));
+					if (verify) {
+						verifyRounds++;
+						changed.clear();
+						cb.onToolStart({ tool: 'verifica', args: {} });
+						cb.onToolResult(verify);
+						messages.push({ role: 'user', content: [{ type: 'text', text: verify }] });
+						continue;
+					}
+				}
+				return;
 			}
-		}
-		messages.push({ role: 'user', content: resultBlocks });
-	}
+			sawAnyTool = true;
 
-	statsMarkLimit();
-	cb.onAssistantText('_(raggiunto il limite massimo di passi dell\'agente)_');
+			// Chiude la bolla di testo (vuota -> annulla; con testo -> mantiene).
+			if (streaming) {
+				if (textAcc.trim()) {
+					cb.onStreamEnd?.();
+				} else {
+					cb.onStreamCancel?.();
+				}
+			} else if (textAcc.trim()) {
+				cb.onAssistantText(textAcc);
+			}
+
+			// Esegue i tool e prepara i tool_result. Se nella stessa risposta ci sono PIÙ
+			// tool di sola lettura, li esegue in PARALLELO (più veloce); le scritture/comandi
+			// restano sequenziali (ordine e conferme).
+			const resultBlocks: AnthropicBlock[] = [];
+			if (toolUses.length > 1 && toolUses.every(tu => READ_ONLY_TOOLS.has(tu.name))) {
+				const results = await Promise.all(toolUses.map(async tu => {
+					cb.onToolStart({ tool: tu.name, args: tu.input });
+					const result = await runToolGuarded(tu.name, tu.input);
+					cb.onToolResult(result);
+					return { id: tu.id, result };
+				}));
+				for (const r of results) {
+					resultBlocks.push({ type: 'tool_result', tool_use_id: r.id, content: r.result });
+				}
+			} else {
+				for (const tu of toolUses) {
+					cb.onToolStart({ tool: tu.name, args: tu.input });
+					const result = await runToolGuarded(tu.name, tu.input);
+					cb.onToolResult(result);
+					const p = (tu.input as { path?: unknown })?.path;
+					if (WRITE_TOOLS.has(tu.name) && typeof p === 'string') {
+						changed.add(p);
+					}
+					// Immagini dai tool MCP (es. screenshot della scena Unity): allegate al
+					// tool_result così i modelli vision le VEDONO davvero.
+					const mcpImgs = getMcpManager()?.takeLastImages() ?? [];
+					resultBlocks.push(mcpImgs.length
+						? {
+							type: 'tool_result', tool_use_id: tu.id, content: [
+								{ type: 'text', text: result },
+								...mcpImgs.map(im => ({ type: 'image' as const, source: { type: 'base64' as const, media_type: im.mediaType, data: im.data } }))
+							]
+						}
+						: { type: 'tool_result', tool_use_id: tu.id, content: result });
+				}
+			}
+			messages.push({ role: 'user', content: resultBlocks });
+		}
+
+		statsMarkLimit();
+		cb.onAssistantText('_(raggiunto il limite massimo di passi dell\'agente)_');
+	} finally {
+		// Azzera la composizione del prompt impostata per questo run (Req. 7.1).
+		setActiveComposition(undefined);
+		// Declassamento di sessione (Req. 9.6): il percorso nativo dichiara tool-use; se NON
+		// emette alcuna chiamata a tool valida entro le iterazioni configurate, abbassa il
+		// Capability_Tier per la sessione corrente (parte da `native`). Saltato in caso di abort.
+		if (!signal?.aborted && !sawAnyTool) {
+			downgradeSessionTier(modelKey, 'native');
+		}
+	}
 }

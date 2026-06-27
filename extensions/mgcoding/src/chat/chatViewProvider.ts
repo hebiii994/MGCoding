@@ -19,6 +19,10 @@ import { ProfileStore } from '../profile/profiles';
 import { codeIndex } from '../index/codeIndex';
 import { detectImageBackend, generateImage } from '../media/imageGen';
 import { runWorkflow, missingModels, missingNodes, loadWorkflow, generatedDirUri } from '../media/comfyHelper';
+import { createDefaultOrchestrator } from '../agent/genOrchestrator';
+import type { GenRequest, GeneratedItem } from '../media/genTypes';
+import type { AgentCallbacks } from '../agent/agentLoop';
+import { VIBE_MODE_PROMPT, freeModeSystem } from './prompts';
 import * as os from 'os';
 import { execFile } from 'child_process';
 
@@ -117,7 +121,7 @@ const SPEC_PHASE_TITLE: Record<Exclude<SpecPhase, 'done'>, string> = {
 	tasks: '✅ Task'
 };
 
-const VIBE_MODE_PROMPT = `MODALITÀ VIBE: esplora e implementa rapidamente, iterando. Puoi modificare il codice direttamente con i tool quando opportuno.`;
+// VIBE_MODE_PROMPT e freeModeSystem sono ora centralizzati in ./prompts.
 
 export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
 	static readonly viewType = 'mgcoding.chat';
@@ -134,6 +138,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	private readonly sourceImages = new Map<string, string>();
 	/** Testo in attesa di scelta (offerta sessione Spec / prioritizzazione). */
 	private pendingSpecText = '';
+	/** true se l'utente ha rifiutato l'offerta di Spec in modo PERSISTENTE (memento globale). */
+	private specOfferDismissedGlobal = false;
 	/** Spec estratte da un messaggio multi-spec, in attesa di scelta. */
 	private pendingSpecs: { title: string; desc: string }[] = [];
 	/** Spec rimanenti da generare dopo la prima (quando se ne chiedono più di una). */
@@ -158,6 +164,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		void this.ensureDefaultProfile();
 		this.sessions = this.memento.get<Session[]>('mgcoding.sessions', []);
 		this.activeId = this.memento.get<string>('mgcoding.activeSession', '');
+		this.specOfferDismissedGlobal = this.memento.get<boolean>('mgcoding.specOfferDismissed', false);
 		if (this.sessions.length === 0) {
 			this.sessions.push(this.makeSession());
 		}
@@ -209,8 +216,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 
 	resolveWebviewView(webviewView: vscode.WebviewView): void {
 		this.view = webviewView;
-		webviewView.webview.options = { enableScripts: true, localResourceRoots: [this.extensionUri] };
-		webviewView.webview.html = this.getHtml();
+		const roots = [this.extensionUri, generatedDirUri(), ...(vscode.workspace.workspaceFolders?.map(f => f.uri) ?? [])];
+		webviewView.webview.options = { enableScripts: true, localResourceRoots: roots };
+		webviewView.webview.html = this.getHtml(webviewView.webview.cspSource);
 
 		webviewView.webview.onDidReceiveMessage(async (msg: { type: string; text?: string; id?: string; mode?: ChatMode; specMode?: string; images?: string[] }) => {
 			switch (msg.type) {
@@ -276,6 +284,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 				case 'setMode':
 					if (msg.mode) {
 						this.active().mode = msg.mode;
+						// Se l'utente sceglie esplicitamente la modalità Spec, è di nuovo aperto
+						// alle offerte: azzera il dismiss persistente.
+						if (msg.mode === 'spec' && this.specOfferDismissedGlobal) {
+							this.specOfferDismissedGlobal = false;
+							await this.memento.update('mgcoding.specOfferDismissed', false);
+						}
 						await this.save();
 						await this.sendState();
 					}
@@ -317,6 +331,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 							// Se nella sessione c'è un'immagine allegata, la riusa come base (img2img).
 							const src = this.sourceImages.get(this.activeId);
 							await this.handleImageMessage(t, src ? [src] : undefined);
+						}
+					}
+					break;
+				case 'genVariation':
+					{
+						// Rigenera lo STESSO prompt con un seed casuale → variazione diversa.
+						const t = String((msg as { prompt?: string }).prompt ?? '').trim();
+						if (t) {
+							const src = this.sourceImages.get(this.activeId);
+							await this.handleImageMessage(t, src ? [src] : undefined, -1);
+						}
+					}
+					break;
+				case 'lockSeed':
+					{
+						// Blocca il seed dell'immagine generata: le prossime generazioni lo riusano
+						// (riproducibilità). L'utente lo rimette casuale con seed -1 dalle impostazioni.
+						const seed = Number((msg as { seed?: number }).seed);
+						if (Number.isFinite(seed) && seed >= 0) {
+							await vscode.workspace.getConfiguration('mgcoding').update('image.seed', seed, vscode.ConfigurationTarget.Global);
+							vscode.window.showInformationMessage(`Seed bloccato a ${seed}: le prossime immagini useranno questo seed (rimettilo a -1 per tornare casuale).`);
+							await this.sendState();
 						}
 					}
 					break;
@@ -993,7 +1029,7 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 				return;
 			}
 			// Spec già completata e messaggio non legato ai task → prosegui come chat normale.
-		} else if (!session.specOfferDismissed && this.shouldOfferSpec(text)) {
+		} else if (!session.specOfferDismissed && !this.specOfferDismissedGlobal && this.shouldOfferSpec(text)) {
 			// Vibe: il messaggio sembra "da Spec" → offri una sessione Spec.
 			this.pendingSpecText = text;
 			if (this.isMultiSpec(text)) {
@@ -1002,6 +1038,24 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 				this.post({ type: 'specOffer' });
 			}
 			return;
+		}
+		// Vibe: richiesta di GENERAZIONE media (immagine/video) → instrada al percorso giusto
+		// invece di passare all'agente di codice (che non genera media). Strict per evitare
+		// falsi positivi (es. "crea un'immagine docker").
+		if (session.mode === 'vibe') {
+			const intent = this.detectGenIntent(text, true);
+			if (intent) {
+				if (session.title === 'Nuova sessione') {
+					session.title = (text || 'Generazione').slice(0, 40);
+				}
+				const src = images?.length ? parseDataUrl(images[0])?.data : this.sourceImages.get(this.activeId);
+				if (intent === 'video') {
+					await this.runMediaGeneration(text, src);
+				} else {
+					await this.handleImageMessage(text, images);
+				}
+				return;
+			}
 		}
 		if (session.title === 'Nuova sessione') {
 			session.title = (text || 'Immagine').slice(0, 40);
@@ -1041,7 +1095,7 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 				onModel: model => this.post({ type: 'modelChosen', model })
 			}, this.abort.signal, systemExtra);
 		} catch (err) {
-			this.post({ type: 'error', text: err instanceof Error ? err.message : String(err) });
+			this.post({ type: 'error', text: await this.registry.handleProviderError(err) });
 		} finally {
 			this.abort = undefined;
 			this.post({ type: 'busy', value: false });
@@ -1058,6 +1112,18 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 	/** Conversazione semplice: nessun system prompt agentico, nessun contesto del workspace. */
 	private async handleFreeMessage(text: string, images?: string[]): Promise<void> {
 		const session = this.active();
+		// Libera: se l'utente chiede esplicitamente di generare media, instrada alla generazione
+		// (immagine via percorso dedicato, video via Orchestratore) invece di solo conversare.
+		const intent = this.detectGenIntent(text);
+		if (intent) {
+			const src = images?.length ? parseDataUrl(images[0])?.data : this.sourceImages.get(this.activeId);
+			if (intent === 'video') {
+				await this.runMediaGeneration(text, src);
+			} else {
+				await this.handleImageMessage(text, images);
+			}
+			return;
+		}
 		const userMsg: ChatMessage = { role: 'user', content: text };
 		if (images?.length) {
 			userMsg.images = images.slice(0, 1);
@@ -1070,7 +1136,9 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 		await this.compactIfNeeded(session);
 		this.abort = new AbortController();
 		const hasImg = !!images?.length;
-		const sys = `Sei un assistente AI utile, amichevole e diretto. Conversi liberamente con l'utente: rispondi in modo chiaro e utile, in italiano se l'utente scrive in italiano. NON sei legato ad alcun progetto o codice: non assumere che l'utente voglia sviluppare software se non lo chiede esplicitamente. Usa Markdown quando aiuta. NON puoi eseguire azioni, comandi o tool e NON puoi generare immagini tu stesso: NON scrivere blocchi tool/JSON né fingere di farlo.${hasImg ? ' L\'utente ha allegato un\'IMMAGINE: se chiede di modificarla, scrivi un prompt in INGLESE che descriva il RISULTATO desiderato (l\'immagine allegata verrà usata come base per img2img quando l\'utente preme "🎨 Genera immagine").' : ' Se ti chiedono un\'immagine, scrivi un ottimo prompt e di\' all\'utente di premere il pulsante "🎨 Genera immagine" sotto la tua risposta (oppure la modalità Img).'} IMPORTANTE: NON ripetere a pappagallo le risposte precedenti; varia il contenuto. Se l'utente ti corregge o dice che hai sbagliato, NON riproporre la stessa cosa: cambia approccio e rispondi alla correzione.`;
+		// Prompt centralizzato (./prompts) + un minimo di profilo utente, così anche la chat
+		// libera sa come rivolgersi all'utente senza tradire la sua natura conversazionale.
+		const sys = [freeModeSystem(hasImg), this.profiles.contextBlock()].filter(Boolean).join('\n\n');
 		let streamBuf = '';
 		try {
 			this.post({ type: 'streamStart' });
@@ -1084,7 +1152,7 @@ Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la
 			}
 		} catch (err) {
 			this.post({ type: 'streamCancel' });
-			this.post({ type: 'error', text: err instanceof Error ? err.message : String(err) });
+			this.post({ type: 'error', text: await this.registry.handleProviderError(err) });
 		} finally {
 			this.abort = undefined;
 			this.post({ type: 'busy', value: false });
@@ -1139,11 +1207,109 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 		return { prompt: `${text}, ${QUALITY}`, negative: DEFAULT_NEG, aspect: '1:1' };
 	}
 
+	/**
+	 * Rileva se il messaggio chiede di GENERARE media e di che tipo.
+	 * `strict` (usato in Vibe, dove c'è rischio di falsi positivi col codice) richiede un verbo
+	 * d'arte forte per le immagini (genera/disegna/renderizza), escludendo il generico "crea".
+	 */
+	private detectGenIntent(text: string, strict = false): 'image' | 'video' | undefined {
+		const t = text.toLowerCase();
+		// Segnale VIDEO: parola video/clip/animazione o il verbo "anima/animare".
+		const videoSignal = /\b(video|videoclip|clip|filmato|animazione|anima(mi|re|lo|la)?|t2v|i2v)\b/.test(t);
+		if (videoSignal) {
+			return 'video';
+		}
+		const imageNoun = /\b(immagine|immagini|foto|fotografia|ritratto|disegno|illustrazione|wallpaper|sfondo|render|artwork|locandina|poster)\b/.test(t);
+		const strongArtVerb = /\b(genera(mi|re)?|disegna(mi|re)?|renderizza|render(a|are)?|produci|dipingi)\b/.test(t);
+		const anyGenVerb = strongArtVerb || /\b(crea(mi|re)?|fammi|realizza|mostrami|voglio|vorrei)\b/.test(t);
+		if (imageNoun && (strict ? strongArtVerb : anyGenVerb)) {
+			return 'image';
+		}
+		return undefined;
+	}
+
+	/**
+	 * Generazione TRASVERSALE via Orchestratore: usata da Vibe/Libera/Img per le richieste di
+	 * VIDEO (T2V/I2V) e, in fallback, per le immagini quando non si usa il percorso dedicato.
+	 * Classifica, sceglie il workflow, esegue su ComfyUI e mostra i media in chat. Riusa lo
+	 * stesso orchestratore della ComfyChat (`createDefaultOrchestrator`).
+	 */
+	private async runMediaGeneration(text: string, initImage?: string): Promise<void> {
+		const session = this.active();
+		if (session.title === 'Nuova sessione') {
+			session.title = (text || 'Generazione').slice(0, 40);
+		}
+		const req: GenRequest = { prompt: text };
+		if (initImage) {
+			req.initImage = initImage;
+		}
+		session.messages.push({ role: 'user', content: text });
+		this.mirror?.('user', text);
+		this.post({ type: 'busy', value: true });
+		this.abort = new AbortController();
+		try {
+			const cb: AgentCallbacks = {
+				onAssistantText: (t: string) => { this.mirror?.('assistant', t); this.post({ type: 'assistant', text: t }); },
+				onToolStart: c => this.post({ type: 'tool', name: c.tool, args: JSON.stringify(c.args) }),
+				onToolResult: (r: string) => this.post({ type: 'toolResult', text: r }),
+				// Disambiguazione del tipo (Req 1.6): riusa la stessa UI di domanda dell'agente.
+				onAsk: (question, options, multiSelect) => this.askUser(question, options, multiSelect)
+			};
+			const orch = createDefaultOrchestrator(this.registry);
+			const outcome = await orch.run(req, cb, this.abort.signal);
+			if (outcome.status === 'success') {
+				await this.displayGeneratedMedia(outcome.media);
+				session.messages.push({ role: 'assistant', content: `Generati ${outcome.media.length} file in galleria.` });
+				this.onImageGenerated?.();
+			} else if (outcome.status === 'needs-confirmation') {
+				const msg = outcome.cause ?? 'Serve confermare il tipo di contenuto da generare.';
+				this.post({ type: 'assistant', text: msg });
+				session.messages.push({ role: 'assistant', content: msg });
+			} else if (outcome.status === 'cancelled') {
+				this.post({ type: 'assistant', text: 'Generazione annullata.' });
+			} else {
+				const step = outcome.failedStep ? ` (fase: ${outcome.failedStep.kind})` : '';
+				const msg = `Non sono riuscito a generare${step}: ${outcome.cause ?? 'causa sconosciuta'}`;
+				this.post({ type: 'assistant', text: msg });
+				session.messages.push({ role: 'assistant', content: msg });
+			}
+		} catch (err) {
+			this.post({ type: 'error', text: `Generazione fallita: ${err instanceof Error ? err.message : String(err)}` });
+		} finally {
+			this.abort = undefined;
+			this.post({ type: 'busy', value: false });
+			await this.save();
+			await this.sendState();
+		}
+	}
+
+	/** Mostra in chat i media generati dall'Orchestratore (immagini e VIDEO), via file URI. */
+	private async displayGeneratedMedia(media: GeneratedItem[]): Promise<void> {
+		if (!media.length) {
+			this.post({ type: 'assistant', text: 'Esecuzione completata, ma nessun file è stato prodotto.' });
+			return;
+		}
+		const wv = this.view?.webview;
+		const items = media.map(m => ({
+			src: wv ? wv.asWebviewUri(vscode.Uri.file(m.uri)).toString() : '',
+			kind: m.kind,
+			name: m.uri.split(/[\\/]/).pop() ?? m.uri,
+			path: m.uri
+		}));
+		this.post({ type: 'media', items, caption: `🎬 ${media.length} file in galleria` });
+		this.mirror?.('assistant', `🎬 Generati ${media.length} file`);
+	}
+
 	/** Genera immagini dal prompt: auto-detect del backend, generazione, salvataggio e display.
 	 *  Se è allegata un'immagine, fa image-to-image (la usa come base). */
-	private async handleImageMessage(text: string, images?: string[]): Promise<void> {
+	private async handleImageMessage(text: string, images?: string[], seedOverride?: number): Promise<void> {
 		const session = this.active();
 		const initImage = images?.length ? (parseDataUrl(images[0])?.data) : undefined;
+		// Video richiesto mentre si è in modalità Img → instrada all'Orchestratore (T2V/I2V).
+		if (this.detectGenIntent(text) === 'video') {
+			await this.runMediaGeneration(text, initImage);
+			return;
+		}
 		// Se il testo è un documento di prompt ("### Titolo" + descrizione, tipico dei file
 		// di card art) e NON c'è un'immagine base, offri il batch: altrimenti l'intero
 		// documento finirebbe come un unico prompt enorme → immagine confusa.
@@ -1204,7 +1370,7 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 			const denoise = cfg.get<number>('image.denoise', 0.6);
 			const checkpoint = cfg.get<string>('image.checkpoint', '').trim() || undefined;
 			// Parametri avanzati (Image Studio → Avanzate): 0/auto/-1 = automatico per modello.
-			const adv = { steps: cfg.get<number>('image.steps', 0), cfg: cfg.get<number>('image.cfg', 0), sampler: cfg.get<string>('image.sampler', 'auto'), seed: cfg.get<number>('image.seed', -1), lora: cfg.get<string>('image.lora', '').trim() || undefined, loraStrength: cfg.get<number>('image.loraStrength', 0.8), transparent: cfg.get<boolean>('image.transparentBackground', false) };
+			const adv = { steps: cfg.get<number>('image.steps', 0), cfg: cfg.get<number>('image.cfg', 0), sampler: cfg.get<string>('image.sampler', 'auto'), seed: seedOverride !== undefined ? seedOverride : cfg.get<number>('image.seed', -1), lora: cfg.get<string>('image.lora', '').trim() || undefined, loraStrength: cfg.get<number>('image.loraStrength', 0.8), transparent: cfg.get<boolean>('image.transparentBackground', false) };
 			let result;
 			if (initImage) {
 				// Image-to-image: usa l'immagine allegata come base.
@@ -1247,7 +1413,8 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 				}
 			}
 			const caption = `🎨 ${result.backendLabel}${saved.length ? ` · salvato in ${saved.join(', ')}` : ''}`;
-			this.post({ type: 'image', images: dataUrls, caption, prompt });
+			const usedSeed = (result as { seed?: number }).seed;
+			this.post({ type: 'image', images: dataUrls, caption, prompt, seed: usedSeed });
 			this.mirror?.('assistant', `🎨 Immagine generata (${result.backendLabel})`);
 			// In cronologia salviamo una nota leggera col percorso (niente base64 nel globalState).
 			session.messages.push({ role: 'assistant', content: `${caption}\n\nPrompt: ${prompt}` });
@@ -1387,10 +1554,18 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 	/** Euristica: il messaggio descrive una funzionalità adatta a una Spec? */
 	private shouldOfferSpec(text: string): boolean {
 		const t = text.toLowerCase();
-		const long = text.length > 160;
-		const kw = /(spec|funzional|implement|vorrei|servirebb|men[uù]|sistema|opzion|feature|gestione|workflow|crea(re)?\s+(un|una)\b)/.test(t);
-		const multiSentence = (text.match(/[.!?]/g) || []).length >= 2 || text.split('\n').length >= 2;
-		return long || (kw && multiSentence);
+		// Richiesta ESPLICITA di una spec: offri sempre.
+		if (/\b(spec|specifica|requisit)\w*\b/.test(t) && /\b(crea|fai|nuov|genera|scriv|vorrei|fammi)\w*/.test(t)) {
+			return true;
+		}
+		// Intento di COSTRUIRE una funzionalità sostanziale: serve un verbo di creazione
+		// abbinato a un sostantivo "da feature", così "creami una funzione" NON scatta ma
+		// "crea un sistema di autenticazione con ruoli" sì.
+		const buildVerb = /\b(crea(re|mi)?|implementa(re)?|sviluppa(re)?|realizza(re)?|costruis\w+|aggiungi\b)/.test(t);
+		const featureNoun = /\b(sistema|funzionalit\w+|feature|modulo|applicazione|app\b|piattaforma|gestione|workflow|dashboard|pannello|schermata|pagina|servizio|integrazione|autenticazione|login|registrazione|api\b|backend|frontend|crud)\b/.test(t);
+		// Sostanza minima: il messaggio deve essere articolato, non una battuta di una riga.
+		const substantial = text.length > 220 || (text.match(/[.!?]/g) || []).length >= 3 || text.split('\n').length >= 4;
+		return buildVerb && featureNoun && substantial;
 	}
 
 	/** Estrae spec definite con blocchi espliciti "=== SPEC_START: Titolo === ... === SPEC_END ===". */
@@ -1468,6 +1643,10 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 			this.post({ type: 'specModeChoose' });
 		} else if (choice === 'no' && text) {
 			session.specOfferDismissed = true;
+			// Dismiss PERSISTENTE: non riproporre l'offerta nelle prossime chat finché l'utente
+			// non avvia esplicitamente la modalità Spec.
+			this.specOfferDismissedGlobal = true;
+			await this.memento.update('mgcoding.specOfferDismissed', true);
 			await this.handleSend(text);
 		}
 		// cancel → nulla
@@ -1626,15 +1805,18 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 		}
 		if (mode === 'bugfix') {
 			spec.kind = 'bugfix';
+			await this.clarifyBeforeRequirements(spec);
 			await this.runSpecPhase('requirements');
 			return;
 		}
 		spec.kind = 'feature';
 		if (mode === 'step') {
+			await this.clarifyBeforeRequirements(spec);
 			await this.runSpecPhase('requirements');
 			return;
 		}
 		if (mode === 'fast') {
+			await this.clarifyBeforeRequirements(spec);
 			for (const phase of ['requirements', 'design', 'tasks'] as const) {
 				spec.phase = phase;
 				await this.runSpecPhase(phase, undefined, false);
@@ -1650,6 +1832,9 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 		}
 		if (mode.startsWith('single:')) {
 			const file = mode.slice('single:'.length) as Exclude<SpecPhase, 'done'>;
+			if (file === 'requirements') {
+				await this.clarifyBeforeRequirements(spec);
+			}
 			await this.runSpecPhase(file, undefined, false);
 			spec.phase = 'done';
 			await this.save();
@@ -1675,6 +1860,40 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 		this.post({ type: 'assistant', text: `➡️ Passo alla prossima spec «${next.title}»…` });
 		await this.startSpecMode(mode);
 		return true;
+	}
+
+	/**
+	 * Fase di CHIARIMENTO (opt-out via `mgcoding.spec.clarify`): prima di generare i requisiti
+	 * pone 2-4 domande mirate per centrare scope/vincoli/edge case. L'utente può rispondere
+	 * (anche solo ad alcune) o saltare. Le risposte vengono integrate nell'idea della spec.
+	 */
+	private async clarifyBeforeRequirements(spec: SpecState): Promise<void> {
+		if (!vscode.workspace.getConfiguration('mgcoding').get<boolean>('spec.clarify', true) || !this.view) {
+			return;
+		}
+		let questions: string[] = [];
+		try {
+			const sys = 'Sei un analista software. Per la funzionalità descritta, genera 2-4 DOMANDE brevi e mirate per chiarire scope, vincoli, utenti e casi limite PRIMA di scrivere i requisiti. Solo domande utili (niente ovvietà). Rispondi SOLO con JSON {"questions":["...","..."]}.';
+			const raw = await complete(this.registry, [{ role: 'user', content: `Funzionalità: ${spec.name}\nDescrizione: ${spec.idea}` }], sys, undefined, undefined, true);
+			const m = raw.match(/\{[\s\S]*\}/);
+			if (m) {
+				const obj = JSON.parse(m[0]) as { questions?: unknown };
+				if (Array.isArray(obj.questions)) {
+					questions = obj.questions.map(q => String(q)).filter(q => q.trim()).slice(0, 4);
+				}
+			}
+		} catch {
+			// best-effort: senza domande si prosegue direttamente coi requisiti
+		}
+		if (!questions.length) {
+			return;
+		}
+		this.post({ type: 'assistant', text: `Prima di scrivere i requisiti, qualche domanda per centrare «${spec.name}»:\n\n${questions.map((q, i) => `${i + 1}. ${q}`).join('\n')}\n\nRispondi qui (anche solo ad alcune) oppure premi «Salta».` });
+		const ans = (await this.askUser('Rispondi per affinare i requisiti, oppure salta:', ['Salta'], false)).trim();
+		if (ans && !/^salta$/i.test(ans)) {
+			spec.idea = `${spec.idea}\n\nChiarimenti dell'utente (Q&A):\nDomande:\n${questions.map(q => `- ${q}`).join('\n')}\nRisposte dell'utente: ${ans}`;
+			await this.save();
+		}
 	}
 
 	private async runSpecPhase(phase: Exclude<SpecPhase, 'done'>, feedback?: string, showActions = true): Promise<void> {
@@ -1821,9 +2040,9 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 		this.disposables.forEach(d => d.dispose());
 	}
 
-	private getHtml(): string {
+	private getHtml(cspSource = ''): string {
 		const nonce = String(Math.random()).slice(2);
-		const csp = `default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'nonce-${nonce}';`;
+		const csp = `default-src 'none'; style-src 'unsafe-inline'; img-src ${cspSource} data:; media-src ${cspSource} blob: data:; script-src 'nonce-${nonce}';`;
 		return `<!DOCTYPE html>
 <html lang="it">
 <head>
@@ -1982,6 +2201,13 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 	.msg img.thumb { max-height: 140px; border-radius: 6px; margin: 4px 4px 0 0; }
 	.msg img.genimg { max-width: 100%; max-height: 60vh; object-fit: contain; border-radius: 8px; margin: 4px 0; cursor: zoom-in; display: block; }
 	.genimg-cap { font-size: 11px; opacity: 0.75; margin-top: 2px; }
+	.genimg-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+	.genimg-actions button { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; border-radius: 7px; padding: 5px 9px; cursor: pointer; font-size: 12px; }
+	.genimg-actions button:hover { filter: brightness(1.15); }
+	.genmedia { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+	.genmedia-item { border: 1px solid var(--vscode-panel-border); border-radius: 8px; overflow: hidden; background: #000; }
+	.genmedia-item img, .genmedia-item video { width: 100%; display: block; cursor: zoom-in; }
+	.genmedia-name { font-size: 10.5px; opacity: 0.7; padding: 3px 5px; word-break: break-all; }
 </style>
 </head>
 <body>
@@ -2430,7 +2656,7 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 	function addThumbsTo(el, imgs) {
 		for (var i = 0; i < imgs.length; i++) { var im = document.createElement('img'); im.className = 'thumb'; im.src = imgs[i]; im.addEventListener('load', function () { log.scrollTop = log.scrollHeight; }); el.appendChild(im); }
 	}
-	function addGenImages(images, caption, prompt) {
+	function addGenImages(images, caption, prompt, seed) {
 		ensureCleared();
 		var el = document.createElement('div'); el.className = 'msg assistant';
 		for (var i = 0; i < images.length; i++) {
@@ -2439,6 +2665,43 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 			(function (src) { im.addEventListener('click', function () { vscode.postMessage({ type: 'openImage', dataUrl: src }); }); })(images[i]);
 			el.appendChild(im);
 		}
+		if (caption) { var cap = document.createElement('div'); cap.className = 'genimg-cap'; cap.textContent = caption; el.appendChild(cap); }
+		// Pulsanti di iterazione: variazione (nuovo seed), ritocca (prompt nel composer), blocca seed.
+		if (prompt) {
+			var bar = document.createElement('div'); bar.className = 'genimg-actions';
+			var bVar = document.createElement('button'); bVar.textContent = '\\uD83D\\uDD01 Variazione';
+			bVar.title = 'Rigenera lo stesso prompt con un seed diverso';
+			bVar.addEventListener('click', function () { vscode.postMessage({ type: 'genVariation', prompt: prompt }); });
+			bar.appendChild(bVar);
+			var bEdit = document.createElement('button'); bEdit.textContent = '\\u270F\\uFE0F Ritocca prompt';
+			bEdit.title = 'Carica il prompt nel campo di testo per modificarlo';
+			bEdit.addEventListener('click', function () { input.value = prompt; autoGrow(); input.focus(); });
+			bar.appendChild(bEdit);
+			if (typeof seed === 'number' && seed >= 0) {
+				var bSeed = document.createElement('button'); bSeed.textContent = '\\uD83C\\uDFB2 Blocca seed (' + seed + ')';
+				bSeed.title = 'Riusa questo seed nelle prossime generazioni (riproducibilità)';
+				(function (s) { bSeed.addEventListener('click', function () { vscode.postMessage({ type: 'lockSeed', seed: s }); }); })(seed);
+				bar.appendChild(bSeed);
+			}
+			el.appendChild(bar);
+		}
+		log.appendChild(el); log.scrollTop = log.scrollHeight;
+	}
+	function addGenMedia(items, caption) {
+		ensureCleared();
+		var el = document.createElement('div'); el.className = 'msg assistant';
+		var grid = document.createElement('div'); grid.className = 'genmedia';
+		(items || []).forEach(function (it) {
+			var box = document.createElement('div'); box.className = 'genmedia-item';
+			var node = it.kind === 'video' ? document.createElement('video') : document.createElement('img');
+			node.src = it.src;
+			if (it.kind === 'video') { node.controls = true; node.loop = true; }
+			box.appendChild(node);
+			var nm = document.createElement('div'); nm.className = 'genmedia-name'; nm.textContent = it.name || '';
+			box.appendChild(nm);
+			grid.appendChild(box);
+		});
+		el.appendChild(grid);
 		if (caption) { var cap = document.createElement('div'); cap.className = 'genimg-cap'; cap.textContent = caption; el.appendChild(cap); }
 		log.appendChild(el); log.scrollTop = log.scrollHeight;
 	}
@@ -2671,7 +2934,8 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 		else if (m.type === 'streamEnd') { if (current && current.elapsed && mgTurnStart) { current.elapsed.textContent = fmtElapsed(Date.now() - mgTurnStart); } var _et = current ? current.raw : ''; current = null; if (mgHandsFree && _et) { speakThenListen(_et); } }
 		else if (m.type === 'streamCancel') { if (current) { current.el.remove(); current = null; } }
 		else if (m.type === 'assistant') { addStatic('assistant', m.text); if (mgHandsFree && m.text) { speakThenListen(m.text); } }
-		else if (m.type === 'image') { addGenImages(m.images, m.caption, m.prompt); }
+		else if (m.type === 'image') { addGenImages(m.images, m.caption, m.prompt, m.seed); }
+		else if (m.type === 'media') { addGenMedia(m.items, m.caption); }
 		else if (m.type === 'tool') { lastToolResult = addTool(m.name, m.args); workSub('· ' + m.name); }
 		else if (m.type === 'toolResult') { if (lastToolResult) { lastToolResult.textContent = m.text; log.scrollTop = log.scrollHeight; } }
 		else if (m.type === 'error') { addStatic('error', '⚠ ' + m.text); }

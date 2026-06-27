@@ -6,6 +6,16 @@
 
 import * as vscode from 'vscode';
 import { listCheckpoints, listLoras, listWorkflows, generatedDirUri } from './comfyHelper';
+import { partitionFiles, classifyFile, extensionOf } from './outputClassifier';
+import { MediaKind } from './genTypes';
+
+/** Elemento della galleria inviato al webview: immagine o video. */
+interface GalleryItem {
+	src: string;
+	path: string;
+	kind: MediaKind;
+	format: string;
+}
 
 export class ImageStudioProvider implements vscode.WebviewViewProvider {
 	static readonly viewType = 'mgcoding.imageStudio';
@@ -47,12 +57,30 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 						await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(String(msg.path)));
 					}
 					break;
-				case 'deleteImage':
+				case 'openInOS':
+					// Apre l'elemento (immagine o video) nell'applicazione predefinita del sistema
+					// operativo (Req 7.4). Per i video evita l'editor di VS Code che non li riproduce.
 					if (msg.path) {
-						try {
-							await vscode.workspace.fs.delete(vscode.Uri.file(String(msg.path)));
-						} catch { /* già rimossa */ }
-						await this.sendState();
+						await vscode.env.openExternal(vscode.Uri.file(String(msg.path)));
+					}
+					break;
+				case 'deleteImage':
+				case 'deleteItem':
+					if (msg.path) {
+						const target = vscode.Uri.file(String(msg.path));
+						const name = target.path.split('/').pop() ?? String(msg.path);
+						// Conferma esplicita prima di eliminare un file (Req 7.3, 22.4).
+						const choice = await vscode.window.showWarningMessage(
+							`Eliminare definitivamente "${name}"?`,
+							{ modal: true },
+							'Elimina'
+						);
+						if (choice === 'Elimina') {
+							try {
+								await vscode.workspace.fs.delete(target);
+							} catch { /* già rimossa */ }
+							await this.sendState();
+						}
 					}
 					break;
 				case 'openFolder':
@@ -63,22 +91,30 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 		void this.sendState();
 	}
 
-	private async galleryUris(): Promise<{ src: string; path: string }[]> {
+	private async galleryUris(): Promise<GalleryItem[]> {
 		if (!this.view) {
 			return [];
 		}
 		const dir = generatedDirUri();
 		try {
 			const entries = await vscode.workspace.fs.readDirectory(dir);
-			const imgs = entries
-				.filter(([n, t]) => t === vscode.FileType.File && /\.(png|jpe?g|webp)$/i.test(n))
-				.map(([n]) => n)
-				.sort()
-				.reverse()
-				.slice(0, 60);
-			return imgs.map(n => {
+			const files = entries
+				.filter(([, t]) => t === vscode.FileType.File)
+				.map(([n]) => n);
+			// Partiziona i file in immagini e video usando la logica PURA di outputClassifier
+			// (Req 7.1): elenca entrambi i tipi presenti nella cartella di output.
+			const { images, videos } = partitionFiles(files);
+			// Ordina dal più recente (per nome) e limita per non sovraccaricare il webview.
+			const ordered = [...images, ...videos].sort().reverse().slice(0, 60);
+			return ordered.map(n => {
 				const uri = vscode.Uri.joinPath(dir, n);
-				return { src: this.view!.webview.asWebviewUri(uri).toString(), path: uri.fsPath };
+				const kind = classifyFile(n) ?? 'image';
+				return {
+					src: this.view!.webview.asWebviewUri(uri).toString(),
+					path: uri.fsPath,
+					kind,
+					format: extensionOf(n)
+				};
 			});
 		} catch {
 			return [];
@@ -130,7 +166,7 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 	private html(): string {
 		const nonce = String(Date.now());
 		return `<!DOCTYPE html><html lang="it"><head><meta charset="utf-8" />
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${this.view?.webview.cspSource ?? ''} data:; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${this.view?.webview.cspSource ?? ''} data:; media-src ${this.view?.webview.cspSource ?? ''} blob:; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';" />
 <style>
 	:root { --acc: var(--vscode-charts-green, #3fb950); --bd: var(--vscode-panel-border, #2a2a2a); --bg2: var(--vscode-editorWidget-background); }
 	* { box-sizing: border-box; }
@@ -158,15 +194,17 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 	.gal-tools button { padding: 3px 7px; font-size: 10.5px; }
 	.gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap: 7px; margin-top: 8px; }
 	.thumb { position: relative; aspect-ratio: 1; border-radius: 8px; overflow: hidden; border: 1px solid var(--bd); }
-	.thumb img { width: 100%; height: 100%; object-fit: cover; cursor: zoom-in; display: block; }
+	.thumb img, .thumb video { width: 100%; height: 100%; object-fit: cover; cursor: zoom-in; display: block; background: #000; }
 	.thumb .del { position: absolute; top: 3px; right: 3px; width: 20px; height: 20px; padding: 0; border-radius: 50%; background: rgba(0,0,0,.6); color: #fff; opacity: 0; text-align: center; line-height: 18px; font-size: 12px; }
-	.thumb:hover .del { opacity: 1; }
+	.thumb .open { position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; padding: 0; border-radius: 50%; background: rgba(0,0,0,.6); color: #fff; opacity: 0; text-align: center; line-height: 18px; font-size: 11px; }
+	.thumb:hover .del, .thumb:hover .open { opacity: 1; }
+	.thumb .badge { position: absolute; bottom: 3px; left: 3px; padding: 0 5px; border-radius: 6px; background: rgba(0,0,0,.66); color: #fff; font-size: 9px; letter-spacing: .4px; text-transform: uppercase; pointer-events: none; }
 	.muted { opacity: .55; }
 	.val { flex: 0 0 36px; text-align: right; font-variant-numeric: tabular-nums; opacity: .85; }
 	.path { font-size: 10px; opacity: .5; margin-top: 6px; word-break: break-all; }
 	.lb { position: fixed; inset: 0; background: rgba(0,0,0,.85); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 50; padding: 10px; }
 	.lb-bar { position: absolute; top: 8px; right: 8px; display: flex; gap: 6px; }
-	.lb img { max-width: 96%; max-height: 88%; object-fit: contain; border-radius: 8px; background: repeating-conic-gradient(#666 0% 25%, #888 0% 50%) 0 0 / 18px 18px; }
+	.lb img, .lb video { max-width: 96%; max-height: 88%; object-fit: contain; border-radius: 8px; background: repeating-conic-gradient(#666 0% 25%, #888 0% 50%) 0 0 / 18px 18px; }
 </style></head><body>
 	<div class="card">
 		<div class="status"><span id="dot" class="dot"></span><span id="statusText">…</span></div>
@@ -225,10 +263,14 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 		<h3><span class="ic">⚡</span> Azioni rapide</h3>
 		<div class="actions">
 			<button data-cmd="mgcoding.pickComfyFolder">📁 Cartella ComfyUI</button>
+			<button data-cmd="mgcoding.restartComfyUI" class="primary">🔄 Riavvia ComfyUI</button>
+			<button data-cmd="mgcoding.startComfyUI">▶ Avvia ComfyUI</button>
+			<button data-cmd="mgcoding.stopComfyUI">⏹ Arresta ComfyUI</button>
 			<button data-cmd="mgcoding.downloadImageModel" class="primary">⬇ Scarica modello</button>
 			<button data-cmd="mgcoding.selectCheckpoint">🎯 Checkpoint</button>
 			<button data-cmd="mgcoding.selectWorkflow">🎛 Workflow</button>
 			<button data-cmd="mgcoding.importWorkflow">⬆ Importa workflow</button>
+			<button data-cmd="mgcoding.installNodesFromFile" class="primary">🧩 Installa nodi da workflow</button>
 			<button data-cmd="mgcoding.fixWorkflow" class="primary">🩹 Risolvi workflow</button>
 			<button data-cmd="mgcoding.generateBatch" class="primary">📦 Batch da file</button>
 			<button data-cmd="mgcoding.openComfyCanvas" class="primary">🧩 Canvas ComfyUI</button>
@@ -253,8 +295,9 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 	</div>
 
 	<div id="lightbox" class="lb" style="display:none">
-		<div class="lb-bar"><button id="lbOpen">↗ Apri nell'editor</button><button id="lbClose">✕ Chiudi</button></div>
-		<img id="lbImg" src="" />
+		<div class="lb-bar"><button id="lbOpenOS">↗ Apri nel sistema</button><button id="lbOpen">✎ Apri nell'editor</button><button id="lbClose">✕ Chiudi</button></div>
+		<img id="lbImg" src="" style="display:none" />
+		<video id="lbVid" src="" controls style="display:none"></video>
 	</div>
 
 <script nonce="${nonce}">
@@ -271,10 +314,23 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 	$('enhance').addEventListener('change', function(){ send({type:'setConfig', key:'image.enhancePrompt', value:this.checked}); });
 	$('transparent').addEventListener('change', function(){ send({type:'setConfig', key:'image.transparentBackground', value:this.checked}); });
 	var lbPath = '';
-	function showLightbox(src, path){ lbPath = path; $('lbImg').src = src; $('lightbox').style.display = 'flex'; }
-	$('lbClose').addEventListener('click', function(){ $('lightbox').style.display = 'none'; });
-	$('lightbox').addEventListener('click', function(e){ if (e.target === $('lightbox')) { $('lightbox').style.display = 'none'; } });
+	function showLightbox(src, path, kind){
+		lbPath = path;
+		var img = $('lbImg'), vid = $('lbVid');
+		if (kind === 'video') {
+			img.style.display = 'none'; img.src = '';
+			vid.src = src; vid.style.display = 'block';
+		} else {
+			vid.pause(); vid.src = ''; vid.style.display = 'none';
+			img.src = src; img.style.display = 'block';
+		}
+		$('lightbox').style.display = 'flex';
+	}
+	function closeLightbox(){ var v = $('lbVid'); v.pause(); $('lightbox').style.display = 'none'; }
+	$('lbClose').addEventListener('click', closeLightbox);
+	$('lightbox').addEventListener('click', function(e){ if (e.target === $('lightbox')) { closeLightbox(); } });
 	$('lbOpen').addEventListener('click', function(){ if (lbPath) { send({type:'openImage', path: lbPath}); } });
+	$('lbOpenOS').addEventListener('click', function(){ if (lbPath) { send({type:'openInOS', path: lbPath}); } });
 	$('enhanceModel').addEventListener('change', function(){ send({type:'setConfig', key:'image.enhanceModel', value:this.value}); });
 	$('denoise').addEventListener('input', function(){ $('denoiseVal').textContent = (+this.value).toFixed(2); });
 	$('denoise').addEventListener('change', function(){ send({type:'setConfig', key:'image.denoise', value:+this.value}); });
@@ -316,10 +372,20 @@ export class ImageStudioProvider implements vscode.WebviewViewProvider {
 		var g = $('gallery'); g.innerHTML='';
 		for (var k=0;k<m.gallery.length;k++){ (function(it){
 			var d=document.createElement('div'); d.className='thumb';
-			var im=document.createElement('img'); im.src=it.src; im.title='Anteprima'; im.addEventListener('click', function(){ showLightbox(it.src, it.path); });
+			var media;
+			if (it.kind === 'video') {
+				media=document.createElement('video'); media.src=it.src; media.muted=true; media.preload='metadata'; media.title='Anteprima video';
+				media.addEventListener('click', function(){ showLightbox(it.src, it.path, 'video'); });
+				var badge=document.createElement('span'); badge.className='badge'; badge.textContent=it.format||'video'; d.appendChild(badge);
+			} else {
+				media=document.createElement('img'); media.src=it.src; media.title='Anteprima';
+				media.addEventListener('click', function(){ showLightbox(it.src, it.path, 'image'); });
+			}
+			var open=document.createElement('button'); open.className='open'; open.textContent='\\u2197'; open.title='Apri nel sistema';
+			open.addEventListener('click', function(ev){ ev.stopPropagation(); send({type:'openInOS', path:it.path}); });
 			var del=document.createElement('button'); del.className='del'; del.textContent='\\u2715'; del.title='Elimina';
-			del.addEventListener('click', function(ev){ ev.stopPropagation(); send({type:'deleteImage', path:it.path}); });
-			d.appendChild(im); d.appendChild(del); g.appendChild(d);
+			del.addEventListener('click', function(ev){ ev.stopPropagation(); send({type:'deleteItem', path:it.path}); });
+			d.appendChild(media); d.appendChild(open); d.appendChild(del); g.appendChild(d);
 		})(m.gallery[k]); }
 		$('galCount').textContent = m.gallery.length ? ('('+m.gallery.length+')') : '';
 		$('galEmpty').style.display = m.gallery.length ? 'none' : 'block';

@@ -57,7 +57,45 @@ La chat è nella barra laterale. In basso trovi i controlli:
 Tre modalità (pulsanti *Vibe* / *Spec* / *🎨 Img* in alto):
 
 - **Vibe**: chat libera/agentica. Chiedi una modifica e l'agente la realizza con i suoi tool.
+Quattro modalità (pulsanti *Vibe* / *Spec* / *🎨 Img* / *Libera* in alto):
+
+- **Vibe**: chat libera/agentica. Chiedi una modifica e l'agente la realizza con i suoi tool.
 - **Spec**: flusso guidato *requirements → design → tasks* (vedi sezione 4).
+- **Libera**: conversazione pura (nessun tool, nessun contesto del progetto), per fare domande
+  o ragionare. Conosce un minimo del tuo profilo (es. come ti chiami, lingua) ma non tocca il codice.
+
+**Generazione trasversale (immagini e video).** Non sei più costretto alla modalità Img per
+generare: in **Vibe**, **Libera** e **Img** se chiedi esplicitamente di **generare un'immagine
+o un video** (es. *"genera un video di onde dal mio workflow"*, *"anima questa immagine"*,
+*"disegna un ritratto"*) MGCoding riconosce l'intento e instrada alla generazione giusta — i
+**video** (T2V/I2V) passano dall'**orchestratore** ComfyUI (sceglie il workflow, controlla le
+dipendenze, esegue) e compaiono in chat con anteprima. In Vibe il rilevamento è prudente (serve
+un verbo d'arte chiaro come *genera/disegna* + un sostantivo come *immagine/video*), così non
+scatta per sbaglio su richieste di codice (es. *"crea un'immagine docker"* resta codice).
+
+**Iterazione sulle immagini.** Sotto ogni immagine generata trovi i pulsanti **🔁 Variazione**
+(rigenera lo stesso prompt con un nuovo seed), **✏️ Ritocca prompt** (ricarica il prompt nel
+campo di testo per modificarlo) e, se il backend espone il seed, **🎲 Blocca seed** (riusa quel
+seed nelle prossime generazioni per risultati riproducibili; rimettilo a `-1` per tornare casuale).
+
+**💬 ComfyChat** (pannello dedicato nella barra laterale destra): una chat collegata a ComfyUI
+che fa due cose. (1) **Genera** immagini e video instradando all'orchestratore. (2) **Diagnostica**:
+legge lo *stato reale* di ComfyUI (raggiungibilità, nodi/modelli mancanti del workflow attivo,
+ultimo errore da `/history`) e, per i problemi **riconosciuti**, dà subito una diagnosi precisa con
+**pulsanti d'azione** (installa nodi/modelli/dipendenze Python, **ripara Triton/SageAttention**,
+riavvia ComfyUI, importa workflow). Vedi la sezione *Risoluzione problemi ComfyUI* più sotto.
+
+**🧩 Inspector della configurazione.** La ComfyChat sa "vedere davvero" come è impostato il
+workflow: legge dall'API di ComfyUI (`/history`) il **grafo dell'ultimo run eseguito** ed estrae i
+parametri reali dei nodi — modello, VAE, CLIP/text-encoder, LoRA (nomi e forza), sampler (steps,
+cfg, sampler/scheduler, e per i due stadi WAN `start→end step`, `add_noise`, `leftover`), shift,
+upscale, dimensioni/frame. Chiedi *"mostrami la configurazione"* (o *"che parametri ho?"*) per
+vederla. Su questa config reale gira anche euristiche utili (es. *pochi step senza LoRA distillata*,
+*VAE non coerente col modello WAN*, *stadi del sampler non contigui*), così quando l'output esce male
+ti indica il parametro probabilmente sbagliato invece di una checklist generica. Nota: vede l'ultimo
+run **eseguito**, non le modifiche fatte sul canvas e non ancora lanciate — dopo una modifica fai un
+*Run* e poi richiedi.
+
 - **🎨 Img** (Text-to-Image): descrivi un'immagine e MGCoding la genera. **Si configura da
   solo**: cerca prima un generatore locale in ascolto (Stable Diffusion A1111/SD.Next/Forge su
   `:7860`, ComfyUI su `:8188`), altrimenti usa una tua API key già impostata (Google Gemini →
@@ -75,7 +113,9 @@ Tre modalità (pulsanti *Vibe* / *Spec* / *🎨 Img* in alto):
 
   Impostazioni: `image.backend` (auto/locale/cloud), `image.localEndpoint`,
   `image.comfyEndpoint`, `image.enhancePrompt`, `image.enhanceModel`, `image.denoise`.
-  (La generazione video arriverà in seguito.)
+  **Video**: la generazione di video (Text-to-Video e Image-to-Video) è ora supportata tramite
+  l'orchestratore ComfyUI — chiedi *"genera/anima un video…"* da Img, Vibe, Libera o dalla ComfyChat;
+  serve un workflow video compatibile (es. WAN) con i relativi modelli/nodi installati.
 
   **🖼️ Image Studio** (pannello nella barra MGCoding a sinistra): un cruscotto visuale con stato
   di ComfyUI (connesso/checkpoint), scelta di backend/checkpoint/workflow dai menu, parametri con
@@ -109,6 +149,32 @@ Tre modalità (pulsanti *Vibe* / *Spec* / *🎨 Img* in alto):
     "Installa nodi mancanti" e "Scarica modelli mancanti del workflow".
     Nota: MGCoding analizza il workflow ATTIVO in `.mg/workflows/` (formato API), non quello
     aperto nella scheda di ComfyUI.
+
+  **Risoluzione problemi ComfyUI (ComfyChat).** Chiedi alla **ComfyChat** *"perché non funziona?"*
+  o *"che errore ho?"*: legge l'ultimo errore reale e, per i casi noti, risponde con la causa
+  precisa e i pulsanti giusti. Casi riconosciuti:
+  - **SageAttention/Triton non compila** (errore con `tcc.exe`/`cuda_utils.c`/*"Failed to find
+    Python libs"*): SageAttention usa Triton, che compila un modulo CUDA a runtime; fallisce perché
+    il **Python embedded** di ComfyUI non ha le dev libs (`pythonXY.lib` + header `Include/`).
+    Due strade: (1) **disabilita Sage Attention** nel workflow (nodo KJNodes *"Patch Sage Attention"*
+    su `disabled`, oppure bypass/mute del nodo con `Ctrl+B`/`Ctrl+M`) — gira con l'attention di
+    PyTorch, un po' più lento ma subito funzionante; (2) **`MGCoding: Ripara Triton/SageAttention
+    (ComfyUI)`** (pulsante 🛠 nella ComfyChat): aggiunge le dev libs al python embedded copiandole
+    da un'installazione completa di Python della stessa versione (se presente) e reinstalla
+    `triton-windows`. Poi riavvia ComfyUI.
+  - **VRAM insufficiente** (out of memory): riduci risoluzione/frame/batch, usa quantizzazioni più
+    leggere (GGUF), avvia con `--lowvram`.
+  - **Dipendenza Python mancante** (`No module named …`): pulsante per installarla nel python embedded.
+  - **Nodi/modelli custom mancanti**: pulsanti per installarli dal workflow.
+  - **File del modello corrotto/incompleto** (`Expecting value: line 1 column 1`, errori
+    safetensors/torch): MGCoding **scansiona la cartella modelli e segnala i file troppo piccoli**
+    (col nome e i KB) — un modello reale pesa decine/centinaia di MB, quindi un file da pochi KB è
+    quasi sempre una pagina HTML o un puntatore Git LFS scaricato per errore. Eliminalo e riscaricalo
+    dal link *download* diretto.
+  - **Output rumoroso / di bassa qualità** (nessun errore, ma il risultato è "fritto"/granuloso):
+    chiedi *"è venuto tutto rumore"*. La chat usa l'**inspector** (config reale dei nodi) per indicarti
+    il sospetto concreto — tipicamente *pochi step senza LoRA distillata*, *VAE sbagliata per il
+    modello*, o *stadi del sampler WAN non contigui*.
 
 Mentre l'agente lavora vedi l'indicatore **"MGCoding sta lavorando · *strumento*"** e, per le
 risposte, il pannello **Ragionamento** (think) espandibile. I blocchi di codice hanno i
@@ -163,10 +229,21 @@ sia `.mg/` sia `.kiro/` (compatibilità).
 - **Spec** (`.mg/specs/<nome>/`): funzionalità descritte come `requirements.md` → `design.md`
   → `tasks.md`. Avvia una Spec dalla chat (modalità Spec) o crea con il pulsante **+** del
   pannello. I task hanno stato `[ ]` da fare, `[~]` in corso, `[x]` fatto.
+  - **Domande di chiarimento**: prima di scrivere i requisiti, MGCoding può porre 2-4 domande
+    mirate (scope, vincoli, casi limite) per requisiti più centrati. Rispondi nel campo di testo
+    (anche solo ad alcune) o premi *Salta*. Disattivabile con `spec.clarify`.
+  - **Offerta Spec meno invadente**: in Vibe l'offerta di passare a una Spec compare solo per
+    richieste chiaramente "da funzionalità"; se rispondi *No* non te lo richiede più (finché non
+    apri tu la modalità Spec).
   - **Esegui i task**: dalla chat o dalle CodeLens in cima a `tasks.md`:
     *Run all tasks*, *Run waves (subagent)* (parallelo), *Run all + optional*.
   - Se `mgcoding.tasks.parallel > 1` (default 2), l'esecuzione dalla chat usa i **subagent in
     parallelo** (wave).
+  - **Verifica post-task** (opt-in, `spec.verifyAfterTask`): dopo ogni task esegue un comando di
+    build/test e segna il task come fatto SOLO se passa (altrimenti resta da fare, ritentabile).
+    Il comando è `spec.verifyCommand` (vuoto = rilevamento automatico da `package.json`:
+    typecheck/compile/lint/build/test). Più affidabile ma più lento: su repo grandi usa un comando
+    veloce (es. `npm run typecheck`).
   - A fine lavoro viene generato un **report** (cosa è stato fatto + come avviarlo).
   - Clic destro su una Spec: *Reveal in Explorer*, *Rinomina*, *Elimina*.
 - **Steering** (`.mg/steering/`): regole/linee guida persistenti iniettate nel contesto. A
@@ -323,6 +400,8 @@ il `.dmg` (macOS). Controllo manuale: comando **`MGCoding: Controlla aggiornamen
 - `MGCoding: Inline edit` (`Ctrl+I`)
 - `MGCoding: Visualizza modifiche` · `Annulla modifiche`
 - `MGCoding: Controlla aggiornamenti`
+- (ComfyUI) `Avvia/Arresta/Riavvia ComfyUI`, `Installa nodi dal workflow scaricato`,
+  `Ripara Triton/SageAttention (ComfyUI)`, `Scarica modello immagini`, `Scegli checkpoint/workflow`
 - (Spec) `Nuova Spec`, `Esegui i task`, `Importa da Kiro`, `Aggiorna`
 
 ---
@@ -336,6 +415,8 @@ Tutte sotto `mgcoding.*` (apri *Impostazioni* e cerca "mgcoding"):
   `openai.endpoint`, `openai.model`, `claude.thinkingAuto`.
 - **Agente**: `autoApprove` (Autopilot), `diffApproval`, `autoVerify`, `tasks.parallel`,
   `mcp.maxTools`.
+- **Spec**: `spec.clarify` (domande di chiarimento prima dei requisiti), `spec.verifyAfterTask`
+  (verifica build/test dopo ogni task), `spec.verifyCommand` (comando di verifica; vuoto = auto).
 - **Contesto**: `context.autoCompact`, `context.compactAtTokens`, `context.keepMessages`.
 - **Indice (RAG)**: `index.embedModel`, `index.maxFileKB`, `index.autoUpdate`.
 - **Voce**: `stt.inputDevice`, `stt.language`, `stt.thresholdPct`, `stt.maxSeconds`,

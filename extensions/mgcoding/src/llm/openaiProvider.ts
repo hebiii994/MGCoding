@@ -3,7 +3,7 @@
  *  Endpoint /chat/completions con streaming SSE e tool-use nativo (function calling).
  *--------------------------------------------------------------------------------------------*/
 
-import { AgentStreamParams, AnthropicMessage, AnthropicStreamEvent, LLMError, LLMProvider, LLMRequest, ToolResultPart, toolResultText } from './types';
+import { AgentStreamParams, AnthropicMessage, AnthropicStreamEvent, classifyHttpError, LLMError, LLMProvider, LLMRequest, ToolResultPart, toolResultText } from './types';
 
 export interface OpenAIConfig {
 	endpoint: string;
@@ -33,8 +33,8 @@ function thoughtSignature(obj: unknown): string | undefined {
 }
 
 export class OpenAIProvider implements LLMProvider {
-	readonly id = 'openai';
-	readonly label = 'OpenAI-compatibile';
+	readonly id: string = 'openai';
+	readonly label: string = 'OpenAI-compatibile';
 
 	/**
 	 * Firme di ragionamento (thought_signature) di Gemini, indicizzate per id del tool_call.
@@ -44,8 +44,17 @@ export class OpenAIProvider implements LLMProvider {
 
 	constructor(
 		private readonly getApiKey: () => Promise<string | undefined>,
-		private readonly getConfig: () => OpenAIConfig
-	) { }
+		private readonly getConfig: () => OpenAIConfig,
+		/** Identità opzionale: consente a un provider contenitore (es. GLM) di attribuirsi gli errori. */
+		identity?: { id?: string; label?: string }
+	) {
+		if (identity?.id) {
+			this.id = identity.id;
+		}
+		if (identity?.label) {
+			this.label = identity.label;
+		}
+	}
 
 	private base(): string {
 		return this.getConfig().endpoint.replace(/\/$/, '');
@@ -114,14 +123,13 @@ export class OpenAIProvider implements LLMProvider {
 				signal
 			});
 		} catch (err) {
-			throw new LLMError(`Impossibile contattare l'endpoint OpenAI-compatibile (${this.base()}).`, err);
+			throw new LLMError(`Impossibile contattare l'endpoint OpenAI-compatibile (${this.base()}).`, err, { kind: 'unreachable', providerId: this.id });
 		}
 		if (!res.ok || !res.body) {
 			const text = await res.text().catch(() => '');
-			if (res.status === 401 || res.status === 403 || (res.status === 400 && /authorization|api key|api_key|unauthenticated/i.test(text))) {
-				throw new LLMError('Chiave API mancante o non valida per questo servizio. Reimpostala con "MGCoding: Configurazione guidata" (scegli il servizio e incolla la chiave).');
-			}
-			throw new LLMError(`Endpoint ha risposto ${res.status}: ${text}`);
+			// Distingue chiave mancante (Req. 9.2) da chiave non valida (Req. 9.3) e rate limit (Req. 9.4).
+			const hasKey = !!(await this.getApiKey());
+			throw classifyHttpError({ status: res.status, bodyText: text, hasKey, providerId: this.id, providerLabel: this.label });
 		}
 		const reader = res.body.getReader();
 		const decoder = new TextDecoder();

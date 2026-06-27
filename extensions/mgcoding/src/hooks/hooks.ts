@@ -8,7 +8,7 @@ import { complete } from '../agent/agent';
 import { runAgent } from '../agent/agentLoop';
 import { ProviderRegistry } from '../llm/registry';
 import { RunReporter } from '../run/runView';
-import { resolveFeatureDirs } from '../util/paths';
+import { resolveFeatureDirs } from '../util/featurePaths';
 import { kiroHookToInternal } from '../util/parsing';
 
 type HookEvent = 'onSave' | 'onCreate' | 'onDelete' | 'onPromptSubmit' | 'onAgentDone' | 'manual';
@@ -71,23 +71,23 @@ export async function loadHooks(): Promise<Hook[]> {
 			}
 			const uri = vscode.Uri.joinPath(dir, name);
 			try {
-			const raw = JSON.parse(DEC.decode(await vscode.workspace.fs.readFile(uri)));
-			// Formato Kiro (when/then) oppure nostro (event/action)
-			const hook = (isKiro || raw?.when || raw?.then) ? fromKiroHook(raw, uri) : (() => {
-				if (raw?.name && raw?.event && raw?.action) {
-					raw.uri = uri;
-					raw.enabled = raw.enabled !== false;
-					return raw as Hook;
+				const raw = JSON.parse(DEC.decode(await vscode.workspace.fs.readFile(uri)));
+				// Formato Kiro (when/then) oppure nostro (event/action)
+				const hook = (isKiro || raw?.when || raw?.then) ? fromKiroHook(raw, uri) : (() => {
+					if (raw?.name && raw?.event && raw?.action) {
+						raw.uri = uri;
+						raw.enabled = raw.enabled !== false;
+						return raw as Hook;
+					}
+					return undefined;
+				})();
+				if (hook && !seenNames.has(hook.name)) {
+					seenNames.add(hook.name);
+					hooks.push(hook);
 				}
-				return undefined;
-			})();
-			if (hook && !seenNames.has(hook.name)) {
-				seenNames.add(hook.name);
-				hooks.push(hook);
+			} catch {
+				// ignora file non validi
 			}
-		} catch {
-			// ignora file non validi
-		}
 		}
 	}
 	return hooks;

@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
-import { exists } from '../util/paths';
+import { exists } from '../util/featurePaths';
 import { kiroHookToInternal } from '../util/parsing';
 
 const ENC = new TextEncoder();

@@ -3,7 +3,7 @@
  *  Supporta sia lo streaming di solo testo sia il tool-use NATIVO (function calling).
  *--------------------------------------------------------------------------------------------*/
 
-import { AgentStreamParams, AnthropicStreamEvent, ChatMessage, LLMError, LLMProvider, LLMRequest } from './types';
+import { AgentStreamParams, AnthropicStreamEvent, ChatMessage, classifyHttpError, LLMError, LLMProvider, LLMRequest } from './types';
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_VERSION = '2023-06-01';
@@ -37,16 +37,30 @@ export interface ClaudeConfig {
 	thinkingBudget?: number;
 	/** Livello di "effort" per i modelli con adaptive thinking (low|medium|high|xhigh|max). */
 	effort?: string;
+	/**
+	 * Endpoint Messages API alternativo (es. endpoint Anthropic-compatibile di GLM).
+	 * Se assente si usa l'endpoint ufficiale Anthropic. Mantiene la retrocompatibilità.
+	 */
+	baseUrl?: string;
 }
 
 export class ClaudeProvider implements LLMProvider {
-	readonly id = 'claude';
-	readonly label = 'Claude (Anthropic)';
+	readonly id: string = 'claude';
+	readonly label: string = 'Claude (Anthropic)';
 
 	constructor(
 		private readonly getApiKey: () => Promise<string | undefined>,
-		private readonly getConfig: () => ClaudeConfig
-	) { }
+		private readonly getConfig: () => ClaudeConfig,
+		/** Identità opzionale: consente a un provider contenitore (es. GLM) di attribuirsi gli errori. */
+		identity?: { id?: string; label?: string }
+	) {
+		if (identity?.id) {
+			this.id = identity.id;
+		}
+		if (identity?.label) {
+			this.label = identity.label;
+		}
+	}
 
 	async isConfigured(): Promise<boolean> {
 		return !!(await this.getApiKey());
@@ -60,11 +74,13 @@ export class ClaudeProvider implements LLMProvider {
 	private async *postStream(body: object, signal?: AbortSignal): AsyncIterable<AnthropicStreamEvent> {
 		const apiKey = await this.getApiKey();
 		if (!apiKey) {
-			throw new LLMError('API key Claude non impostata. Usa "MGCoding: Imposta API key Claude".');
+			// Chiave assente (Req. 9.2): la richiesta è interrotta dal throw; la chiave verrà richiesta a monte.
+			throw new LLMError(`Chiave API mancante per ${this.label}. Imposta la chiave con "MGCoding: Configurazione guidata" e riprova.`, undefined, { kind: 'missing_key', providerId: this.id });
 		}
 		let res: Response;
 		try {
-			res = await fetch(ANTHROPIC_URL, {
+			// Usa l'endpoint configurato (es. Anthropic-compat di GLM) o quello ufficiale Anthropic.
+			res = await fetch(this.getConfig().baseUrl ?? ANTHROPIC_URL, {
 				method: 'POST',
 				headers: {
 					'content-type': 'application/json',
@@ -75,11 +91,12 @@ export class ClaudeProvider implements LLMProvider {
 				signal
 			});
 		} catch (err) {
-			throw new LLMError('Errore di rete verso Anthropic.', err);
+			throw new LLMError(`Impossibile contattare ${this.label}.`, err, { kind: 'unreachable', providerId: this.id });
 		}
 		if (!res.ok || !res.body) {
 			const text = await res.text().catch(() => '');
-			throw new LLMError(`Anthropic ha risposto ${res.status}: ${text}`);
+			// Chiave non valida (Req. 9.3) o rate limit (Req. 9.4): qui la chiave è presente.
+			throw classifyHttpError({ status: res.status, bodyText: text, hasKey: true, providerId: this.id, providerLabel: this.label });
 		}
 
 		const reader = res.body.getReader();

@@ -3,7 +3,7 @@
 	"publisher": "mgcoding",
 	"displayName": "MGCoding",
 	"description": "Agente di sviluppo spec-driven (Specs, Steering, Hooks, MCP) con LLM locale o Claude.",
-	"version": "0.9.25",
+	"version": "0.10.0",
 	"license": "MIT",
 	"engines": {
 		"vscode": "^1.5.0"
@@ -25,7 +25,11 @@
 	"main": "./out/extension",
 	"scripts": {
 		"compile": "gulp compile-extension:mgcoding",
-		"watch": "gulp watch-extension:mgcoding"
+		"watch": "gulp watch-extension:mgcoding",
+		"test": "node ./out/test/parsing.test.js"
+	},
+	"devDependencies": {
+		"fast-check": "^3.23.2"
 	},
 	"contributes": {
 		"themes": [
@@ -87,6 +91,11 @@
 					"type": "webview",
 					"id": "mgcoding.chat",
 					"name": "Chat"
+				},
+				{
+					"type": "webview",
+					"id": "mgcoding.comfyChat",
+					"name": "ComfyUI Chat"
 				}
 			]
 		},
@@ -173,6 +182,34 @@
 				"title": "MGCoding: Importa workflow ComfyUI (da file)"
 			},
 			{
+				"command": "mgcoding.installNodesFromFile",
+				"title": "MGCoding: Installa nodi dal workflow scaricato (UI/API)"
+			},
+			{
+				"command": "mgcoding.repairComfyTriton",
+				"title": "MGCoding: Ripara Triton/SageAttention (ComfyUI)"
+			},
+			{
+				"command": "mgcoding.openComfyModelsFolder",
+				"title": "MGCoding: Apri cartella modelli ComfyUI"
+			},
+			{
+				"command": "mgcoding.startComfyUI",
+				"title": "MGCoding: Avvia ComfyUI"
+			},
+			{
+				"command": "mgcoding.stopComfyUI",
+				"title": "MGCoding: Arresta ComfyUI"
+			},
+			{
+				"command": "mgcoding.restartComfyUI",
+				"title": "MGCoding: Riavvia ComfyUI"
+			},
+			{
+				"command": "mgcoding.openComfyChat",
+				"title": "MGCoding: Apri ComfyUI Chat"
+			},
+			{
 				"command": "mgcoding.pickGalleryFolder",
 				"title": "MGCoding: Cartella galleria immagini"
 			},
@@ -183,6 +220,10 @@
 			{
 				"command": "mgcoding.setOpenAIKey",
 				"title": "MGCoding: Imposta API key OpenAI-compat"
+			},
+			{
+				"command": "mgcoding.setGlmKey",
+				"title": "MGCoding: Imposta API key GLM (Zhipu/Z.ai)"
 			},
 			{
 				"command": "mgcoding.newSpec",
@@ -754,6 +795,16 @@
 					"default": 8,
 					"description": "Numero di messaggi recenti mantenuti testualmente quando si riassume la conversazione."
 				},
+				"mgcoding.context.summarize": {
+					"type": "boolean",
+					"default": true,
+					"description": "Gestione del contesto consapevole dei token: quando la cronologia eccede il budget, riassume i risultati dei tool più vecchi (conservandone identità ed esito) invece di troncarli ciecamente. Disattiva per applicare solo il troncamento dei risultati vecchi."
+				},
+				"mgcoding.context.responseReserve": {
+					"type": "number",
+					"default": 1024,
+					"description": "Token del budget di contesto riservati alla risposta del modello. Non scende sotto 1024 per evitare risposte tagliate."
+				},
 				"mgcoding.autoVerify": {
 					"type": "boolean",
 					"default": true,
@@ -795,6 +846,11 @@
 					"type": "string",
 					"default": "",
 					"description": "Cartella di ComfyUI sul disco (quella che contiene models/). Impostala con 'MGCoding: Seleziona cartella ComfyUI'. Serve per scaricare i modelli nelle cartelle giuste."
+				},
+				"mgcoding.image.comfyStartCommand": {
+					"type": "string",
+					"default": "",
+					"description": "Comando o percorso del launcher (es. il tuo .bat) con cui MGCoding avvia/riavvia ComfyUI. Impostalo per mantenere i TUOI flag (lowvram/sageattention/ecc.) quando usi 'MGCoding: Avvia/Riavvia ComfyUI'. Vuoto = MGCoding avvia con il Python embedded della distribuzione portable."
 				},
 				"mgcoding.image.workflow": {
 					"type": "string",
@@ -931,6 +987,21 @@
 					"maximum": 6,
 					"description": "Numero di subagent in parallelo per \"Run parallel\" sui task di una spec. 1 = sequenziale."
 				},
+				"mgcoding.spec.clarify": {
+					"type": "boolean",
+					"default": true,
+					"description": "Modalità Spec: prima di generare i requisiti, poni 2-4 domande di chiarimento (scope, vincoli, casi limite) per requisiti più mirati. L'utente può rispondere o saltare."
+				},
+				"mgcoding.spec.verifyAfterTask": {
+					"type": "boolean",
+					"default": false,
+					"description": "Modalità Spec: dopo aver implementato un task, esegue un comando di verifica (build/test) e segna il task come fatto SOLO se passa (altrimenti resta da fare e potrà essere ritentato). Più affidabile ma più lento; su repo grandi attivalo con un comando di verifica veloce."
+				},
+				"mgcoding.spec.verifyCommand": {
+					"type": "string",
+					"default": "",
+					"description": "Comando di verifica eseguito dopo ogni task quando 'mgcoding.spec.verifyAfterTask' è attivo (es. 'npm run typecheck' o 'tsc -p . --noEmit'). Vuoto = rilevamento automatico dagli script di package.json (typecheck/compile/lint/build/test)."
+				},
 				"mgcoding.analytics.asked": {
 					"type": "boolean",
 					"default": false,
@@ -1027,6 +1098,11 @@
 					"default": "qwen2.5-coder:14b",
 					"description": "Modello Ollama da usare (es. qwen2.5-coder:14b, llama3.1:8b)."
 				},
+				"mgcoding.ollama.numCtx": {
+					"type": "number",
+					"default": 0,
+					"description": "Finestra di contesto Ollama (options.num_ctx) per le richieste agentiche. 0 = automatico: deriva il valore dalla finestra massima dichiarata dal modello (con fallback a 8192). Imposta un intero positivo per forzare un num_ctx specifico ed evitare il troncamento silenzioso del contesto nelle esecuzioni lunghe."
+				},
 				"mgcoding.autocomplete.enabled": {
 					"type": "boolean",
 					"default": false,
@@ -1062,7 +1138,8 @@
 					"enum": [
 						"claude",
 						"openai",
-						"ollama"
+						"ollama",
+						"glm"
 					],
 					"default": "claude",
 					"description": "Provider per i task pesanti (quando autoRoute è attivo)."
@@ -1076,6 +1153,57 @@
 					],
 					"default": "ollama",
 					"description": "Provider per i task leggeri (quando autoRoute è attivo)."
+				},
+				"mgcoding.model.capabilityTier": {
+					"type": "object",
+					"default": {},
+					"additionalProperties": {
+						"type": "string",
+						"enum": [
+							"native",
+							"structured",
+							"textual"
+						]
+					},
+					"description": "Override manuale della classe di capacità tool-use per modello (mappa nome-modello → tier). Se impostato per un modello, MGCoding usa quel tier senza eseguire il test di verifica funzionale. Valori: 'native' (tool-use nativo affidabile), 'structured' (richiede output vincolato a schema), 'textual' (protocollo testuale mg-tool)."
+				},
+				"mgcoding.autonomyMode": {
+					"type": "string",
+					"enum": [
+						"supervised",
+						"autopilot"
+					],
+					"enumDescriptions": [
+						"Supervised: chiede conferma prima di modificare file o eseguire comandi shell.",
+						"Autopilot: esegue le azioni senza conferma (con checkpoint reversibili), tranne i comandi distruttivi."
+					],
+					"default": "supervised",
+					"description": "Modalità di autonomia dell'agente. 'supervised' (default) richiede l'approvazione per le azioni a rischio; 'autopilot' lavora senza interruzioni creando checkpoint reversibili e chiedendo conferma solo per i comandi distruttivi."
+				},
+				"mgcoding.localFirst": {
+					"type": "boolean",
+					"default": true,
+					"description": "Privilegia i modelli locali: se esiste almeno un provider locale raggiungibile, l'instradamento automatico limita la scelta ai soli provider locali e ricorre al cloud a pagamento solo quando necessario."
+				},
+				"mgcoding.glm.model": {
+					"type": "string",
+					"default": "glm-4.6",
+					"description": "Modello GLM (Zhipu/Z.ai) da usare quando il provider GLM è selezionato."
+				},
+				"mgcoding.glm.useAnthropicEndpoint": {
+					"type": "boolean",
+					"default": false,
+					"description": "Usa l'endpoint Anthropic-compatibile di GLM con il percorso di tool-use nativo (mantenendo disponibile anche la compatibilità OpenAI). Disattivato = usa l'endpoint OpenAI-compatibile."
+				},
+				"mgcoding.glm.endpoint": {
+					"type": "string",
+					"default": "https://api.z.ai/api/paas/v4",
+					"description": "Endpoint OpenAI-compatibile di GLM (Zhipu/Z.ai). Usato quando il provider GLM lavora in modalità OpenAI-compat (default)."
+				},
+				"mgcoding.glm.anthropicEndpoint": {
+					"type": "string",
+					"default": "https://api.z.ai/api/anthropic",
+					"description": "Endpoint Anthropic-compatibile (Messages API) di GLM (Zhipu/Z.ai). Usato quando 'glm.useAnthropicEndpoint' è attivo."
 				},
 				"mgcoding.diffApproval": {
 					"type": "boolean",

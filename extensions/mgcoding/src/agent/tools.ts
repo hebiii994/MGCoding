@@ -13,6 +13,12 @@ import { recordOriginal } from '../edit/checkpoint';
 import { scopedGlob } from '../util/parsing';
 
 const execAsync = promisify(exec);
+
+/**
+ * Shell da usare per i comandi (Req. 11.5): su Windows i comandi passano per `cmd`
+ * (ComSpec), sugli altri sistemi si usa la shell di default (`/bin/sh`).
+ */
+const SHELL: string | true = process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : true;
 const ENC = new TextEncoder();
 const DEC = new TextDecoder();
 
@@ -253,7 +259,7 @@ function startManagedProcess(command: string): ManagedProcess {
 	const writeEmitter = new vscode.EventEmitter<string>();
 	const child = spawn(command, {
 		cwd: workspaceRoot().fsPath,
-		shell: true,
+		shell: SHELL,
 		env: { ...process.env, CI: '1', npm_config_yes: 'true', npm_config_audit: 'false', npm_config_fund: 'false', ADBLOCK: '1', FORCE_COLOR: '0' }
 	});
 	const mp: ManagedProcess = {
@@ -426,6 +432,8 @@ export async function executeTool(call: ToolCall): Promise<string> {
 						cwd: workspaceRoot().fsPath,
 						timeout: 120000,
 						maxBuffer: 1024 * 1024,
+						// Su Windows i comandi passano per `cmd` (ComSpec), altrove per la shell di default (Req. 11.5).
+						shell: typeof SHELL === 'string' ? SHELL : undefined,
 						// Spinge i tool a NON essere interattivi (evita wizard appesi che poi vengono annullati).
 						env: { ...process.env, CI: '1', npm_config_yes: 'true', npm_config_audit: 'false', npm_config_fund: 'false', ADBLOCK: '1' }
 					});

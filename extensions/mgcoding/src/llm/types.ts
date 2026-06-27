@@ -2,6 +2,8 @@
  *  MGCoding - tipi comuni del livello LLM
  *--------------------------------------------------------------------------------------------*/
 
+import type { ProviderDescriptor } from './registry';
+
 export type ChatRole = 'system' | 'user' | 'assistant';
 
 export interface ChatMessage {
@@ -94,9 +96,146 @@ export interface LLMProvider {
 	streamAgent?(params: AgentStreamParams): AsyncIterable<AnthropicStreamEvent>;
 }
 
+/**
+ * Categoria di errore di un provider LLM (Req. 9), utile per una gestione uniforme a monte
+ * (richiesta della chiave, proposta di ripiego, messaggio di assenza provider):
+ *  - `unreachable`: il server del provider non è raggiungibile (rete/endpoint) (Req. 9.1);
+ *  - `missing_key`: manca la chiave API di un provider cloud (Req. 9.2);
+ *  - `invalid_key`: la chiave API è presente ma rifiutata (401/403) (Req. 9.3);
+ *  - `rate_limit`: il provider ha imposto un limite di rate (429) (Req. 9.4);
+ *  - `no_provider`: nessun provider configurato/raggiungibile (Req. 9.5);
+ *  - `unknown`: errore non classificato.
+ */
+export type LLMErrorKind = 'unreachable' | 'missing_key' | 'invalid_key' | 'rate_limit' | 'no_provider' | 'unknown';
+
+/** Informazioni di classificazione opzionali per un {@link LLMError}. */
+export interface LLMErrorInfo {
+	/** Categoria dell'errore (default `unknown`). */
+	kind?: LLMErrorKind;
+	/** Id del provider che ha generato l'errore (es. 'ollama', 'claude', 'openai', 'glm'). */
+	providerId?: string;
+}
+
 export class LLMError extends Error {
-	constructor(message: string, override readonly cause?: unknown) {
+	/** Categoria dell'errore per la gestione uniforme (Req. 9). */
+	readonly kind: LLMErrorKind;
+	/** Id del provider che ha generato l'errore, se noto. */
+	readonly providerId?: string;
+
+	/**
+	 * Il terzo parametro `info` è opzionale e retrocompatibile: i chiamanti esistenti che
+	 * passano solo `(message, cause)` ottengono `kind = 'unknown'` senza modifiche.
+	 */
+	constructor(message: string, override readonly cause?: unknown, info?: LLMErrorInfo) {
 		super(message);
 		this.name = 'LLMError';
+		this.kind = info?.kind ?? 'unknown';
+		this.providerId = info?.providerId;
 	}
+}
+
+/**
+ * Classifica la risposta HTTP fallita di un provider cloud in un {@link LLMError} tipizzato
+ * (Req. 9.2, 9.3, 9.4). Distingue la chiave mancante da quella non valida in base alla
+ * presenza effettiva di una chiave:
+ *  - 401/403 (o 400 con indizi di autorizzazione) senza chiave → `missing_key`;
+ *  - 401/403 (o 400 con indizi di autorizzazione) con chiave presente → `invalid_key`;
+ *  - 429 → `rate_limit`;
+ *  - altri status → `unknown` con il dettaglio del corpo.
+ */
+export function classifyHttpError(opts: {
+	status: number;
+	bodyText: string;
+	hasKey: boolean;
+	providerId: string;
+	providerLabel: string;
+}): LLMError {
+	const { status, bodyText, hasKey, providerId, providerLabel } = opts;
+	const authHint = status === 401 || status === 403
+		|| (status === 400 && /authorization|api[ _-]?key|unauthenticated|unauthorized|invalid.*key/i.test(bodyText));
+	if (authHint) {
+		if (!hasKey) {
+			return new LLMError(
+				`Chiave API mancante per ${providerLabel}. Imposta la chiave con "MGCoding: Configurazione guidata" e riprova.`,
+				undefined,
+				{ kind: 'missing_key', providerId }
+			);
+		}
+		return new LLMError(
+			`Chiave API non valida per ${providerLabel} (HTTP ${status}). Verifica e reimposta la chiave con "MGCoding: Configurazione guidata".`,
+			undefined,
+			{ kind: 'invalid_key', providerId }
+		);
+	}
+	if (status === 429) {
+		return new LLMError(
+			`${providerLabel} ha raggiunto il limite di rate (HTTP 429).`,
+			undefined,
+			{ kind: 'rate_limit', providerId }
+		);
+	}
+	return new LLMError(`${providerLabel} ha risposto ${status}: ${bodyText}`, undefined, { providerId });
+}
+
+// --- Tipi di dominio condivisi (local-model-kiro-parity) ---
+
+/**
+ * Classe di capacità di tool-use di un modello (Req. 3):
+ *  - `native`: tool-use nativo affidabile (verificato da probe funzionale);
+ *  - `structured`: richiede output vincolato a uno schema (grammar/JSON);
+ *  - `textual`: richiede il protocollo testuale `mg-tool` con scaffolding.
+ */
+export type CapabilityTier = 'native' | 'structured' | 'textual';
+
+/** Modalità di autonomia dell'agente (Req. 5). */
+export type AutonomyMode = 'autopilot' | 'supervised';
+
+/** Uno dei sei pattern EARS riconosciuti nei criteri di accettazione (Req. 6.1). */
+export type EarsPattern =
+	| 'ubiquitous'  // THE SYSTEM SHALL ...
+	| 'event'       // WHEN ... THE SYSTEM SHALL ...
+	| 'state'       // WHILE ... THE SYSTEM SHALL ...
+	| 'optional'    // WHERE ... THE SYSTEM SHALL ...
+	| 'unwanted'    // IF ... THEN THE SYSTEM SHALL ...
+	| 'complex';    // combinazioni (WHEN/WHILE + IF/THEN)
+
+/** Fase dello workflow Spec (Req. 6). */
+export type SpecPhase = 'requirements' | 'design' | 'tasks';
+
+/** Budget di token calcolato per una richiesta (Req. 1, 4). */
+export interface ContextBudget {
+	/** num_ctx effettivo da inviare a Ollama (intero positivo). */
+	numCtx: number;
+	/** Spazio disponibile per la cronologia = numCtx - system - tools - reserve. */
+	historyBudget: number;
+}
+
+/** Esito della decisione di gating di un'azione dell'agente (Req. 5). */
+export interface ActionDecision {
+	/** True se serve l'approvazione esplicita dell'utente. */
+	requiresApproval: boolean;
+	/** True se va creato un checkpoint reversibile prima di agire. */
+	needsCheckpoint: boolean;
+	/** Motivazione della decisione (per logging/UI). */
+	reason: string;
+}
+
+/** Voce della Coverage_Map: mappatura di un criterio EARS ai task (Req. 6.2). */
+export interface CoverageEntry {
+	/** Identificatore del criterio nel formato "Req N.M". */
+	criterion: string;
+	/** Indici (riga) dei task che citano il criterio. */
+	taskLines: number[];
+	/** True se almeno un task copre il criterio. */
+	covered: boolean;
+}
+
+/** Risultato della selezione del provider (Req. 8, 9.5, 10). */
+export interface RouteResult {
+	/** Provider scelto; assente se nessun provider è disponibile (Req. 9.5). */
+	provider?: ProviderDescriptor;
+	/** Motivo del ripiego al cloud a pagamento (Req. 10.3) o dell'assenza di provider (Req. 9.5). */
+	fallbackReason?: string;
+	/** True se è stato scelto un locale insufficiente per assenza di cloud (Req. 8.7). */
+	degradedLocal?: boolean;
 }

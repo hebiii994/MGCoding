@@ -114,6 +114,12 @@ export interface ImageGenResult {
 	images: string[];
 	mediaType: string;
 	backendLabel: string;
+	/**
+	 * Seed effettivamente usato per la generazione, quando è noto e controllabile (backend
+	 * locali: ComfyUI/A1111). Permette di "bloccare" il seed per riprodurre/variare l'immagine.
+	 * Assente per i backend cloud che non espongono un seed deterministico.
+	 */
+	seed?: number;
 }
 
 /** Chiavi cloud da riusare (gia inserite dall'utente per la chat). */
@@ -133,6 +139,66 @@ async function probe(url: string, ms = 1200): Promise<boolean> {
 	} catch {
 		return false;
 	}
+}
+
+/**
+ * Descrittore puro di un backend di generazione: cattura tutto ciò che serve alla scelta
+ * (disponibilità, priorità, capacità video) senza alcuna dipendenza da I/O. È la struttura
+ * su cui opera `chooseGenerationBackend`, così la logica di selezione resta testabile.
+ */
+export interface GenerationBackendDescriptor {
+	/** Identificativo del backend (es. 'a1111', 'comfyui', 'gemini', 'openai'). */
+	id: string;
+	/** Il backend è raggiungibile/configurato e quindi utilizzabile. */
+	available: boolean;
+	/** Priorità di scelta: valore più basso = precedenza maggiore (locale prima del cloud). */
+	priority: number;
+	/** Il backend supporta i workflow video (necessario per le richieste video). */
+	supportsVideo: boolean;
+}
+
+/** Contesto della richiesta che vincola la selezione del backend di generazione. */
+export interface BackendSelectionContext {
+	/** Richiesta di generazione video: impone un backend con capacità video. */
+	video?: boolean;
+	/** Backend forzato dall'utente (id); assente o 'auto' = selezione automatica. */
+	forcedId?: string;
+}
+
+/**
+ * Sceglie il backend di generazione in modo PURO (nessun I/O), così da essere testabile.
+ * Regole:
+ *  - considera solo i backend disponibili;
+ *  - per le richieste video restringe ai backend con capacità video (Req 11.2);
+ *  - quando nessun backend è forzato ritorna il primo disponibile per ordine di priorità
+ *    (priorità più bassa = precedenza maggiore) (Req 11.1);
+ *  - se un backend è forzato ed è tra i candidati validi, ritorna quello.
+ * Ritorna `undefined` se nessun backend soddisfa i vincoli.
+ */
+export function chooseGenerationBackend(
+	descriptors: readonly GenerationBackendDescriptor[],
+	ctx: BackendSelectionContext = {}
+): GenerationBackendDescriptor | undefined {
+	// 1) Solo i backend disponibili.
+	let candidates = descriptors.filter(d => d.available);
+	// 2) Richiesta video: restringi ai backend con capacità video.
+	if (ctx.video) {
+		candidates = candidates.filter(d => d.supportsVideo);
+	}
+	if (candidates.length === 0) {
+		return undefined;
+	}
+	// 3) Ordina per priorità (stabile): valore più basso = scelto per primo.
+	const byPriority = [...candidates].sort((a, b) => a.priority - b.priority);
+	// 4) Backend forzato esplicitamente: usalo se è tra i candidati validi.
+	if (ctx.forcedId && ctx.forcedId !== 'auto') {
+		const forced = byPriority.find(d => d.id === ctx.forcedId);
+		if (forced) {
+			return forced;
+		}
+	}
+	// 5) Selezione automatica: il primo candidato per ordine di priorità.
+	return byPriority[0];
 }
 
 /**
@@ -233,7 +299,7 @@ async function genA1111(endpoint: string, prompt: string, opts: ImageGenOptions,
 	if (!data.images?.length) {
 		throw new Error('Il server locale non ha restituito immagini.');
 	}
-	return { images: data.images, mediaType: 'image/png', backendLabel: 'Stable Diffusion locale' };
+	return { images: data.images, mediaType: 'image/png', backendLabel: 'Stable Diffusion locale', seed: typeof opts.seed === 'number' && opts.seed >= 0 ? opts.seed : undefined };
 }
 
 async function genComfy(endpoint: string, prompt: string, opts: ImageGenOptions, signal?: AbortSignal): Promise<ImageGenResult> {
@@ -266,7 +332,7 @@ async function genComfy(endpoint: string, prompt: string, opts: ImageGenOptions,
 		...(rmbg.node ? { '13': rmbg.node } : {})
 	};
 	const images = await queueAndCollect(endpoint, workflow, signal);
-	return { images, mediaType: 'image/png', backendLabel: `ComfyUI · ${ckpt}` };
+	return { images, mediaType: 'image/png', backendLabel: `ComfyUI · ${ckpt}`, seed };
 }
 
 /** Accoda un workflow ComfyUI, attende il completamento e raccoglie le immagini (base64). */
@@ -376,7 +442,7 @@ async function genA1111Img2Img(endpoint: string, prompt: string, opts: ImageGenO
 	if (!data.images?.length) {
 		throw new Error('Il server locale non ha restituito immagini.');
 	}
-	return { images: data.images, mediaType: 'image/png', backendLabel: 'Stable Diffusion locale (img2img)' };
+	return { images: data.images, mediaType: 'image/png', backendLabel: 'Stable Diffusion locale (img2img)', seed: typeof opts.seed === 'number' && opts.seed >= 0 ? opts.seed : undefined };
 }
 
 async function genComfyImg2Img(endpoint: string, prompt: string, opts: ImageGenOptions, signal?: AbortSignal): Promise<ImageGenResult> {
@@ -417,7 +483,7 @@ async function genComfyImg2Img(endpoint: string, prompt: string, opts: ImageGenO
 		...(rmbg.node ? { '13': rmbg.node } : {})
 	};
 	const images = await queueAndCollect(ep, workflow, signal);
-	return { images, mediaType: 'image/png', backendLabel: `ComfyUI · ${ckpt} (img2img)` };
+	return { images, mediaType: 'image/png', backendLabel: `ComfyUI · ${ckpt} (img2img)`, seed };
 }
 
 async function genOpenAIEdit(key: string, model: string, prompt: string, opts: ImageGenOptions, signal?: AbortSignal): Promise<ImageGenResult> {

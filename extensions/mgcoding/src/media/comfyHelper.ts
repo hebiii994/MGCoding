@@ -10,11 +10,21 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import * as zlib from 'zlib';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { queueAndCollect } from './imageGen';
+import { ApiWorkflow, isApiFormat } from './workflowGraph';
+import { convertUiToApi, isUiFormat, type ConversionResult, type ObjectInfo, type UiWorkflow } from './workflowConverter';
+import { referencedModels as detectModelRefs, missingModels as computeMissingModels, type ModelRef } from './modelRefs';
+import { usedClassTypes, missingNodes as computeMissingNodes } from './nodeRefs';
 
 const execAsync = promisify(exec);
+
+/** Vero se l'errore deriva dall'annullamento dell'utente (AbortController/CancellationToken). */
+function isAbortError(err: unknown): boolean {
+	return err instanceof Error && (err.name === 'AbortError' || /abort/i.test(err.message));
+}
 
 /**
  * Cartella dove salvare/leggere le immagini generate. Priorità: cartella scelta dall'utente
@@ -225,7 +235,225 @@ export async function listWorkflows(): Promise<string[]> {
 	}
 }
 
-/** Importa un workflow da file (.json formato API) in .mg/workflows/ e lo imposta come attivo. */
+/** L'endpoint ComfyUI configurato (normalizzato, senza slash finale). */
+function configuredComfyEndpoint(): string {
+	const ep = vscode.workspace.getConfiguration('mgcoding').get<string>('image.comfyEndpoint', 'http://127.0.0.1:8188');
+	return (ep || 'http://127.0.0.1:8188').replace(/\/$/, '');
+}
+
+/**
+ * Scarica da ComfyUI i metadati `/object_info` nel formato `ObjectInfo` usato dal
+ * Convertitore_Workflow (l'ordine delle chiavi `input.required`/`optional` guida la
+ * mappatura dei `widgets_values`). Lancia se ComfyUI non è raggiungibile o risponde male:
+ * il chiamante distingue così "conversione locale fallita" da "fallback ComfyUI non
+ * disponibile" (Req 15.3).
+ */
+export async function fetchObjectInfo(endpoint: string): Promise<ObjectInfo> {
+	const res = await fetch(`${endpoint.replace(/\/$/, '')}/object_info`, { signal: AbortSignal.timeout(25000) });
+	if (!res.ok) {
+		throw new Error(`ComfyUI /object_info ha risposto ${res.status}`);
+	}
+	return await res.json() as ObjectInfo;
+}
+
+/**
+ * Estrae le voci di un archivio ZIP (`.zip`) leggendone la **central directory** (robusto
+ * anche con i data descriptor) e decomprimendo ogni entry: metodo 0 (stored) o 8 (deflate,
+ * via `zlib.inflateRawSync`). Nessuna dipendenza esterna: usa solo lo `zlib` di Node, così
+ * non incide sul bundling dell'estensione. Ignora le cartelle. Lancia su archivio non valido
+ * o metodo di compressione non supportato.
+ */
+function readZipEntries(buf: Buffer): { name: string; data: Buffer }[] {
+	const EOCD_SIG = 0x06054b50;
+	const CDH_SIG = 0x02014b50;
+	const LFH_SIG = 0x04034b50;
+	// Cerca l'End Of Central Directory partendo dal fondo (il commento finale è ≤ 65535 byte).
+	let eocd = -1;
+	const minPos = Math.max(0, buf.length - 22 - 0xffff);
+	for (let i = buf.length - 22; i >= minPos; i--) {
+		if (i >= 0 && buf.readUInt32LE(i) === EOCD_SIG) {
+			eocd = i;
+			break;
+		}
+	}
+	if (eocd < 0) {
+		throw new Error('Archivio ZIP non valido: record di fine central directory non trovato.');
+	}
+	const count = buf.readUInt16LE(eocd + 10);
+	let p = buf.readUInt32LE(eocd + 16);
+	const entries: { name: string; data: Buffer }[] = [];
+	for (let n = 0; n < count && p + 46 <= buf.length; n++) {
+		if (buf.readUInt32LE(p) !== CDH_SIG) {
+			break;
+		}
+		const method = buf.readUInt16LE(p + 10);
+		const compSize = buf.readUInt32LE(p + 20);
+		const nameLen = buf.readUInt16LE(p + 28);
+		const extraLen = buf.readUInt16LE(p + 30);
+		const commentLen = buf.readUInt16LE(p + 32);
+		const localOffset = buf.readUInt32LE(p + 42);
+		const name = buf.toString('utf8', p + 46, p + 46 + nameLen);
+		const isDir = name.endsWith('/');
+		if (!isDir && buf.readUInt32LE(localOffset) === LFH_SIG) {
+			// L'header locale dichiara la propria lunghezza nome/extra: serve per trovare i dati.
+			const lNameLen = buf.readUInt16LE(localOffset + 26);
+			const lExtraLen = buf.readUInt16LE(localOffset + 28);
+			const dataStart = localOffset + 30 + lNameLen + lExtraLen;
+			const comp = buf.subarray(dataStart, dataStart + compSize);
+			let data: Buffer;
+			if (method === 0) {
+				data = Buffer.from(comp);
+			} else if (method === 8) {
+				data = zlib.inflateRawSync(comp);
+			} else {
+				throw new Error(`Metodo di compressione ZIP non supportato (${method}) per "${name}".`);
+			}
+			entries.push({ name, data });
+		}
+		p += 46 + nameLen + extraLen + commentLen;
+	}
+	return entries;
+}
+
+/**
+ * Estrae il **primo workflow JSON** da un archivio ZIP (Req 15.5): preferisce la prima entry
+ * con estensione `.json` (escludendo le cartelle di metadati `__MACOSX/`). Restituisce
+ * `{ name, text }` con il testo del file, o `{ error }` se l'archivio non è valido o non
+ * contiene alcun `.json`.
+ */
+export function extractWorkflowFromArchive(bytes: Uint8Array): { name: string; text: string } | { error: string } {
+	let entries: { name: string; data: Buffer }[];
+	try {
+		entries = readZipEntries(Buffer.from(bytes));
+	} catch (err) {
+		return { error: err instanceof Error ? err.message : String(err) };
+	}
+	const jsonEntries = entries.filter(e => /\.json$/i.test(e.name) && !e.name.startsWith('__MACOSX/'));
+	if (!jsonEntries.length) {
+		return { error: "l'archivio non contiene alcun file .json di workflow." };
+	}
+	const chosen = jsonEntries[0];
+	return { name: path.basename(chosen.name), text: DEC.decode(chosen.data) };
+}
+
+/**
+ * Converte un Workflow_UI in formato API tentando prima la conversione **locale** e, se non
+ * basta, il **fallback ComfyUI** (Req 15.2/15.3). ComfyUI non espone un endpoint diretto
+ * UI→API: il fallback consiste nello scaricare `/object_info` (possibile solo se ComfyUI è
+ * raggiungibile) per dare al convertitore l'ordine dei `widgets_values` mancante.
+ * - tenta `convertUiToApi(ui, {})`: copre i workflow senza widget posizionali da ordinare;
+ * - se fallisce e ComfyUI è raggiungibile, riscarica `/object_info` e ritenta;
+ * - altrimenti restituisce `{ ok: false, reason }` (Req 15.4), indicando il motivo.
+ */
+async function convertUiWithFallback(ui: UiWorkflow, endpoint: string): Promise<ConversionResult> {
+	// 1) Tentativo locale senza interrogare ComfyUI.
+	const local = convertUiToApi(ui, {});
+	if (local.ok) {
+		return local;
+	}
+	// 2) Conversione locale non possibile: usa ComfyUI come fallback se raggiungibile (Req 15.3).
+	let objectInfo: ObjectInfo;
+	try {
+		objectInfo = await fetchObjectInfo(endpoint);
+	} catch (err) {
+		return {
+			ok: false,
+			reason: `${local.reason} Per completare la conversione serve ComfyUI in esecuzione su ${endpoint} (non raggiungibile: ${err instanceof Error ? err.message : String(err)}).`,
+		};
+	}
+	return convertUiToApi(ui, objectInfo);
+}
+
+/** Vero se `t` è un id di subgraph ComfyUI (UUID): i subgraph non sono appiattiti localmente. */
+function isSubgraphType(t: unknown): boolean {
+	return typeof t === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(t);
+}
+
+/**
+ * Repository CANONICI dei pacchetti di nodi più diffusi: quando più repo (spesso fork)
+ * rivendicano lo stesso `class_type` nella mappa di ComfyUI-Manager, si preferisce questo
+ * elenco per evitare di clonare un fork sbagliato (es. un fork al posto di city96/ComfyUI-GGUF).
+ */
+const CANONICAL_NODE_REPOS: readonly string[] = [
+	'https://github.com/city96/ComfyUI-GGUF',
+	'https://github.com/rgthree/rgthree-comfy',
+	'https://github.com/kijai/ComfyUI-KJNodes',
+	'https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite',
+	'https://github.com/Fannovel16/ComfyUI-Frame-Interpolation',
+	'https://github.com/yolain/ComfyUI-Easy-Use',
+	'https://github.com/cubiq/ComfyUI_essentials',
+	'https://github.com/ltdrdata/ComfyUI-Impact-Pack',
+	'https://github.com/WASasquatch/was-node-suite-comfyui',
+];
+
+/**
+ * Risolve il repository che fornisce una `class_type`:
+ *  1) euristiche su suffissi distintivi dei pacchetti noti (robuste anche quando la mappa è
+ *     ambigua o non indicizza il nodo): `… (rgthree)` → rgthree-comfy; `…GGUF` → city96/ComfyUI-GGUF;
+ *  2) candidati dalla mappa di ComfyUI-Manager, preferendo un repo CANONICO se presente;
+ *  3) in mancanza d'altro, il primo match della mappa.
+ * Restituisce `undefined` se nessuna fonte risolve il nodo.
+ */
+function resolveRepoForClass(cls: string, nodeMap: Record<string, [string[], unknown]>): string | undefined {
+	if (/\(rgthree\)\s*$/i.test(cls)) {
+		return 'https://github.com/rgthree/rgthree-comfy';
+	}
+	if (/GGUF$/.test(cls)) {
+		return 'https://github.com/city96/ComfyUI-GGUF';
+	}
+	const candidates: string[] = [];
+	for (const [repo, val] of Object.entries(nodeMap)) {
+		if (Array.isArray(val?.[0]) && val[0].includes(cls)) {
+			candidates.push(repo);
+		}
+	}
+	if (candidates.length === 0) {
+		return undefined;
+	}
+	return candidates.find(c => CANONICAL_NODE_REPOS.includes(c)) ?? candidates[0];
+}
+
+/**
+ * Riconosce un export "API" DEGRADATO: un oggetto (non array) i cui valori hanno `inputs`
+ * oggetto ma a cui MANCA `class_type`. Succede quando ComfyUI esporta in formato API un
+ * workflow i cui nodi custom NON sono installati: il frontend non conosce le definizioni,
+ * omette `class_type` e nomina i widget `"UNKNOWN"`. Restituisce i titoli (`_meta.title`) dei
+ * nodi privi di `class_type`, oppure `undefined` se non è un export API (degradato).
+ */
+function degradedApiNodeTitles(obj: unknown): string[] | undefined {
+	if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+		return undefined;
+	}
+	const values = Object.values(obj as Record<string, unknown>);
+	if (values.length === 0) {
+		return undefined;
+	}
+	const missing: string[] = [];
+	for (const v of values) {
+		if (!v || typeof v !== 'object' || Array.isArray(v)) {
+			return undefined; // non è una mappa di nodi
+		}
+		const node = v as { class_type?: unknown; inputs?: unknown; _meta?: { title?: unknown } };
+		const hasInputs = !!node.inputs && typeof node.inputs === 'object' && !Array.isArray(node.inputs);
+		if (!hasInputs) {
+			return undefined; // non sembra una mappa di nodi in formato API
+		}
+		if (typeof node.class_type !== 'string') {
+			missing.push(typeof node._meta?.title === 'string' ? node._meta!.title as string : '(senza titolo)');
+		}
+	}
+	return missing.length > 0 ? missing : undefined;
+}
+
+/**
+ * Importa un workflow ComfyUI in `.mg/workflows/` e lo imposta come attivo.
+ * Accetta sia file `.json` (formato API o UI) sia archivi `.zip` contenenti il workflow:
+ * - **formato API** → salvato così com'è (Req 15.1);
+ * - **formato UI** → convertito in API prima del salvataggio (Req 15.2), con fallback su
+ *   ComfyUI quando la conversione locale non basta (Req 15.3);
+ * - **non convertibile** → l'utente viene informato del motivo (Req 15.4);
+ * - **archivio `.zip`** → il workflow viene estratto prima dell'import (Req 15.5).
+ */
 export async function importWorkflow(): Promise<void> {
 	const dir = workflowsDir();
 	if (!dir) {
@@ -233,30 +461,85 @@ export async function importWorkflow(): Promise<void> {
 		return;
 	}
 	const sel = await vscode.window.showOpenDialog({
-		canSelectMany: false, filters: { 'Workflow ComfyUI (JSON)': ['json'] },
-		title: 'Importa un workflow ComfyUI (formato API)', openLabel: 'Importa'
+		canSelectMany: false, filters: { 'Workflow ComfyUI (JSON o ZIP)': ['json', 'zip'] },
+		title: 'Importa un workflow ComfyUI (JSON formato API/UI o archivio ZIP)', openLabel: 'Importa'
 	});
 	if (!sel?.length) {
 		return;
 	}
-	let parsed: Record<string, { class_type?: unknown }>;
+	const bytes = await vscode.workspace.fs.readFile(sel[0]);
+	const fileName = path.basename(sel[0].fsPath);
+
+	// 1) Archivio compresso: estrai il workflow prima dell'import (Req 15.5).
+	let jsonText: string;
+	let sourceName = fileName;
+	const isZip = /\.zip$/i.test(fileName) || (bytes.length >= 2 && bytes[0] === 0x50 && bytes[1] === 0x4b); // "PK"
+	if (isZip) {
+		const extracted = extractWorkflowFromArchive(bytes);
+		if ('error' in extracted) {
+			vscode.window.showErrorMessage(`Impossibile estrarre il workflow dall'archivio: ${extracted.error}`);
+			return;
+		}
+		jsonText = extracted.text;
+		sourceName = extracted.name;
+	} else {
+		jsonText = DEC.decode(bytes);
+	}
+
+	// 2) Parsing JSON.
+	let parsed: unknown;
 	try {
-		parsed = JSON.parse(DEC.decode(await vscode.workspace.fs.readFile(sel[0])));
+		parsed = JSON.parse(jsonText);
 	} catch {
 		vscode.window.showErrorMessage('File non valido: non è un JSON.');
 		return;
 	}
-	// Verifica che sia formato API (nodi con class_type), non il formato UI (nodes[]).
-	const isApi = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-		&& Object.values(parsed).some(n => n && typeof n === 'object' && 'class_type' in n);
-	if (!isApi) {
-		vscode.window.showWarningMessage('Questo sembra un workflow in formato UI. In ComfyUI esportalo con "Save (API Format)" e reimportalo, altrimenti MGCoding non può iniettarci il prompt.');
+
+	// 3) Determina il formato e ottieni il workflow API da salvare.
+	let api: ApiWorkflow;
+	if (isApiFormat(parsed)) {
+		// Formato API: salvato così com'è (Req 15.1).
+		api = parsed;
+	} else if (isUiFormat(parsed)) {
+		// Formato UI: convertito in API (Req 15.2) con fallback ComfyUI (Req 15.3).
+		const subgraphs = parsed.nodes.filter(n => isSubgraphType((n as { type?: unknown }).type)).length;
+		const result = await convertUiWithFallback(parsed, configuredComfyEndpoint());
+		if (!result.ok) {
+			// Workflow non convertibile: spiega il motivo in modo ACTIONABLE (Req 15.4).
+			let hint = ' Causa probabile: i nodi custom richiesti non sono installati in ComfyUI '
+				+ '(quindi /object_info non ne espone i widget). Installali in ComfyUI (es. con ComfyUI-Manager), '
+				+ 'poi in ComfyUI usa "Export (API)" e reimporta qui quel file.';
+			if (subgraphs > 0) {
+				hint = ` Il workflow contiene ${subgraphs} subgraph (gruppi annidati) che la conversione locale non sa appiattire. `
+					+ 'Aprilo in ComfyUI con i nodi custom installati ed esporta con "Export (API)": quel file '
+					+ '(formato API completo) è importabile direttamente qui.';
+			}
+			vscode.window.showWarningMessage(`Workflow non convertibile in formato API: ${result.reason}${hint}`);
+			return;
+		}
+		api = result.api;
+	} else {
+		// Potrebbe essere un export API DEGRADATO: nodi senza `class_type` perché i relativi nodi
+		// custom non erano installati in ComfyUI all'export. Diagnosi precisa invece del generico.
+		const degraded = degradedApiNodeTitles(parsed);
+		if (degraded) {
+			const list = degraded.slice(0, 8).join(', ') + (degraded.length > 8 ? `, … (+${degraded.length - 8})` : '');
+			vscode.window.showWarningMessage(
+				`Export API incompleto: ${degraded.length} nodo/i senza "class_type". Accade quando ComfyUI esporta `
+				+ 'in formato API un workflow i cui nodi custom NON sono installati. Installa i nodi custom in ComfyUI '
+				+ `e ripeti "Export (API)". Nodi interessati: ${list}.`
+			);
+			return;
+		}
+		// Né API né UI: non importabile (Req 15.4).
+		vscode.window.showErrorMessage('Il file non è un workflow ComfyUI valido (né formato API né formato UI).');
 		return;
 	}
-	const baseName = path.basename(sel[0].fsPath).replace(/\.json$/i, '').replace(/[^a-z0-9_-]+/gi, '-') || 'workflow';
+
+	const baseName = sourceName.replace(/\.json$/i, '').replace(/[^a-z0-9_-]+/gi, '-') || 'workflow';
 	await vscode.workspace.fs.createDirectory(dir);
 	const dest = vscode.Uri.joinPath(dir, `${baseName}.json`);
-	await vscode.workspace.fs.writeFile(dest, new TextEncoder().encode(JSON.stringify(parsed, null, 2)));
+	await vscode.workspace.fs.writeFile(dest, new TextEncoder().encode(JSON.stringify(api, null, 2)));
 	await vscode.workspace.getConfiguration('mgcoding').update('image.workflow', `${baseName}.json`, vscode.ConfigurationTarget.Global);
 	vscode.window.showInformationMessage(`Workflow importato e attivato: ${baseName}.json`);
 }
@@ -364,13 +647,10 @@ export async function listLoras(endpoint: string): Promise<string[]> {
 
 /** Le class_type usate dal workflow che NON sono registrate in ComfyUI (nodi custom mancanti). */
 export async function missingNodes(endpoint: string, workflow: Record<string, { class_type?: string }>): Promise<string[]> {
-	const used = new Set<string>();
-	for (const node of Object.values(workflow)) {
-		if (node.class_type) {
-			used.add(node.class_type);
-		}
-	}
-	if (!used.size) {
+	// Rilevamento PURO tramite `nodeRefs` (Req 17.1): differenza tra le class_type usate dal
+	// workflow e quelle registrate in ComfyUI (note da /object_info).
+	const used = usedClassTypes(workflow as unknown as ApiWorkflow);
+	if (!used.length) {
 		return [];
 	}
 	// object_info può essere grande su ComfyUI con molti nodi: timeout generoso.
@@ -379,7 +659,7 @@ export async function missingNodes(endpoint: string, workflow: Record<string, { 
 		throw new Error(`ComfyUI /object_info ha risposto ${res.status}`);
 	}
 	const known = new Set(Object.keys(await res.json() as Record<string, unknown>));
-	return [...used].filter(c => !known.has(c));
+	return computeMissingNodes(used, known);
 }
 
 /** Cartella custom_nodes e python embedded di ComfyUI (struttura portable o standard). */
@@ -422,6 +702,17 @@ export async function installMissingNodesForWorkflow(endpoint: string, workflowN
 		vscode.window.showInformationMessage('Per QUESTO workflow non risultano nodi mancanti. Nota: MGCoding controlla il workflow attivo in .mg/workflows, non quello aperto nella scheda di ComfyUI. Per workflow complessi usa ComfyUI-Manager (Install Missing Custom Nodes + Models).');
 		return;
 	}
+	await installResolvedNodes(missing, `il workflow «${workflowName}»`);
+}
+
+/**
+ * Cuore RIUSABILE dell'installazione nodi: risolve un insieme di `class_type` mancanti nei
+ * repository tramite la mappa di ComfyUI-Manager (`extension-node-map.json`), chiede conferma
+ * esplicita (clona codice di terzi) e installa clonando in `custom_nodes/` + `pip install` dei
+ * requirements. NON richiede ComfyUI-Manager installato in ComfyUI: MGCoding fa git/pip da sé.
+ * `contextLabel` descrive l'origine (es. "il workflow «x»" o "il file «y.json»").
+ */
+async function installResolvedNodes(missing: string[], contextLabel: string): Promise<void> {
 	const { customNodes, python } = comfyPaths();
 	if (!customNodes) {
 		vscode.window.showWarningMessage('Imposta prima la cartella di ComfyUI ("MGCoding: Seleziona cartella ComfyUI"): non trovo custom_nodes/.');
@@ -442,13 +733,7 @@ export async function installMissingNodesForWorkflow(endpoint: string, workflowN
 	const repos = new Map<string, string[]>(); // repoUrl -> class_types che fornisce
 	const unresolved: string[] = [];
 	for (const cls of missing) {
-		let found: string | undefined;
-		for (const [repo, val] of Object.entries(nodeMap)) {
-			if (Array.isArray(val?.[0]) && val[0].includes(cls)) {
-				found = repo;
-				break;
-			}
-		}
+		const found = resolveRepoForClass(cls, nodeMap);
 		if (found) {
 			repos.set(found, [...(repos.get(found) ?? []), cls]);
 		} else {
@@ -460,9 +745,11 @@ export async function installMissingNodesForWorkflow(endpoint: string, workflowN
 		return;
 	}
 	const repoList = [...repos.keys()];
-	const detail = repoList.map(r => `• ${r.replace(/^https?:\/\/github\.com\//, '')}`).join('\n');
+	const installedRepos: string[] = [];
+	const failedRepos: string[] = [];
+	const detail = repoList.map(r => `• ${r.replace(/^https?:\/\/github\.com\//, '')} (${repos.get(r)!.join(', ')})`).join('\n');
 	const ok = await vscode.window.showWarningMessage(
-		`Installo ${repoList.length} pacchetto/i di nodi custom per il workflow «${workflowName}»? Verranno clonati da GitHub in custom_nodes/ e ne verranno installate le dipendenze (codice di terzi).`,
+		`Installo ${repoList.length} pacchetto/i di nodi custom per ${contextLabel}? Verranno clonati da GitHub in custom_nodes/ e ne verranno installate le dipendenze (codice di terzi).`,
 		{ modal: true, detail: `${detail}${unresolved.length ? `\n\nNon risolti (manuali): ${unresolved.join(', ')}` : ''}` },
 		'Installa'
 	);
@@ -484,39 +771,405 @@ export async function installMissingNodesForWorkflow(endpoint: string, workflowN
 				if (fs.existsSync(reqs) && python) {
 					await execAsync(`"${python}" -m pip install -r "${reqs}"`, { timeout: 300000 });
 				}
+				installedRepos.push(name);
 			} catch (err) {
-				vscode.window.showWarningMessage(`Installazione di ${name} non riuscita: ${err instanceof Error ? err.message : String(err)}`);
+				failedRepos.push(`${name} (${err instanceof Error ? err.message.split('\n')[0] : String(err)})`);
 			}
 		}
 	});
-	vscode.window.showInformationMessage(`Nodi installati in custom_nodes/. RIAVVIA ComfyUI per caricarli${unresolved.length ? `. Da installare a mano: ${unresolved.join(', ')}` : '.'}`);
+	// Riepilogo finale chiaro: installati / falliti / non risolti (Req. 17.4, 17.5).
+	if (installedRepos.length > 0) {
+		vscode.window.showInformationMessage(
+			`Installati ${installedRepos.length}/${repoList.length} pacchetti in custom_nodes/ (${installedRepos.join(', ')}). RIAVVIA ComfyUI per caricarli.`
+		);
+	}
+	if (failedRepos.length > 0) {
+		vscode.window.showWarningMessage(
+			`Pacchetti NON installati: ${failedRepos.join(' | ')}. Verifica che "git" sia disponibile nel PATH e riprova.`
+		);
+	}
+	if (unresolved.length > 0) {
+		vscode.window.showWarningMessage(`Nodi non risolti automaticamente (installali a mano): ${unresolved.join(', ')}.`);
+	}
 }
 
-/** Cartella di models/ in base al nome del campo (ckpt_name → checkpoints, ecc.). */
-function keyToModelDir(key: string): string {
-	const k = key.toLowerCase();
-	if (k.includes('ckpt')) { return 'checkpoints'; }
-	if (k.includes('vae')) { return 'vae'; }
-	if (k.includes('lora')) { return 'loras'; }
-	if (k.includes('control_net') || k.includes('controlnet')) { return 'controlnet'; }
-	if (k.includes('unet') || k.includes('diffusion')) { return 'diffusion_models'; }
-	if (k.includes('clip') || k.includes('text_encoder')) { return 'text_encoders'; }
-	if (k.includes('style_model')) { return 'style_models'; }
-	if (k.includes('upscale')) { return 'upscale_models'; }
-	return 'checkpoints';
+/** Estrae da un workflow UI le `class_type` "installabili": i `node.type`, escludendo i nodi
+ * solo-frontend (Note/Reroute/Primitive/Group e i nodi "virtuali" Set/Get di KJNodes, che sono
+ * definiti in JavaScript e NON compaiono in /object_info) e i subgraph (UUID), che non sono
+ * pacchetti Python installabili. */
+function uiInstallableClassTypes(ui: UiWorkflow): string[] {
+	const skip = new Set([
+		'Note', 'MarkdownNote', 'Reroute', 'PrimitiveNode', 'PrimitiveInt', 'PrimitiveFloat', 'PrimitiveString', 'Group',
+		// Nodi virtuali frontend di ComfyUI-KJNodes (web/js/setgetnodes.js): non sono nodi Python
+		// e non risultano da /object_info → vanno ignorati (li fornisce KJNodes lato UI).
+		'SetNode', 'GetNode',
+	]);
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const n of ui.nodes) {
+		const t = (n as { type?: unknown }).type;
+		if (typeof t !== 'string' || t.length === 0 || skip.has(t) || isSubgraphType(t)) {
+			continue;
+		}
+		if (!seen.has(t)) {
+			seen.add(t);
+			out.push(t);
+		}
+	}
+	return out;
 }
 
-/** Modelli referenziati dal workflow con la cartella di destinazione dedotta dal campo. */
-function referencedModelsWithDir(workflow: Record<string, { inputs?: Record<string, unknown> }>): { filename: string; dir: string }[] {
-	const out = new Map<string, string>();
-	for (const node of Object.values(workflow)) {
-		for (const [k, v] of Object.entries(node.inputs ?? {})) {
-			if (typeof v === 'string' && /_name$/.test(k) && /\.(safetensors|ckpt|pt|pth|bin|gguf)$/i.test(v)) {
-				out.set(v, keyToModelDir(k));
+/**
+ * Installa i nodi custom richiesti da un FILE di workflow SCARICATO (UI o API, anche `.zip`),
+ * SENZA doverlo prima importare/convertire e SENZA ComfyUI-Manager installato in ComfyUI.
+ * Ricava le `class_type` dal file (UI: `node.type`; API: `class_type`), calcola quelle non
+ * presenti in ComfyUI (se raggiungibile; altrimenti tenta tutte quelle risolvibili) e le
+ * installa clonando i repo in `custom_nodes/`. È il "Risolvi nodi" che parte dal file UI.
+ */
+export async function installNodesFromFile(): Promise<void> {
+	const sel = await vscode.window.showOpenDialog({
+		canSelectMany: false, filters: { 'Workflow ComfyUI (JSON o ZIP)': ['json', 'zip'] },
+		title: 'Installa nodi dal workflow scaricato (UI/API/ZIP)', openLabel: 'Analizza e installa'
+	});
+	if (!sel?.length) {
+		return;
+	}
+	const bytes = await vscode.workspace.fs.readFile(sel[0]);
+	const fileName = path.basename(sel[0].fsPath);
+
+	// Estrai dall'archivio se ZIP.
+	let jsonText: string;
+	const isZip = /\.zip$/i.test(fileName) || (bytes.length >= 2 && bytes[0] === 0x50 && bytes[1] === 0x4b);
+	if (isZip) {
+		const ex = extractWorkflowFromArchive(bytes);
+		if ('error' in ex) {
+			vscode.window.showErrorMessage(`Impossibile estrarre il workflow dall'archivio: ${ex.error}`);
+			return;
+		}
+		jsonText = ex.text;
+	} else {
+		jsonText = DEC.decode(bytes);
+	}
+
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(jsonText);
+	} catch {
+		vscode.window.showErrorMessage('File non valido: non è un JSON.');
+		return;
+	}
+
+	// Ricava le class_type richieste dal file.
+	let used: string[];
+	if (isUiFormat(parsed)) {
+		used = uiInstallableClassTypes(parsed);
+	} else if (isApiFormat(parsed)) {
+		used = usedClassTypes(parsed);
+	} else {
+		// Export API DEGRADATO: i class_type mancano proprio perché quei nodi non erano
+		// installati → non sono deducibili in modo affidabile. Serve il file UI scaricato.
+		vscode.window.showWarningMessage(
+			'Da questo file non riesco a ricavare i nodi (è un export API senza class_type: '
+			+ 'i nodi custom non erano installati all\'export). Usa il file di workflow UI '
+			+ '(quello scaricato dal sito / "Save" da ComfyUI) per far rilevare e installare i nodi.'
+		);
+		return;
+	}
+	if (!used.length) {
+		vscode.window.showInformationMessage('Nessun nodo custom rilevato nel workflow.');
+		return;
+	}
+
+	// Calcola i mancanti rispetto a ComfyUI (se raggiungibile). Se ComfyUI non risponde,
+	// prova comunque a installare quelli risolvibili dal node-map (i nodi core non ci sono).
+	const endpoint = configuredComfyEndpoint();
+	let missing = used;
+	try {
+		const res = await fetch(`${endpoint}/object_info`, { signal: AbortSignal.timeout(25000) });
+		if (res.ok) {
+			const known = new Set(Object.keys(await res.json() as Record<string, unknown>));
+			missing = used.filter(c => !known.has(c));
+		}
+	} catch {
+		// ComfyUI non raggiungibile: `missing` resta `used`; i core verranno ignorati perché
+		// non presenti nella mappa dei nodi custom.
+	}
+	if (!missing.length) {
+		vscode.window.showInformationMessage('Tutti i nodi del workflow risultano già installati in ComfyUI.');
+		return;
+	}
+	await installResolvedNodes(missing, `il file «${fileName}»`);
+}
+
+/**
+ * Cerca un'installazione COMPLETA di CPython della stessa minor version (es. 3.13) da cui
+ * copiare le librerie di sviluppo (`libs/pythonXY.lib` e gli header `include/`) che mancano
+ * nel Python EMBEDDED. Prova il py-launcher e i percorsi d'installazione tipici su Windows.
+ */
+async function findFullPython(tag: string): Promise<string | undefined> {
+	const candidates: string[] = [];
+	// py-launcher (es. "py -3.13"): la via più affidabile se Python è installato.
+	try {
+		const major = tag.slice(0, 1);
+		const minor = tag.slice(1);
+		const { stdout } = await execAsync(`py -${major}.${minor} -c "import sys,os;print(os.path.dirname(sys.executable))"`, { timeout: 15000 });
+		const p = stdout.trim().split(/\r?\n/).pop()?.trim();
+		if (p) {
+			candidates.push(p);
+		}
+	} catch { /* py-launcher assente */ }
+	const la = process.env.LOCALAPPDATA;
+	if (la) {
+		candidates.push(path.join(la, 'Programs', 'Python', `Python${tag}`));
+	}
+	const pf = process.env.ProgramFiles;
+	if (pf) {
+		candidates.push(path.join(pf, `Python${tag}`));
+	}
+	candidates.push(`C:\\Python${tag}`);
+	// Preferisci una sorgente che abbia ENTRAMBI lib e header; altrimenti accetta gli header.
+	for (const c of candidates) {
+		if (c && fs.existsSync(path.join(c, 'libs', `python${tag}.lib`)) && fs.existsSync(path.join(c, 'include', 'Python.h'))) {
+			return c;
+		}
+	}
+	for (const c of candidates) {
+		if (c && (fs.existsSync(path.join(c, 'libs', `python${tag}.lib`)) || fs.existsSync(path.join(c, 'include', 'Python.h')))) {
+			return c;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Riparazione BEST-EFFORT per il fallimento di SageAttention/Triton (compilazione CUDA a
+ * runtime con tcc che esce con errore perché il Python embedded NON ha le dev libs: il classico
+ * "Failed to find Python libs"). Tenta di:
+ *  1. aggiungere `libs/pythonXY.lib` + header `Include/` al python embedded copiandoli da una
+ *     installazione COMPLETA di Python della stessa versione (se presente);
+ *  2. (re)installare `triton-windows`.
+ * NON garantisce il successo (l'alternativa sicura resta disabilitare Sage Attention nel
+ * workflow). Operazioni solo additive sul python embedded: non elimina nulla.
+ */
+export async function repairComfyTriton(): Promise<void> {
+	const { python } = comfyPaths();
+	if (!python) {
+		vscode.window.showWarningMessage('Python embedded di ComfyUI non trovato. Imposta la cartella di ComfyUI (distribuzione portable) con "MGCoding: Seleziona cartella ComfyUI" e riprova.');
+		return;
+	}
+	const pyDir = path.dirname(python);
+	// Versione del python embedded (es. "313").
+	let tag = '313';
+	try {
+		const { stdout } = await execAsync(`"${python}" -c "import sys;print(f'{sys.version_info.major}{sys.version_info.minor}')"`, { timeout: 20000 });
+		const m = stdout.trim().match(/\d{2,3}/);
+		if (m) {
+			tag = m[0];
+		}
+	} catch { /* usa il default */ }
+	const libName = `python${tag}.lib`;
+	const libsDir = path.join(pyDir, 'libs');
+	const includeDir = path.join(pyDir, 'Include');
+	const steps: string[] = [];
+
+	await vscode.window.withProgress(
+		{ location: vscode.ProgressLocation.Notification, title: 'Riparo Triton/SageAttention…', cancellable: false },
+		async () => {
+			const haveLib = fs.existsSync(path.join(libsDir, libName));
+			const haveInc = fs.existsSync(path.join(includeDir, 'Python.h'));
+			// (1) Dev libs mancanti → copia da una full Python della stessa versione.
+			if (!haveLib || !haveInc) {
+				const full = await findFullPython(tag);
+				if (full) {
+					try {
+						const srcLib = path.join(full, 'libs', libName);
+						if (!haveLib && fs.existsSync(srcLib)) {
+							fs.mkdirSync(libsDir, { recursive: true });
+							fs.copyFileSync(srcLib, path.join(libsDir, libName));
+							steps.push(`Copiato ${libName} da ${full}.`);
+						}
+						const srcInc = path.join(full, 'include');
+						if (!haveInc && fs.existsSync(path.join(srcInc, 'Python.h'))) {
+							fs.cpSync(srcInc, includeDir, { recursive: true, force: false, errorOnExist: false });
+							steps.push(`Copiati gli header Python da ${full}.`);
+						}
+					} catch (e) {
+						steps.push(`Copia delle dev libs non riuscita: ${e instanceof Error ? e.message : String(e)}.`);
+					}
+				} else {
+					steps.push(`Non ho trovato un'installazione completa di Python ${tag[0]}.${tag.slice(1)} da cui copiare ${libName}/header. Installa Python ${tag[0]}.${tag.slice(1)} (python.org, stessa versione) e riprova, oppure disabilita Sage Attention.`);
+				}
+			} else {
+				steps.push('Le dev libs Python (lib + header) erano già presenti.');
+			}
+			// (2) (re)installa triton-windows.
+			try {
+				await execAsync(`"${python}" -m pip install -U triton-windows`, { timeout: 600000 });
+				steps.push('triton-windows (re)installato.');
+			} catch (e) {
+				steps.push(`pip install triton-windows fallito: ${e instanceof Error ? e.message.split('\n')[0] : String(e)}.`);
+			}
+		}
+	);
+
+	const fixedLibs = fs.existsSync(path.join(libsDir, libName)) && fs.existsSync(path.join(includeDir, 'Python.h'));
+	if (fixedLibs) {
+		await vscode.window.showInformationMessage(
+			`Riparazione completata. ${steps.join(' ')} RIAVVIA ComfyUI e riprova il workflow.`,
+			'OK'
+		);
+	} else {
+		await vscode.window.showWarningMessage(
+			`Riparazione PARZIALE: le dev libs Python (${libName} + header) servono a Triton ma non sono state aggiunte.\n\n${steps.join('\n')}`,
+			{ modal: true, detail: 'Alternativa SICURA: nel tuo workflow ComfyUI disabilita "Sage Attention" — di solito è il nodo KJNodes "Patch Sage Attention KJ" (impostalo su "disabled") oppure metti in bypass/mute il nodo (Ctrl+B / Ctrl+M). Il workflow girerà con l\'attention di PyTorch: un po\' più lento ma funziona subito, senza Triton.' },
+			'OK'
+		);
+	}
+}
+
+/**
+ * Scansiona `models/` di ComfyUI e restituisce i file di modello SOSPETTI perché troppo piccoli
+ * (probabile download corrotto/incompleto: pagina HTML o puntatore Git LFS al posto del binario).
+ * Esclude `embeddings/` (legittimamente piccoli). Ordina dal più piccolo; lista limitata.
+ */
+export async function findSuspiciousModelFiles(maxKB = 1024): Promise<{ rel: string; kb: number }[]> {
+	const root = vscode.workspace.getConfiguration('mgcoding').get<string>('image.comfyRoot', '');
+	if (!root) {
+		return [];
+	}
+	const modelsRoot = path.join(root, 'models');
+	if (!fs.existsSync(modelsRoot)) {
+		return [];
+	}
+	const exts = new Set(['.safetensors', '.ckpt', '.pt', '.pth', '.gguf', '.bin', '.onnx', '.sft']);
+	const out: { rel: string; kb: number }[] = [];
+	const walk = (dir: string, depth: number): void => {
+		if (depth > 4) {
+			return;
+		}
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(dir, { withFileTypes: true });
+		} catch {
+			return;
+		}
+		for (const e of entries) {
+			const full = path.join(dir, e.name);
+			if (e.isDirectory()) {
+				if (e.name.toLowerCase() === 'embeddings') {
+					continue; // gli embedding sono legittimamente piccoli
+				}
+				walk(full, depth + 1);
+			} else if (exts.has(path.extname(e.name).toLowerCase())) {
+				try {
+					const kb = Math.round(fs.statSync(full).size / 1024);
+					if (kb < maxKB) {
+						out.push({ rel: path.relative(modelsRoot, full), kb });
+					}
+				} catch { /* file sparito/illeggibile */ }
+			}
+		}
+	};
+	walk(modelsRoot, 0);
+	return out.sort((a, b) => a.kb - b.kb).slice(0, 20);
+}
+
+/**
+ * Apre nel file manager di sistema la cartella `models/` di ComfyUI (o la radice di ComfyUI se
+ * `models/` non esiste). Utile quando un modello è corrotto/incompleto e va eliminato/riscaricato.
+ */
+export async function openComfyModelsFolder(): Promise<void> {
+	const root = vscode.workspace.getConfiguration('mgcoding').get<string>('image.comfyRoot', '');
+	if (!root) {
+		vscode.window.showWarningMessage('Cartella di ComfyUI non impostata. Usa "MGCoding: Seleziona cartella ComfyUI" e riprova.');
+		return;
+	}
+	const models = path.join(root, 'models');
+	const target = fs.existsSync(models) ? models : root;
+	await vscode.env.openExternal(vscode.Uri.file(target));
+}
+
+/** Mappa nomi di modulo Python ai pacchetti pip (alcuni differiscono dal nome importato). */
+function pipPackageForModule(moduleName: string): string {
+	const m = moduleName.trim().toLowerCase();
+	if (m === 'triton') {
+		return process.platform === 'win32' ? 'triton-windows' : 'triton';
+	}
+	return moduleName.trim();
+}
+
+/**
+ * Installa un modulo Python MANCANTE nel python embedded di ComfyUI (es. `sageattention`,
+ * `triton`), con conferma e progresso. Risolve i `ModuleNotFoundError` dei nodi che richiedono
+	 * dipendenze opzionali. NON garantisce il successo: alcuni pacchetti (es. `sageattention`)
+	 * richiedono build/CUDA/triton e possono fallire; in tal caso l'alternativa è disabilitare la
+	 * funzione opzionale (Sage Attention) nel workflow.
+	 */
+export async function installComfyPythonModule(moduleName: string): Promise<void> {
+	if (!moduleName || !moduleName.trim()) {
+		return;
+	}
+	const { python } = comfyPaths();
+	if (!python) {
+		vscode.window.showWarningMessage('Python embedded di ComfyUI non trovato. Imposta la cartella di ComfyUI (distribuzione portable) e riprova.');
+		return;
+	}
+	const pkg = pipPackageForModule(moduleName);
+	const ok = await vscode.window.showWarningMessage(
+		`Installo la dipendenza Python "${pkg}" nel python embedded di ComfyUI?`,
+		{
+			modal: true,
+			detail: `Serve al nodo che richiede il modulo "${moduleName}". Nota: alcuni pacchetti (es. sageattention) richiedono build/CUDA/triton e potrebbero non installarsi; in tal caso disabilita "Sage Attention" nel workflow.`
+		},
+		'Installa'
+	);
+	if (ok !== 'Installa') {
+		return;
+	}
+	await vscode.window.withProgress(
+		{ location: vscode.ProgressLocation.Notification, title: `Installo ${pkg} (pip)…`, cancellable: false },
+		async () => {
+			try {
+				await execAsync(`"${python}" -m pip install -U ${pkg}`, { timeout: 600000 });
+				vscode.window.showInformationMessage(`"${pkg}" installato nel python embedded. RIAVVIA ComfyUI per applicare.`);
+			} catch (err) {
+				vscode.window.showErrorMessage(
+					`Installazione di "${pkg}" fallita: ${err instanceof Error ? err.message.split('\n')[0] : String(err)}. `
+					+ 'Se è sageattention serve di solito triton-windows + un wheel compatibile con la tua versione di Python/torch, '
+					+ 'oppure disabilita "Sage Attention" nel workflow per eseguirlo con l\'attention standard di PyTorch.'
+				);
+			}
+		}
+	);
+}
+
+/**
+ * Nomi di modello disponibili in ComfyUI: tutte le opzioni stringa esposte da `/object_info`
+ * (i campi a tendina dei loader elencano i file effettivamente installati). Lancia se ComfyUI
+ * non è raggiungibile, così il chiamante può distinguere "nessun modello disponibile" da
+ * "impossibile interrogare ComfyUI".
+ */
+async function availableModelNames(endpoint: string): Promise<Set<string>> {
+	const available = new Set<string>();
+	const res = await fetch(`${endpoint.replace(/\/$/, '')}/object_info`, { signal: AbortSignal.timeout(8000) });
+	if (!res.ok) {
+		throw new Error(`ComfyUI /object_info ha risposto ${res.status}`);
+	}
+	const info = await res.json() as Record<string, { input?: { required?: Record<string, unknown[]>; optional?: Record<string, unknown[]> } }>;
+	for (const node of Object.values(info)) {
+		for (const grp of [node.input?.required, node.input?.optional]) {
+			for (const spec of Object.values(grp ?? {})) {
+				if (Array.isArray(spec) && Array.isArray(spec[0])) {
+					for (const opt of spec[0]) {
+						if (typeof opt === 'string') {
+							available.add(opt);
+						}
+					}
+				}
 			}
 		}
 	}
-	return [...out.entries()].map(([filename, dir]) => ({ filename, dir }));
+	return available;
 }
 
 /**
@@ -530,13 +1183,21 @@ export async function installMissingModelsForWorkflow(endpoint: string, workflow
 		vscode.window.showWarningMessage(`Workflow «${workflowName}» non trovato.`);
 		return;
 	}
-	let missing: string[];
+	// Rilevamento PURO dei modelli referenziati e mancanti tramite il modulo `modelRefs`
+	// (Req 16.1): differenza tra i modelli del workflow e quelli installati in ComfyUI.
+	const refs = detectModelRefs(wf as unknown as ApiWorkflow);
+	if (!refs.length) {
+		vscode.window.showInformationMessage('Questo workflow non referenzia modelli da scaricare.');
+		return;
+	}
+	let available: Set<string>;
 	try {
-		missing = await missingModels(endpoint, wf);
+		available = await availableModelNames(endpoint);
 	} catch (err) {
 		vscode.window.showWarningMessage(`Non riesco a leggere i modelli da ComfyUI (${err instanceof Error ? err.message : String(err)}). È avviato su ${endpoint}?`);
 		return;
 	}
+	const missing: ModelRef[] = computeMissingModels(refs, available);
 	if (!missing.length) {
 		vscode.window.showInformationMessage('Nessun modello mancante per questo workflow.');
 		return;
@@ -546,7 +1207,8 @@ export async function installMissingModelsForWorkflow(endpoint: string, workflow
 		vscode.window.showWarningMessage('Imposta prima la cartella di ComfyUI ("MGCoding: Seleziona cartella ComfyUI").');
 		return;
 	}
-	const refDirs = new Map(referencedModelsWithDir(wf).map(r => [r.filename, r.dir]));
+	// Cartella di destinazione dedotta dal tipo di campo (Req 16.2) per ogni file mancante.
+	const refDirs = new Map(missing.map(r => [r.filename, r.dir]));
 	// Lista curata di modelli di ComfyUI-Manager: filename -> {url, dir}.
 	const catalog = new Map<string, { url: string; dir: string }>();
 	try {
@@ -555,7 +1217,7 @@ export async function installMissingModelsForWorkflow(endpoint: string, workflow
 			const data = await res.json() as { models?: { filename?: string; url?: string; type?: string; save_path?: string }[] };
 			for (const m of data.models ?? []) {
 				if (m.filename && m.url) {
-					const dir = (m.save_path && m.save_path !== 'default') ? m.save_path : (m.type || 'checkpoints');
+					const dir = (m.save_path && m.save_path !== 'default') ? m.save_path : (m.type || '');
 					catalog.set(m.filename, { url: m.url, dir });
 				}
 			}
@@ -564,41 +1226,60 @@ export async function installMissingModelsForWorkflow(endpoint: string, workflow
 		// proseguo con catalog vuoto: tutti finiranno tra i "non risolti"
 	}
 	const resolved: { filename: string; url: string; dir: string }[] = [];
-	const unresolved: string[] = [];
-	for (const name of missing) {
-		const hit = catalog.get(name);
+	const unresolved: ModelRef[] = [];
+	for (const ref of missing) {
+		const hit = catalog.get(ref.filename);
 		if (hit) {
-			resolved.push({ filename: name, url: hit.url, dir: hit.dir });
+			// La cartella dedotta dal campo (Req 16.2) ha priorità; in mancanza, quella del catalogo.
+			resolved.push({ filename: ref.filename, url: hit.url, dir: ref.dir || hit.dir || 'checkpoints' });
 		} else {
-			unresolved.push(name);
+			unresolved.push(ref);
 		}
 	}
+	let cancelled = false;
 	if (resolved.length) {
+		// Conferma esplicita prima di scaricare (Req 16.2, 22.2).
 		const ok = await vscode.window.showWarningMessage(
 			`Scarico ${resolved.length} modello/i mancante/i del workflow «${workflowName}»?`,
-			{ modal: true, detail: resolved.map(r => `• ${r.filename} → models/${r.dir}`).join('\n') + (unresolved.length ? `\n\nNon trovati nel catalogo (incolla URL a parte): ${unresolved.join(', ')}` : '') },
+			{ modal: true, detail: resolved.map(r => `• ${r.filename} → models/${r.dir}`).join('\n') + (unresolved.length ? `\n\nNon trovati nel catalogo (incolla URL a parte): ${unresolved.map(r => r.filename).join(', ')}` : '') },
 			'Scarica'
 		);
 		if (ok === 'Scarica') {
 			for (const r of resolved) {
 				try {
+					// `downloadFile` mostra avanzamento e consente l'annullamento (Req 16.4).
 					await downloadFile(r.url, path.join(modelsDir, r.dir, r.filename), r.filename);
 				} catch (err) {
+					if (isAbortError(err)) {
+						cancelled = true;
+						break;
+					}
+					// Riporta il modello non scaricato e la causa (Req 16.5).
 					vscode.window.showWarningMessage(`Download di ${r.filename} fallito: ${err instanceof Error ? err.message : String(err)}`);
 				}
 			}
 		}
 	}
-	// Per i non risolti: offri l'incolla-URL uno per uno.
-	for (const name of unresolved) {
-		const url = (await vscode.window.showInputBox({ title: `Modello non trovato: ${name}`, prompt: `Incolla l'URL di download per "${name}" (vuoto = salta)`, placeHolder: 'https://...' }))?.trim();
-		if (url) {
-			try {
-				await downloadFile(url, path.join(modelsDir, refDirs.get(name) ?? 'checkpoints', name), name);
-			} catch (err) {
-				vscode.window.showWarningMessage(`Download di ${name} fallito: ${err instanceof Error ? err.message : String(err)}`);
+	// Per i non risolti: chiedi un URL di download manuale (Req 16.3), uno per uno.
+	if (!cancelled) {
+		for (const ref of unresolved) {
+			const url = (await vscode.window.showInputBox({ title: `Modello non trovato: ${ref.filename}`, prompt: `Incolla l'URL di download per "${ref.filename}" (vuoto = salta)`, placeHolder: 'https://...' }))?.trim();
+			if (url) {
+				try {
+					await downloadFile(url, path.join(modelsDir, refDirs.get(ref.filename) ?? 'checkpoints', ref.filename), ref.filename);
+				} catch (err) {
+					if (isAbortError(err)) {
+						cancelled = true;
+						break;
+					}
+					vscode.window.showWarningMessage(`Download di ${ref.filename} fallito: ${err instanceof Error ? err.message : String(err)}`);
+				}
 			}
 		}
+	}
+	if (cancelled) {
+		vscode.window.showInformationMessage('Download modelli annullato.');
+		return;
 	}
 	vscode.window.showInformationMessage('Download modelli completato. Se hai installato anche dei nodi, riavvia ComfyUI.');
 }
@@ -611,31 +1292,17 @@ export async function fixWorkflow(endpoint: string, workflowName: string): Promi
 
 /** Modelli del workflow NON disponibili in ComfyUI (confronto con /object_info). */
 export async function missingModels(endpoint: string, workflow: Record<string, { inputs?: Record<string, unknown> }>): Promise<string[]> {
-	const referenced = referencedModels(workflow);
-	if (!referenced.length) {
+	// Rilevamento PURO tramite `modelRefs` (Req 16.1): differenza tra referenziati e disponibili.
+	const refs = detectModelRefs(workflow as unknown as ApiWorkflow);
+	if (!refs.length) {
 		return [];
 	}
-	let available = new Set<string>();
+	let available: Set<string>;
 	try {
-		const res = await fetch(`${endpoint.replace(/\/$/, '')}/object_info`, { signal: AbortSignal.timeout(8000) });
-		if (res.ok) {
-			const info = await res.json() as Record<string, { input?: { required?: Record<string, unknown[]>; optional?: Record<string, unknown[]> } }>;
-			for (const node of Object.values(info)) {
-				for (const grp of [node.input?.required, node.input?.optional]) {
-					for (const spec of Object.values(grp ?? {})) {
-						if (Array.isArray(spec) && Array.isArray(spec[0])) {
-							for (const opt of spec[0]) {
-								if (typeof opt === 'string') {
-									available.add(opt);
-								}
-							}
-						}
-					}
-				}
-			}
-		}
+		available = await availableModelNames(endpoint);
 	} catch {
-		available = new Set();
+		// ComfyUI non interrogabile: nessuna disponibilità nota.
+		available = new Set<string>();
 	}
-	return referenced.filter(r => !available.has(r));
+	return computeMissingModels(refs, available).map(r => r.filename);
 }

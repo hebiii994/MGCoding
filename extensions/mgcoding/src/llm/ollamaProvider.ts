@@ -4,6 +4,7 @@
  *  tradotto da/verso il formato Anthropic per condividere lo stesso loop agentico.
  *--------------------------------------------------------------------------------------------*/
 
+import { computeBudget } from './contextManager';
 import { AgentStreamParams, AnthropicMessage, AnthropicStreamEvent, LLMError, LLMProvider, LLMRequest, parseDataUrl, ToolResultPart, toolResultText } from './types';
 
 export interface OllamaConfig {
@@ -12,6 +13,8 @@ export interface OllamaConfig {
 	think?: boolean;
 	/** Temperatura bassa per i task agentici (riduce JSON spazzatura/allucinazioni). */
 	temperature?: number;
+	/** Override esplicito mgcoding.ollama.numCtx (intero positivo) per la finestra di contesto. */
+	numCtx?: number;
 }
 
 interface OllamaMessage {
@@ -59,6 +62,148 @@ export class OllamaProvider implements LLMProvider {
 	/** Cache delle capability per modello (per non interrogare /api/show ogni volta). */
 	private readonly toolCapCache = new Map<string, boolean>();
 
+	/** Cache della finestra di contesto massima per modello (da /api/show: model_info.*context_length). */
+	private readonly maxCtxCache = new Map<string, number>();
+
+	/** Cache dell'esito della probe funzionale del tool-use per modello. */
+	private readonly probeCache = new Map<string, boolean>();
+
+	/**
+	 * Ricava e mette in cache la finestra di contesto massima del modello da /api/show
+	 * (campo `model_info.*context_length`). Restituisce undefined se non determinabile.
+	 */
+	private async getModelMaxCtx(model: string): Promise<number | undefined> {
+		const cached = this.maxCtxCache.get(model);
+		if (cached !== undefined) {
+			return cached;
+		}
+		const endpoint = this.getConfig().endpoint.replace(/\/$/, '');
+		try {
+			const res = await fetch(`${endpoint}/api/show`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				// "model" (Ollama recenti) e "name" (versioni precedenti) per compatibilità.
+				body: JSON.stringify({ model, name: model })
+			});
+			if (!res.ok) {
+				return undefined;
+			}
+			const data = await res.json() as { model_info?: Record<string, unknown> };
+			const info = data.model_info ?? {};
+			// La chiave varia per architettura (es. "qwen2.context_length", "llama.context_length"):
+			// si individua quella che termina con "context_length".
+			for (const [key, value] of Object.entries(info)) {
+				if (/context_length$/i.test(key) && typeof value === 'number' && Number.isInteger(value) && value > 0) {
+					this.maxCtxCache.set(model, value);
+					return value;
+				}
+			}
+			return undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	/**
+	 * Deriva il num_ctx effettivo da inviare in `options.num_ctx` (Req. 1.1, 1.2, 1.3, 1.4):
+	 * riusa la precedenza pura del Context_Manager — config (intero positivo) > finestra max
+	 * del modello (da /api/show) > DEFAULT_NUM_CTX. Qui la riserva risposta è ininfluente
+	 * (serve solo il valore di num_ctx), quindi si passa responseReserve a 0.
+	 */
+	private async resolveNumCtx(model: string): Promise<number> {
+		const configNumCtx = this.getConfig().numCtx;
+		const modelMaxCtx = await this.getModelMaxCtx(model);
+		return computeBudget({ configNumCtx, modelMaxCtx, systemTokens: 0, toolTokens: 0, responseReserve: 0 }).numCtx;
+	}
+
+	/**
+	 * num_ctx effettivo per il modello indicato (default: modello attivo). Espone al guscio
+	 * dell'Agent_Loop la stessa risoluzione usata internamente (config > finestra max > default),
+	 * così il budgeting della cronologia resta coerente con il valore davvero inviato a Ollama
+	 * (Req. 1.5).
+	 */
+	async effectiveNumCtx(model?: string): Promise<number> {
+		return this.resolveNumCtx(model ?? this.getConfig().model);
+	}
+
+	/**
+	 * Probe funzionale del tool-use nativo (Req. 3.2): invia una mini-richiesta con un tool
+	 * banale (`echo`) e verifica che il modello emetta una tool-call nativa valida e parsabile.
+	 * Solo il superamento giustifica la promozione del modello al tier `native`; un fallimento,
+	 * anche con `tools` dichiarato da /api/show, lo limita a `structured`. Esito in cache di sessione.
+	 */
+	async probeToolUse(model: string): Promise<boolean> {
+		const cached = this.probeCache.get(model);
+		if (cached !== undefined) {
+			return cached;
+		}
+		const endpoint = this.getConfig().endpoint.replace(/\/$/, '');
+		// Tool banale con schema noto: il modello deve invocarlo restituendo un argomento.
+		const probeTool = {
+			type: 'function',
+			function: {
+				name: 'echo',
+				description: 'Restituisce il testo ricevuto.',
+				parameters: {
+					type: 'object',
+					properties: { text: { type: 'string', description: 'Il testo da restituire.' } },
+					required: ['text']
+				}
+			}
+		};
+		const messages = [
+			{ role: 'user', content: 'Chiama lo strumento "echo" con il parametro text impostato a "ping". Usa una tool call nativa.' }
+		];
+		try {
+			const numCtx = await this.resolveNumCtx(model);
+			const res = await fetch(`${endpoint}/api/chat`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ model, messages, tools: [probeTool], options: { temperature: 0, num_ctx: numCtx }, stream: false })
+			});
+			if (!res.ok) {
+				this.probeCache.set(model, false);
+				return false;
+			}
+			const data = await res.json() as { message?: { tool_calls?: { function?: { name?: string; arguments?: unknown } }[] } };
+			const ok = this.isValidProbeToolCall(data.message?.tool_calls);
+			this.probeCache.set(model, ok);
+			return ok;
+		} catch {
+			this.probeCache.set(model, false);
+			return false;
+		}
+	}
+
+	/** Vero se almeno una tool-call ha un nome valido e argomenti parsabili in oggetto. */
+	private isValidProbeToolCall(toolCalls: { function?: { name?: string; arguments?: unknown } }[] | undefined): boolean {
+		if (!Array.isArray(toolCalls) || toolCalls.length === 0) {
+			return false;
+		}
+		for (const tc of toolCalls) {
+			const name = tc.function?.name;
+			if (typeof name !== 'string' || name.length === 0) {
+				continue;
+			}
+			const args = tc.function?.arguments;
+			// Gli argomenti possono arrivare come oggetto o come stringa JSON: entrambi vanno parsati.
+			if (args && typeof args === 'object') {
+				return true;
+			}
+			if (typeof args === 'string') {
+				try {
+					const parsed = JSON.parse(args);
+					if (parsed && typeof parsed === 'object') {
+						return true;
+					}
+				} catch {
+					// argomenti non parsabili: questa tool-call non è valida
+				}
+			}
+		}
+		return false;
+	}
+
 	/**
 	 * Chiamata NON-stream con output VINCOLATO a uno JSON schema (grammar di llama.cpp via
 	 * Ollama format): il risultato è garantito conforme allo schema. Ritorna il testo (JSON).
@@ -67,14 +212,21 @@ export class OllamaProvider implements LLMProvider {
 		const cfg = this.getConfig();
 		const endpoint = cfg.endpoint.replace(/\/$/, '');
 		const msgs = [...(system ? [{ role: 'system', content: system }] : []), ...messages];
-		const res = await fetch(`${endpoint}/api/chat`, {
-			method: 'POST',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ model: cfg.model, messages: msgs, format: schema, options: { temperature: cfg.temperature ?? 0.2 }, stream: false }),
-			signal
-		});
+		const numCtx = await this.resolveNumCtx(cfg.model);
+		let res: Response;
+		try {
+			res = await fetch(`${endpoint}/api/chat`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ model: cfg.model, messages: msgs, format: schema, options: { temperature: cfg.temperature ?? 0.2, num_ctx: numCtx }, stream: false }),
+				signal
+			});
+		} catch (err) {
+			// Server locale irraggiungibile sul percorso strutturato (Req. 9.1): cita l'endpoint.
+			throw new LLMError(`Impossibile contattare Ollama su ${endpoint}. È in esecuzione?`, err, { kind: 'unreachable', providerId: this.id });
+		}
 		if (!res.ok) {
-			throw new LLMError(`Ollama ha risposto ${res.status}`);
+			throw new LLMError(`Ollama ha risposto ${res.status}`, undefined, { providerId: this.id });
 		}
 		const data = await res.json() as { message?: { content?: string } };
 		return data.message?.content ?? '';
@@ -146,7 +298,7 @@ export class OllamaProvider implements LLMProvider {
 				signal
 			});
 		} catch (err) {
-			throw new LLMError(`Impossibile contattare Ollama su ${endpoint}. È in esecuzione?`, err);
+			throw new LLMError(`Impossibile contattare Ollama su ${endpoint}. È in esecuzione?`, err, { kind: 'unreachable', providerId: this.id });
 		}
 		if (!res.ok || !res.body) {
 			const text = await res.text().catch(() => '');
@@ -199,6 +351,8 @@ export class OllamaProvider implements LLMProvider {
 			options.repeat_penalty = 1.3;
 			options.top_p = 0.9;
 		}
+		// Imposta esplicitamente la finestra di contesto (Req. 1.1, 1.3): config > modello > default.
+		options.num_ctx = await this.resolveNumCtx(cfg.model);
 		let thinkOpen = false;
 		for await (const evt of this.postNdjson({ model: cfg.model, messages, options, ...(cfg.think ? { think: true } : {}) }, req.signal)) {
 			if (evt.error) {
@@ -271,12 +425,13 @@ export class OllamaProvider implements LLMProvider {
 		const allowImages = await this.supportsVision(cfg.model);
 		const messages = this.toOllamaMessages(params.system, params.messages, allowImages);
 		const tools = params.tools.map(t => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } }));
+		const numCtx = await this.resolveNumCtx(cfg.model);
 
 		let textStarted = false;
 		let toolIndex = 0;
 		let sawTool = false;
 
-		for await (const evt of this.postNdjson({ model: cfg.model, messages, tools, options: { temperature: cfg.temperature ?? 0.2 } }, params.signal)) {
+		for await (const evt of this.postNdjson({ model: cfg.model, messages, tools, options: { temperature: cfg.temperature ?? 0.2, num_ctx: numCtx } }, params.signal)) {
 			if (evt.error) {
 				throw new LLMError(`Ollama error: ${evt.error}`);
 			}

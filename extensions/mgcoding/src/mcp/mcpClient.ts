@@ -9,7 +9,7 @@ import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
 import * as vscode from 'vscode';
 import { ToolSpec } from '../agent/tools';
 import { AnthropicToolDef } from '../llm/types';
-import { resolveFile } from '../util/paths';
+import { resolveFile } from '../util/featurePaths';
 
 const DEC = new TextDecoder();
 const DEFAULT_TIMEOUT_MS = 60000;

@@ -5,8 +5,10 @@
 import * as vscode from 'vscode';
 import { runAgent } from './agent/agentLoop';
 import { initAgentStats, statsSummary } from './agent/agentStats';
-import { pickComfyFolder, downloadImageModel, listWorkflows, listCheckpoints, installMissingNodesForWorkflow, installMissingModelsForWorkflow, fixWorkflow, importWorkflow, pickGalleryFolder } from './media/comfyHelper';
+import { pickComfyFolder, downloadImageModel, listWorkflows, listCheckpoints, installMissingNodesForWorkflow, installMissingModelsForWorkflow, fixWorkflow, importWorkflow, pickGalleryFolder, installNodesFromFile, repairComfyTriton, openComfyModelsFolder } from './media/comfyHelper';
 import { ImageStudioProvider } from './media/imageStudioView';
+import { ComfyChatProvider } from './chat/comfyChatProvider';
+import { startComfyUI, stopComfyUI, restartComfyUI } from './media/comfyLifecycle';
 import { openComfyCanvas } from './media/comfyCanvas';
 import { ChatViewProvider } from './chat/chatViewProvider';
 import { registerDiffApproval } from './edit/diffApproval';
@@ -130,12 +132,15 @@ export function activate(context: vscode.ExtensionContext): void {
 	const steeringTree = new SteeringTreeProvider();
 	const mcpTree = new McpTreeProvider(() => mcpManager.getStatuses());
 	const imageStudio = new ImageStudioProvider(context.extensionUri);
+	const comfyChat = new ComfyChatProvider(context.extensionUri, registry);
 	context.subscriptions.push(
 		vscode.window.registerTreeDataProvider('mgcoding.specs', specsTree),
 		vscode.window.registerTreeDataProvider('mgcoding.hooks', hooksTree),
 		vscode.window.registerTreeDataProvider('mgcoding.steering', steeringTree),
 		vscode.window.registerTreeDataProvider('mgcoding.mcp', mcpTree),
-		vscode.window.registerWebviewViewProvider(ImageStudioProvider.viewType, imageStudio)
+		vscode.window.registerWebviewViewProvider(ImageStudioProvider.viewType, imageStudio),
+		vscode.window.registerWebviewViewProvider(ComfyChatProvider.viewType, comfyChat, { webviewOptions: { retainContextWhenHidden: true } }),
+		vscode.commands.registerCommand('mgcoding.openComfyChat', () => vscode.commands.executeCommand('mgcoding.comfyChat.focus'))
 	);
 
 	// Telemetria LOCALE dell'agente (iterazioni/tool/errori per run; nessun dato lascia il PC).
@@ -165,6 +170,31 @@ export function activate(context: vscode.ExtensionContext): void {
 			vscode.window.showInformationMessage(pick.startsWith('(auto') ? 'Checkpoint: automatico.' : `Checkpoint attivo: ${pick}`);
 		}),
 		vscode.commands.registerCommand('mgcoding.importWorkflow', () => importWorkflow()),
+		vscode.commands.registerCommand('mgcoding.installNodesFromFile', () => installNodesFromFile()),
+		vscode.commands.registerCommand('mgcoding.repairComfyTriton', () => repairComfyTriton()),
+		vscode.commands.registerCommand('mgcoding.openComfyModelsFolder', () => openComfyModelsFolder()),
+		vscode.commands.registerCommand('mgcoding.startComfyUI', async () => {
+			const r = await startComfyUI();
+			if (r.status === 'ready') {
+				vscode.window.showInformationMessage('ComfyUI è pronto.');
+			} else if (r.status !== 'cancelled') {
+				vscode.window.showWarningMessage(`Avvio ComfyUI: ${r.status}${r.detail ? ` — ${r.detail}` : ''}`);
+			}
+		}),
+		vscode.commands.registerCommand('mgcoding.stopComfyUI', async () => {
+			const stopped = await stopComfyUI();
+			vscode.window.showInformationMessage(stopped
+				? 'ComfyUI (avviato da MGCoding) arrestato.'
+				: 'Nessun ComfyUI gestito da MGCoding da arrestare (se l\'hai avviato dal tuo .bat, chiudilo da lì o usa "Riavvia ComfyUI").');
+		}),
+		vscode.commands.registerCommand('mgcoding.restartComfyUI', async () => {
+			const r = await restartComfyUI();
+			if (r.status === 'ready') {
+				vscode.window.showInformationMessage('ComfyUI riavviato e pronto.');
+			} else if (r.status !== 'cancelled') {
+				vscode.window.showWarningMessage(`Riavvio ComfyUI: ${r.status}${r.detail ? ` — ${r.detail}` : ''}`);
+			}
+		}),
 		vscode.commands.registerCommand('mgcoding.pickGalleryFolder', () => pickGalleryFolder()),
 		vscode.commands.registerCommand('mgcoding.openComfyCanvas', () => openComfyCanvas()),
 		vscode.commands.registerCommand('mgcoding.generateBatch', async () => {
@@ -329,6 +359,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		}),
 		vscode.commands.registerCommand('mgcoding.setApiKey', () => registry.setApiKey()),
 		vscode.commands.registerCommand('mgcoding.setOpenAIKey', () => registry.setOpenAIKey()),
+		vscode.commands.registerCommand('mgcoding.setGlmKey', () => registry.setGlmKey()),
 		vscode.commands.registerCommand('mgcoding.testMicrophone', () => chat.testMicrophone()),
 		vscode.commands.registerCommand('mgcoding.switchProfile', () => chat.switchProfile()),
 		vscode.commands.registerCommand('mgcoding.editProfile', () => chat.editProfile()),

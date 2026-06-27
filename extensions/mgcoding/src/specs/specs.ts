@@ -9,8 +9,11 @@ import { runAgent } from '../agent/agentLoop';
 import { setSpecWriteGuard } from '../agent/tools';
 import { ProviderRegistry } from '../llm/registry';
 import { RunReporter } from '../run/runView';
-import { resolveFeatureDirs } from '../util/paths';
+import { buildValidationReport, type ValidationReport } from './specValidator';
+import type { SpecPhase } from '../llm/types';
+import { resolveFeatureDirs } from '../util/featurePaths';
 import { splitThink } from '../util/parsing';
+import { exec } from 'child_process';
 
 /** Genera un report finale (cosa è stato fatto + come avviarlo), salvato anche in REPORT.md. */
 async function generateRunReport(registry: ProviderRegistry, specDir: vscode.Uri, specName: string, completed: string[], reporter: RunReporter): Promise<void> {
@@ -48,6 +51,77 @@ export function slugify(name: string): string {
 export function specsRoot(): vscode.Uri | undefined {
 	const f = vscode.workspace.workspaceFolders;
 	return f && f.length ? vscode.Uri.joinPath(f[0].uri, '.mg', 'specs') : undefined;
+}
+
+/* -------------------------------------------------------------------------------------------
+ * Verifica post-task (opt-in): dopo aver implementato un task, esegue un comando di build/test
+ * e segna il task come "fatto" SOLO se passa (altrimenti resta da fare → ritentabile).
+ * Disattivata di default (`mgcoding.spec.verifyAfterTask`): su repo grandi la build è lenta.
+ * ----------------------------------------------------------------------------------------- */
+
+/** Serializza le verifiche così due build non girano mai in parallelo (anche tra wave). */
+let verifyChain: Promise<unknown> = Promise.resolve();
+
+/** Comando di verifica da usare: esplicito (`spec.verifyCommand`) o auto-rilevato dagli script. */
+async function resolveVerifyCommand(): Promise<string | undefined> {
+	const cfg = vscode.workspace.getConfiguration('mgcoding');
+	if (!cfg.get<boolean>('spec.verifyAfterTask', false)) {
+		return undefined;
+	}
+	const explicit = cfg.get<string>('spec.verifyCommand', '').trim();
+	if (explicit) {
+		return explicit;
+	}
+	const folders = vscode.workspace.workspaceFolders;
+	if (!folders?.length) {
+		return undefined;
+	}
+	try {
+		const pkg = JSON.parse(DEC.decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(folders[0].uri, 'package.json')))) as { scripts?: Record<string, string> };
+		const s = pkg.scripts ?? {};
+		// Preferisci i controlli VELOCI a quelli lenti: typecheck/compile prima di build.
+		for (const name of ['typecheck', 'type-check', 'check-types', 'compile', 'lint', 'build', 'test']) {
+			if (s[name]) {
+				return `npm run ${name}`;
+			}
+		}
+	} catch {
+		// nessun package.json: nessuna verifica auto
+	}
+	return undefined;
+}
+
+/** Esegue un comando di verifica a completamento, restituendo esito ed estratto dell'output. */
+function runVerifyCommand(cmd: string, cwd: string, signal?: AbortSignal): Promise<{ ok: boolean; output: string }> {
+	return new Promise(resolve => {
+		const child = exec(cmd, { cwd, maxBuffer: 16 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+			resolve({ ok: !err, output: `${stdout ?? ''}\n${stderr ?? ''}`.trim() });
+		});
+		signal?.addEventListener('abort', () => { try { child.kill(); } catch { /* */ } }, { once: true });
+	});
+}
+
+/**
+ * Verifica un task appena implementato (se la verifica è attiva). Ritorna `true` se la verifica
+ * passa o non è configurata; `false` se la build/test fallisce (il task NON va segnato fatto).
+ */
+async function verifyTask(reporter: RunReporter, tag: string, signal?: AbortSignal): Promise<boolean> {
+	const cmd = await resolveVerifyCommand();
+	const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+	if (!cmd || !cwd) {
+		return true;
+	}
+	reporter.log(`🧪 ${tag} verifica: ${cmd}`);
+	const run = (): Promise<{ ok: boolean; output: string }> => runVerifyCommand(cmd, cwd, signal);
+	const p = verifyChain.then(run, run);
+	verifyChain = p.catch(() => { /* non bloccare la catena su errore */ });
+	const res = await p;
+	if (res.ok) {
+		reporter.log(`✓ ${tag} verifica superata`);
+		return true;
+	}
+	reporter.log(`✗ ${tag} verifica FALLITA — il task resta da fare e potrà essere ritentato:\n${res.output.slice(-700)}`);
+	return false;
 }
 
 /** Regola trasversale: gli identificatori di codice sono SEMPRE in inglese. */
@@ -124,6 +198,61 @@ async function generatePhase(
 	);
 }
 
+/* -------------------------------------------------------------------------------------------
+ * Gating del workflow Spec (Spec_Validator): al passaggio di fase si valida il documento
+ * appena generato. Se la validazione non è superata (`canAdvance === false`) si mostrano le
+ * sezioni mancanti / i criteri scoperti e si BLOCCA l'avvio della fase successiva, lasciando
+ * comunque completata la fase corrente (Req. 6.3, 6.5). La fase successiva non parte finché
+ * l'approvazione esplicita dell'utente non è registrata (Req. 6.6).
+ * ----------------------------------------------------------------------------------------- */
+
+/** Formatta in modo leggibile i problemi di validazione (sezioni mancanti / criteri scoperti). */
+function formatValidationIssues(report: ValidationReport): string {
+	const parts: string[] = [];
+	const missing = report.structural.filter(s => !s.present).map(s => s.section);
+	if (missing.length) {
+		parts.push(`Sezioni mancanti: ${missing.join(', ')}`);
+	}
+	const uncovered = report.coverage.filter(c => !c.covered).map(c => c.criterion);
+	if (uncovered.length) {
+		parts.push(`Criteri non coperti da alcun task: ${uncovered.join(', ')}`);
+	}
+	return parts.length ? parts.join('\n') : 'Validazione non superata.';
+}
+
+/**
+ * Esegue il gating tra fasi dello workflow Spec (Req. 6.3, 6.5, 6.6):
+ *  - valida il documento appena generato per la fase corrente;
+ *  - se `canAdvance` è false, mostra le sezioni mancanti / i criteri scoperti e BLOCCA
+ *    l'avvio della fase successiva (la fase corrente resta comunque completata);
+ *  - altrimenti chiede l'approvazione esplicita: la fase successiva non parte finché
+ *    l'approvazione non è registrata.
+ * Ritorna `true` solo quando è consentito avviare la fase successiva.
+ */
+export async function gatePhaseTransition(
+	phase: SpecPhase,
+	phaseDocument: string,
+	approvalPrompt: string,
+	requirementsMd?: string,
+	tasksMd?: string
+): Promise<boolean> {
+	const report = buildValidationReport({ phase, phaseDocument, requirementsMd, tasksMd });
+	if (!report.canAdvance) {
+		// Validazione non superata: mostra i problemi e impedisce l'avanzamento (Req. 6.3, 6.5).
+		const issues = formatValidationIssues(report);
+		await vscode.window.showWarningMessage(
+			`Validazione della fase "${phase}" non superata: impossibile avanzare alla fase successiva.\n\n${issues}\n\nCorreggi il documento e rigenera la spec per procedere.`,
+			{ modal: true }, 'Ho capito'
+		);
+		return false;
+	}
+	// Approvazione esplicita: solo dopo la registrazione si avvia la fase successiva (Req. 6.6).
+	const ok = await vscode.window.showInformationMessage(
+		approvalPrompt, { modal: true }, 'Approva e continua'
+	);
+	return ok === 'Approva e continua';
+}
+
 export async function createSpec(registry: ProviderRegistry, refresh: () => void): Promise<void> {
 	const root = specsRoot();
 	if (!root) {
@@ -152,11 +281,8 @@ export async function createSpec(registry: ProviderRegistry, refresh: () => void
 	await writeAndOpen(vscode.Uri.joinPath(dir, 'requirements.md'), requirements);
 	refresh();
 
-	const okReq = await vscode.window.showInformationMessage(
-		`Requirements per "${name}" generati. Procedo col design?`,
-		{ modal: true }, 'Approva e continua'
-	);
-	if (okReq !== 'Approva e continua') {
+	// Gating requirements → design: valida la struttura e registra l'approvazione (Req. 6.5, 6.6).
+	if (!(await gatePhaseTransition('requirements', requirements, `Requirements per "${name}" generati. Procedo col design?`))) {
 		return;
 	}
 
@@ -169,11 +295,8 @@ export async function createSpec(registry: ProviderRegistry, refresh: () => void
 	);
 	await writeAndOpen(vscode.Uri.joinPath(dir, 'design.md'), design);
 
-	const okDes = await vscode.window.showInformationMessage(
-		`Design per "${name}" generato. Procedo coi task?`,
-		{ modal: true }, 'Approva e continua'
-	);
-	if (okDes !== 'Approva e continua') {
+	// Gating design → tasks: valida la struttura e registra l'approvazione (Req. 6.5, 6.6).
+	if (!(await gatePhaseTransition('design', design, `Design per "${name}" generato. Procedo coi task?`, requirements))) {
 		return;
 	}
 
@@ -186,6 +309,17 @@ export async function createSpec(registry: ProviderRegistry, refresh: () => void
 	);
 	await writeAndOpen(vscode.Uri.joinPath(dir, 'tasks.md'), tasks);
 	refresh();
+
+	// Validazione finale della fase tasks: segnala i criteri di accettazione non coperti
+	// da alcun task (Req. 6.3); la fase resta comunque completata.
+	const tasksReport = buildValidationReport({ phase: 'tasks', phaseDocument: tasks, requirementsMd: requirements, tasksMd: tasks });
+	if (!tasksReport.canAdvance) {
+		vscode.window.showWarningMessage(
+			`Spec "${name}" completata, ma la validazione dei task ha rilevato problemi:\n\n${formatValidationIssues(tasksReport)}`,
+			{ modal: true }, 'Ho capito'
+		);
+		return;
+	}
 
 	vscode.window.showInformationMessage(`Spec "${name}" completata in .mg/specs/${slugify(name)}/`);
 }
@@ -258,21 +392,21 @@ export async function runSpecTasks(registry: ProviderRegistry, specDir: vscode.U
 	const completed: string[] = [];
 	setSpecWriteGuard(true);
 	try {
-	for (let i = 0; i < pending.length; i++) {
-		if (signal?.aborted) {
-			reporter.log('⏹ Esecuzione interrotta.');
-			break;
-		}
-		const task = pending[i];
-		reporter.setStatus(i, 'running');
-		reporter.log(`▶ [${i + 1}/${pending.length} da fare] ${task.text}`);
+		for (let i = 0; i < pending.length; i++) {
+			if (signal?.aborted) {
+				reporter.log('⏹ Esecuzione interrotta.');
+				break;
+			}
+			const task = pending[i];
+			reporter.setStatus(i, 'running');
+			reporter.log(`▶ [${i + 1}/${pending.length} da fare] ${task.text}`);
 
-		// Segna il task come "in corso" ([~]) nel file, così è visibile ovunque.
-		tasksMd = setTaskMark(tasksMd, task.lineIdx, '~');
-		await vscode.workspace.fs.writeFile(tasksUri, ENC.encode(tasksMd));
-		refresh();
+			// Segna il task come "in corso" ([~]) nel file, così è visibile ovunque.
+			tasksMd = setTaskMark(tasksMd, task.lineIdx, '~');
+			await vscode.workspace.fs.writeFile(tasksUri, ENC.encode(tasksMd));
+			refresh();
 
-		const prompt = `Stai implementando la funzionalità "${specName}" in modo spec-driven. Implementa SOLO il task indicato, usando i tool per leggere e scrivere i file necessari nel workspace.
+			const prompt = `Stai implementando la funzionalità "${specName}" in modo spec-driven. Implementa SOLO il task indicato, usando i tool per leggere e scrivere i file necessari nel workspace.
 
 # Requisiti
 ${requirements || '(non disponibili)'}
@@ -286,28 +420,35 @@ ${task.text}
 NON modificare i file della spec (requirements.md, design.md, tasks.md): allo stato dei task (spunte) ci pensa MGCoding.
 Quando hai finito di implementare questo task, fornisci un breve riepilogo di cosa hai fatto.`;
 
-		const messages = [{ role: 'user' as const, content: prompt }];
-		let ok = false;
-		try {
-			await runAgent(registry, messages, {
-				onAssistantText: t => reporter.log(`🤖 ${t.slice(0, 300)}`),
-				onToolStart: c => reporter.log(`🔧 ${c.tool} ${JSON.stringify(c.args).slice(0, 160)}`),
-				onToolResult: r => reporter.log(`↳ ${r.slice(0, 200)}`)
-			}, signal);
-			reporter.setStatus(i, 'done');
-			ok = true;
-			completed.push(task.text);
-		} catch (err) {
-			reporter.setStatus(i, 'error');
-			reporter.log(`[errore] ${String(err)}`);
-		}
+			const messages = [{ role: 'user' as const, content: prompt }];
+			let ok = false;
+			try {
+				await runAgent(registry, messages, {
+					onAssistantText: t => reporter.log(`🤖 ${t.slice(0, 300)}`),
+					onToolStart: c => reporter.log(`🔧 ${c.tool} ${JSON.stringify(c.args).slice(0, 160)}`),
+					onToolResult: r => reporter.log(`↳ ${r.slice(0, 200)}`)
+				}, signal);
+				ok = true;
+			} catch (err) {
+				reporter.setStatus(i, 'error');
+				reporter.log(`[errore] ${String(err)}`);
+			}
+			// Verifica post-task (opt-in): segna fatto SOLO se build/test passa.
+			if (ok && !(await verifyTask(reporter, `[${i + 1}/${pending.length}]`, signal))) {
+				ok = false;
+				reporter.setStatus(i, 'error');
+			}
+			if (ok) {
+				reporter.setStatus(i, 'done');
+				completed.push(task.text);
+			}
 
-		// Aggiorna lo stato sulla NOSTRA copia autorevole: fatto ([x]) se riuscito,
-		// altrimenti torna da fare ([ ]) così è ritentabile.
-		tasksMd = setTaskMark(tasksMd, task.lineIdx, ok ? 'x' : ' ');
-		await vscode.workspace.fs.writeFile(tasksUri, ENC.encode(tasksMd));
-		refresh();
-	}
+			// Aggiorna lo stato sulla NOSTRA copia autorevole: fatto ([x]) se riuscito,
+			// altrimenti torna da fare ([ ]) così è ritentabile.
+			tasksMd = setTaskMark(tasksMd, task.lineIdx, ok ? 'x' : ' ');
+			await vscode.workspace.fs.writeFile(tasksUri, ENC.encode(tasksMd));
+			refresh();
+		}
 	} finally {
 		setSpecWriteGuard(false);
 	}
@@ -441,33 +582,39 @@ NON modificare i file della spec (requirements/design/tasks.md). Al termine un b
 				onToolStart: c => reporter.log(`🔧 ${tag} ${c.tool} ${JSON.stringify(c.args).slice(0, 110)}`),
 				onToolResult: r => reporter.log(`↳ ${tag} ${r.slice(0, 140)}`)
 			}, signal);
-			reporter.log(`✓ ${tag} completato`);
 			ok = true;
-			completedP.push(task.text);
 		} catch (err) {
 			reporter.log(`✗ ${tag} ${String(err)}`);
+		}
+		// Verifica post-task (opt-in, serializzata): completa solo se build/test passa.
+		if (ok && !(await verifyTask(reporter, tag, signal))) {
+			ok = false;
+		}
+		if (ok) {
+			reporter.log(`✓ ${tag} completato`);
+			completedP.push(task.text);
 		}
 		await setMark(task.lineIdx, ok ? 'x' : ' ');
 	};
 
 	setSpecWriteGuard(true);
 	try {
-	for (let w = 0; w < waves.length; w++) {
-		if (signal?.aborted) {
-			reporter.log('⏹ Interrotto.');
-			break;
-		}
-		const wave = waves[w];
-		reporter.log(`\n── Wave ${w + 1}/${waves.length} · ${wave.length} task in parallelo ──`);
-		// Esegue la wave a gruppi di `concurrency` per non sovraccaricare.
-		for (let s = 0; s < wave.length; s += Math.max(1, concurrency)) {
+		for (let w = 0; w < waves.length; w++) {
 			if (signal?.aborted) {
+				reporter.log('⏹ Interrotto.');
 				break;
 			}
-			const slice = wave.slice(s, s + Math.max(1, concurrency));
-			await Promise.all(slice.map(i => runOne(i, w + 1)));
+			const wave = waves[w];
+			reporter.log(`\n── Wave ${w + 1}/${waves.length} · ${wave.length} task in parallelo ──`);
+			// Esegue la wave a gruppi di `concurrency` per non sovraccaricare.
+			for (let s = 0; s < wave.length; s += Math.max(1, concurrency)) {
+				if (signal?.aborted) {
+					break;
+				}
+				const slice = wave.slice(s, s + Math.max(1, concurrency));
+				await Promise.all(slice.map(i => runOne(i, w + 1)));
+			}
 		}
-	}
 	} finally {
 		setSpecWriteGuard(false);
 	}
@@ -523,13 +670,19 @@ Al termine fornisci un breve riepilogo.`;
 			onToolStart: c => reporter.log(`🔧 ${c.tool} ${JSON.stringify(c.args).slice(0, 160)}`),
 			onToolResult: r => reporter.log(`↳ ${r.slice(0, 200)}`)
 		}, signal);
-		reporter.setStatus(0, 'done');
 		ok = true;
 	} catch (err) {
 		reporter.setStatus(0, 'error');
 		reporter.log(`[errore] ${String(err)}`);
 	} finally {
 		setSpecWriteGuard(false);
+	}
+	// Verifica post-task (opt-in), fuori dal write-guard.
+	if (ok && !(await verifyTask(reporter, 'task', signal))) {
+		ok = false;
+		reporter.setStatus(0, 'error');
+	} else if (ok) {
+		reporter.setStatus(0, 'done');
 	}
 	tasksMd = setTaskMark(await readIfExists(tasksUri) || tasksMd, lineIdx, ok ? 'x' : ' ');
 	await vscode.workspace.fs.writeFile(tasksUri, ENC.encode(tasksMd));

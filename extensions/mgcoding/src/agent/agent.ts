@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 import { ProviderRegistry } from '../llm/registry';
 import { ChatMessage, LLMProvider } from '../llm/types';
 import { buildSteeringContext } from '../steering/steering';
+import { PromptComposition } from './promptComposer';
 
 const BASE_SYSTEM = `Sei MGCoding, un assistente di sviluppo agentico integrato nell'IDE, spec-driven.
 
@@ -94,6 +95,20 @@ function isSmallLocalModel(): boolean {
 		return parseFloat(m[1]) <= 8;
 	}
 	return /mini|tiny|small/.test(model);
+}
+
+/**
+ * Composizione del prompt (variante + tool esposti) decisa dall'Agent_Loop in base al
+ * Context_Budget effettivo del modello attivo (Req. 7.1, 7.4). Quando impostata ha la
+ * precedenza sulla vecchia euristica basata sul nome del modello; quando assente (chiamate
+ * fuori dal loop agentico, es. generazione spec) si ripiega su `isSmallLocalModel()` per
+ * piena retrocompatibilità.
+ */
+let activeComposition: PromptComposition | undefined;
+
+/** Imposta (o azzera passando undefined) la composizione del prompt per il run corrente. */
+export function setActiveComposition(composition: PromptComposition | undefined): void {
+	activeComposition = composition;
 }
 
 const SKIP_DIRS = new Set(['node_modules', '.git', 'out', 'out-build', 'out-vscode', '.build', 'dist', '.vscode-test']);
@@ -211,7 +226,10 @@ async function projectFlavorInfo(): Promise<string> {
 
 export async function buildSystemPrompt(extra?: string, requestHint?: string): Promise<string> {
 	const [project, steering, active, flavor] = await Promise.all([buildProjectContext(), buildSteeringContext(requestHint), buildActiveContext(), projectFlavorInfo()]);
-	const base = isSmallLocalModel() ? BASE_SYSTEM_COMPACT : BASE_SYSTEM;
+	// Variante del system prompt: se l'Agent_Loop ha calcolato una composizione basata sul
+	// Context_Budget effettivo la si usa (Req. 7.1, 7.4); altrimenti ripiego sul nome del modello.
+	const useCompact = activeComposition ? activeComposition.variant === 'compact' : isSmallLocalModel();
+	const base = useCompact ? BASE_SYSTEM_COMPACT : BASE_SYSTEM;
 	return [base, environmentInfo(), flavor, project, steering, active, extra].filter(Boolean).join('\n\n');
 }
 

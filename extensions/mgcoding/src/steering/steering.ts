@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
-import { resolveFeatureDirs } from '../util/paths';
+import { resolveFeatureDirs } from '../util/featurePaths';
 
 type Inclusion = 'always' | 'fileMatch' | 'manual' | 'auto';
 
