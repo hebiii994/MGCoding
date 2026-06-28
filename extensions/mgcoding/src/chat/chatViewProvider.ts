@@ -29,6 +29,10 @@ import { execFile } from 'child_process';
 interface ProviderOption {
 	id: string;
 	label: string;
+	/** Famiglia/servizio per il raggruppamento nel menù (es. "Ollama", "Google Gemini", "GLM (Z.ai)"). */
+	family: string;
+	/** Nome breve del modello mostrato nel sottomenù della famiglia. */
+	model: string;
 	/** Solo Ollama: il modello supporta il tool-use nativo. */
 	tools?: boolean;
 }
@@ -456,7 +460,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		const openaiModel = c.get<string>('openai.model', 'local-model');
 		const provider = c.get<string>('provider', 'ollama');
 
-		const options: ProviderOption[] = [{ id: 'claude', label: `Claude (API) · ${claudeModel}` }];
+		const options: ProviderOption[] = [{ id: 'claude', label: `Claude (API) · ${claudeModel}`, family: 'Claude', model: claudeModel }];
 
 		// Ollama: solo i modelli REALMENTE installati sulla macchina dell'utente.
 		// (Se il provider attivo è Ollama, mostra comunque il modello selezionato.)
@@ -468,7 +472,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 		// Rileva quali modelli Ollama supportano il tool-use nativo (cache lato provider).
 		const toolCaps = await Promise.all(ollamaList.map(m => this.registry.ollamaModelSupportsTools(m).catch(() => false)));
 		ollamaList.forEach((m, i) => {
-			options.push({ id: `ollama:${m}`, label: `Ollama · ${m}`, tools: toolCaps[i] });
+			options.push({ id: `ollama:${m}`, label: `Ollama · ${m}`, family: 'Ollama', model: m, tools: toolCaps[i] });
 		});
 
 		// OpenAI-compatibile: modelli esposti dall'endpoint configurato (Gemini/ChatGPT/…).
@@ -479,13 +483,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			oaiList.unshift(openaiModel);
 		}
 		for (const m of oaiList) {
-			options.push({ id: `openai:${m}`, label: `${oaiLabel} · ${m}` });
+			options.push({ id: `openai:${m}`, label: `${oaiLabel} · ${m}`, family: oaiLabel, model: m });
 		}
 
 		// GLM (Zhipu/Z.ai): modello singolo da configurazione (come Claude). Mostrato sempre per
 		// scopribilità; se manca la chiave, la selezione la richiede (vedi handler setProvider).
 		const glmModel = c.get<string>('glm.model', 'glm-4.6');
-		options.push({ id: 'glm', label: `GLM (Z.ai) · ${glmModel}` });
+		options.push({ id: 'glm', label: `GLM (Z.ai) · ${glmModel}`, family: 'GLM (Z.ai)', model: glmModel });
 
 		const current = provider === 'claude' ? 'claude'
 			: provider === 'glm' ? 'glm'
@@ -2198,6 +2202,17 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 	.model-item:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.18)); }
 	.model-item.sel { background: color-mix(in srgb, var(--mg-accent) 22%, transparent); }
 	.model-item .tool-badge { margin-left: 6px; opacity: 0.9; font-size: 11px; }
+	.model-group { display: flex; align-items: center; gap: 6px; padding: 6px 9px; border-radius: 6px; font-size: 12px; cursor: pointer; white-space: nowrap; overflow: hidden; }
+	.model-group:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.18)); }
+	.model-group.sel { background: color-mix(in srgb, var(--mg-accent) 22%, transparent); }
+	.model-group.active .gname { font-weight: 600; }
+	.model-group .gcaret { flex: 0 0 auto; font-size: 10px; opacity: 0.7; transition: transform .12s; display: inline-block; width: 10px; }
+	.model-group.expanded .gcaret { transform: rotate(90deg); }
+	.model-group .gname { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
+	.model-group .gcount { flex: 0 0 auto; opacity: 0.6; font-size: 10px; }
+	.model-sub { display: none; }
+	.model-sub.open { display: block; }
+	.model-sub .model-item { padding-left: 24px; }
 	.menu-sep { height: 1px; margin: 4px 2px; background: var(--vscode-dropdown-border, var(--vscode-panel-border)); opacity: 0.6; }
 	.menu-toggle { padding: 6px 9px; border-radius: 6px; font-size: 11px; cursor: pointer; opacity: 0.9; white-space: normal; }
 	.menu-toggle:hover { background: var(--vscode-list-hoverBackground, rgba(127,127,127,0.18)); }
@@ -2760,24 +2775,68 @@ Esempio - utente: "un gattino killer" -> {"prompt":"a menacing feral kitten with
 			modelMenu.appendChild(row);
 			var sep = document.createElement('div'); sep.className = 'menu-sep'; modelMenu.appendChild(sep);
 		}
-		for (var i = 0; i < options.length; i++) {
-			(function (o) {
-				var it = document.createElement('div');
-				it.className = 'model-item' + (o.id === current ? ' sel' : '');
-				it.textContent = o.label;
-				if (o.tools) {
-					var badge = document.createElement('span');
-					badge.className = 'tool-badge'; badge.textContent = '\\uD83D\\uDD27';
-					badge.title = 'Questo modello supporta il tool-use nativo';
-					it.appendChild(badge);
+		// Raggruppa le opzioni per FAMIGLIA (Ollama, Google Gemini, GLM, …) in un menù a due
+		// livelli: clic sulla famiglia espande/collassa i suoi modelli; le famiglie con un solo
+		// modello selezionano direttamente. La famiglia del modello attivo parte espansa.
+		var families = [];
+		var byFamily = {};
+		for (var gi = 0; gi < options.length; gi++) {
+			var go = options[gi];
+			var fam = go.family || go.label;
+			if (!byFamily[fam]) { byFamily[fam] = []; families.push(fam); }
+			byFamily[fam].push(go);
+		}
+		var curFamily = curOpt ? (curOpt.family || curOpt.label) : null;
+		if (curOpt) { modelCur.textContent = curOpt.label; }
+		for (var fi = 0; fi < families.length; fi++) {
+			(function (fam) {
+				var items = byFamily[fam];
+				var single = items.length === 1;
+				var curHere = fam === curFamily;
+				var header = document.createElement('div');
+				header.className = 'model-group' + (curHere ? ' active' : '') + (single && curHere ? ' sel' : '');
+				var caretHtml = single ? '<span class="gcaret"></span>' : '<span class="gcaret">\\u25B8</span>';
+				var sideHtml = single ? ('<span class="gcount">' + items[0].model + '</span>') : ('<span class="gcount">' + items.length + '</span>');
+				header.innerHTML = caretHtml + '<span class="gname">' + fam + '</span>' + sideHtml;
+				modelMenu.appendChild(header);
+				if (single) {
+					header.addEventListener('click', function (e) {
+						e.stopPropagation();
+						modelMenu.classList.remove('open');
+						vscode.postMessage({ type: 'setProvider', id: items[0].id });
+					});
+					return;
 				}
-				it.addEventListener('click', function () {
-					modelMenu.classList.remove('open');
-					vscode.postMessage({ type: 'setProvider', id: o.id });
+				var sub = document.createElement('div');
+				sub.className = 'model-sub' + (curHere ? ' open' : '');
+				if (curHere) { header.classList.add('expanded'); }
+				for (var j = 0; j < items.length; j++) {
+					(function (o) {
+						var it = document.createElement('div');
+						it.className = 'model-item' + (o.id === current ? ' sel' : '');
+						it.textContent = o.model;
+						if (o.tools) {
+							var badge = document.createElement('span');
+							badge.className = 'tool-badge'; badge.textContent = '\\uD83D\\uDD27';
+							badge.title = 'Questo modello supporta il tool-use nativo';
+							it.appendChild(badge);
+						}
+						it.addEventListener('click', function (e) {
+							e.stopPropagation();
+							modelMenu.classList.remove('open');
+							vscode.postMessage({ type: 'setProvider', id: o.id });
+						});
+						sub.appendChild(it);
+					})(items[j]);
+				}
+				header.addEventListener('click', function (e) {
+					e.stopPropagation();
+					var willOpen = !sub.classList.contains('open');
+					sub.classList.toggle('open');
+					if (willOpen) { header.classList.add('expanded'); } else { header.classList.remove('expanded'); }
 				});
-				modelMenu.appendChild(it);
-				if (o.id === current) { modelCur.textContent = o.label; }
-			})(options[i]);
+				modelMenu.appendChild(sub);
+			})(families[fi]);
 		}
 		// In fondo: gestione modelli Ollama (scarica/cancella).
 		var sep2 = document.createElement('div'); sep2.className = 'menu-sep'; modelMenu.appendChild(sep2);
