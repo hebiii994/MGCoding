@@ -228,6 +228,10 @@
 				"title": "MGCoding: Imposta API key GLM (Zhipu/Z.ai)"
 			},
 			{
+				"command": "mgcoding.selfHeal",
+				"title": "MGCoding: Diagnostica e correggi"
+			},
+			{
 				"command": "mgcoding.newSpec",
 				"title": "Nuova Spec",
 				"icon": "$(add)"
@@ -1206,6 +1210,39 @@
 					"type": "string",
 					"default": "https://api.z.ai/api/anthropic",
 					"description": "Endpoint Anthropic-compatibile (Messages API) di GLM (Zhipu/Z.ai). Usato quando 'glm.useAnthropicEndpoint' è attivo."
+				},
+				"mgcoding.selfHealing.enabled": {
+					"type": "boolean",
+					"default": false,
+					"description": "Abilita l'autodiagnostica assistita (Self_Healing): raccoglie gli errori del progetto, li evidenzia e propone soluzioni da approvare. Disattivato = funzionalità inerte."
+				},
+				"mgcoding.selfHealing.maxAttempts": {
+					"type": "number",
+					"default": 2,
+					"description": "Numero massimo di tentativi di correzione automatica per ogni problema prima di fermarsi e chiedere all'utente."
+				},
+				"mgcoding.selfHealing.verifyCommand": {
+					"type": "string",
+					"default": "",
+					"description": "Comando di verifica (typecheck/build/test) usato dal Self_Healing per misurare errori e regressioni. Vuoto = rilevamento automatico dagli script di package.json."
+				},
+				"mgcoding.selfHealing.protectedGlobs": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"default": [
+						"**/*.test.*",
+						"**/*.spec.*",
+						"**/test/**",
+						"**/tests/**",
+						"**/__tests__/**",
+						"**/vitest.config.*",
+						"**/jest.config.*",
+						"**/tsconfig*.json",
+						"**/.mocharc*"
+					],
+					"description": "Percorsi protetti durante il Self_Healing: file di test e configurazioni di build/test che una proposta di fix non può modificare (anti-imbroglio)."
 				},
 				"mgcoding.diffApproval": {
 					"type": "boolean",
