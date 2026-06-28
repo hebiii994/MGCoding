@@ -274,6 +274,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 							if (!(await this.registry.hasOpenAIKey())) {
 								await this.registry.setOpenAIKey();
 							}
+						} else if (msg.id === 'glm') {
+							await cfg.update('provider', 'glm', vscode.ConfigurationTarget.Global);
+							// Se manca la chiave GLM, chiedila subito (come per l'endpoint OpenAI).
+							if (!(await this.registry.hasGlmKey())) {
+								await this.registry.setGlmKey();
+							}
 						} else {
 							await cfg.update('provider', 'claude', vscode.ConfigurationTarget.Global);
 						}
@@ -476,7 +482,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			options.push({ id: `openai:${m}`, label: `${oaiLabel} · ${m}` });
 		}
 
-		const current = provider === 'claude' ? 'claude' : provider === 'openai' ? `openai:${openaiModel}` : `ollama:${ollamaModel}`;
+		// GLM (Zhipu/Z.ai): modello singolo da configurazione (come Claude). Mostrato sempre per
+		// scopribilità; se manca la chiave, la selezione la richiede (vedi handler setProvider).
+		const glmModel = c.get<string>('glm.model', 'glm-4.6');
+		options.push({ id: 'glm', label: `GLM (Z.ai) · ${glmModel}` });
+
+		const current = provider === 'claude' ? 'claude'
+			: provider === 'glm' ? 'glm'
+				: provider === 'openai' ? `openai:${openaiModel}`
+					: `ollama:${ollamaModel}`;
 		const chars = this.active().messages.reduce((n, m) => n + m.content.length, 0);
 		return {
 			current,
