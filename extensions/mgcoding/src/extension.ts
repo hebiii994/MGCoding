@@ -360,6 +360,19 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('mgcoding.setApiKey', () => registry.setApiKey()),
 		vscode.commands.registerCommand('mgcoding.setOpenAIKey', () => registry.setOpenAIKey()),
 		vscode.commands.registerCommand('mgcoding.setGlmKey', () => registry.setGlmKey()),
+		// Self_Healing (autodiagnostica): i nuclei (Wave 0) sono pronti, il flusso interattivo
+		// (guscio) è ancora in sviluppo. Stub onesto: evita un comando "non trovato" e guida
+		// l'utente alle impostazioni. Verrà collegato al SelfHealingController nella Wave 2/3.
+		vscode.commands.registerCommand('mgcoding.selfHeal', async () => {
+			const enabled = vscode.workspace.getConfiguration('mgcoding').get<boolean>('selfHealing.enabled', false);
+			const msg = enabled
+				? 'Autodiagnostica (Self_Healing): nuclei completati (Wave 0). Il flusso interattivo — raccolta errori → proposta → applicazione verificata e reversibile — arriverà in una prossima versione.'
+				: 'Autodiagnostica (Self_Healing) non attiva: i motori sono pronti ma il flusso interattivo è ancora in sviluppo. Attiva "mgcoding.selfHealing.enabled" per provarlo quando sarà disponibile.';
+			const open = await vscode.window.showInformationMessage(msg, 'Apri impostazioni');
+			if (open) {
+				await vscode.commands.executeCommand('workbench.action.openSettings', 'mgcoding.selfHealing');
+			}
+		}),
 		vscode.commands.registerCommand('mgcoding.testMicrophone', () => chat.testMicrophone()),
 		vscode.commands.registerCommand('mgcoding.switchProfile', () => chat.switchProfile()),
 		vscode.commands.registerCommand('mgcoding.editProfile', () => chat.editProfile()),
