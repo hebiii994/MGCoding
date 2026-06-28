@@ -161,13 +161,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	constructor(
 		private readonly extensionUri: vscode.Uri,
 		private readonly registry: ProviderRegistry,
-		private readonly memento: vscode.Memento
+		// `memento` è GLOBALE (profili, offerta-spec: validi per tutto l'utente).
+		private readonly memento: vscode.Memento,
+		// `workspaceMemento` è PER-CARTELLA (le chat sono salvate per progetto: aprendo un'altra
+		// cartella si vedono solo le sue sessioni). Cade su `memento` se non fornito (retrocompat).
+		private readonly workspaceMemento: vscode.Memento = memento
 	) {
 		this.whisper = new WhisperEngine(vscode.Uri.joinPath(extensionUri, 'bin').fsPath);
 		this.profiles = new ProfileStore(this.memento);
 		void this.ensureDefaultProfile();
-		this.sessions = this.memento.get<Session[]>('mgcoding.sessions', []);
-		this.activeId = this.memento.get<string>('mgcoding.activeSession', '');
+		this.sessions = this.workspaceMemento.get<Session[]>('mgcoding.sessions', []);
+		this.activeId = this.workspaceMemento.get<string>('mgcoding.activeSession', '');
 		this.specOfferDismissedGlobal = this.memento.get<boolean>('mgcoding.specOfferDismissed', false);
 		if (this.sessions.length === 0) {
 			this.sessions.push(this.makeSession());
@@ -214,8 +218,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 	}
 
 	private async save(): Promise<void> {
-		await this.memento.update('mgcoding.sessions', this.sessions.slice(-30));
-		await this.memento.update('mgcoding.activeSession', this.activeId);
+		// Le sessioni vivono nel memento PER-CARTELLA: ogni progetto conserva le proprie chat.
+		await this.workspaceMemento.update('mgcoding.sessions', this.sessions.slice(-30));
+		await this.workspaceMemento.update('mgcoding.activeSession', this.activeId);
 	}
 
 	resolveWebviewView(webviewView: vscode.WebviewView): void {

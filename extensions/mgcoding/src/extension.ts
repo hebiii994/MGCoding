@@ -84,10 +84,10 @@ export function activate(context: vscode.ExtensionContext): void {
 	// Autocomplete inline (ghost text)
 	registerAutocomplete(context);
 
-	// Chat (barra laterale secondaria, a destra)
-	// globalState (non workspaceState): la cronologia chat persiste tra i riavvii
-	// e indipendentemente dalla cartella aperta.
-	const chat = new ChatViewProvider(context.extensionUri, registry, context.globalState);
+	// Chat (barra laterale secondaria, a destra).
+	// memento GLOBALE per profili e offerta-spec; workspaceState PER-CARTELLA per le sessioni,
+	// così ogni progetto (folder) conserva le proprie chat e non vede quelle degli altri.
+	const chat = new ChatViewProvider(context.extensionUri, registry, context.globalState, context.workspaceState);
 	context.subscriptions.push(chat);
 	context.subscriptions.push(
 		vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, chat, {

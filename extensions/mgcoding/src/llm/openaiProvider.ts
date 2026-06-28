@@ -274,47 +274,52 @@ export class OpenAIProvider implements LLMProvider {
 
 		for await (const evt of this.postStream({ model: cfg.model, messages, tools }, params.signal)) {
 			const choice = evt.choices?.[0];
-			const delta = choice?.delta;
-			if (!delta) {
+			if (!choice) {
 				continue;
 			}
-			if (delta.content) {
-				if (!textStarted) {
-					yield { type: 'content_block_start', index: 0, content_block: { type: 'text' } };
-					textStarted = true;
+			const delta = choice.delta;
+			// `delta` può mancare nel chunk finale (solo finish_reason): NON saltare il chunk,
+			// altrimenti la chiusura del turno e il fallback sul reasoning non verrebbero gestiti.
+			if (delta) {
+				if (delta.content) {
+					if (!textStarted) {
+						yield { type: 'content_block_start', index: 0, content_block: { type: 'text' } };
+						textStarted = true;
+					}
+					anyContent = true;
+					yield { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: delta.content } };
 				}
-				anyContent = true;
-				yield { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: delta.content } };
-			}
-			const reasoningDelta = (delta as { reasoning_content?: unknown }).reasoning_content;
-			if (typeof reasoningDelta === 'string') {
-				reasoning += reasoningDelta;
-			}
-			if (Array.isArray(delta.tool_calls)) {
-				for (const tc of delta.tool_calls) {
-					const oi = tc.index ?? 0;
-					let aidx = opened.get(oi);
-					if (aidx === undefined) {
-						aidx = nextIdx++;
-						opened.set(oi, aidx);
-						const newId: string = tc.id || `call_${aidx}`;
-						openedId.set(oi, newId);
-						yield { type: 'content_block_start', index: aidx, content_block: { type: 'tool_use', id: newId, name: tc.function?.name || 'tool' } };
-						sawTool = true;
-					}
-					const id = openedId.get(oi);
-					// Gemini: memorizza la thought_signature per ri-allegarla nei turni successivi.
-					const sig = thoughtSignature(tc) ?? thoughtSignature(delta);
-					if (sig && id) {
-						this.toolSignatures.set(id, sig);
-					}
-					if (tc.function?.arguments) {
-						yield { type: 'content_block_delta', index: aidx, delta: { type: 'input_json_delta', partial_json: tc.function.arguments } };
+				const reasoningDelta = (delta as { reasoning_content?: unknown }).reasoning_content;
+				if (typeof reasoningDelta === 'string') {
+					reasoning += reasoningDelta;
+				}
+				if (Array.isArray(delta.tool_calls)) {
+					for (const tc of delta.tool_calls) {
+						const oi = tc.index ?? 0;
+						let aidx = opened.get(oi);
+						if (aidx === undefined) {
+							aidx = nextIdx++;
+							opened.set(oi, aidx);
+							const newId: string = tc.id || `call_${aidx}`;
+							openedId.set(oi, newId);
+							yield { type: 'content_block_start', index: aidx, content_block: { type: 'tool_use', id: newId, name: tc.function?.name || 'tool' } };
+							sawTool = true;
+						}
+						const id = openedId.get(oi);
+						// Gemini: memorizza la thought_signature per ri-allegarla nei turni successivi.
+						const sig = thoughtSignature(tc) ?? thoughtSignature(delta);
+						if (sig && id) {
+							this.toolSignatures.set(id, sig);
+						}
+						if (tc.function?.arguments) {
+							yield { type: 'content_block_delta', index: aidx, delta: { type: 'input_json_delta', partial_json: tc.function.arguments } };
+						}
 					}
 				}
 			}
-			if (choice?.finish_reason) {
-				// Fallback: nessun contenuto né tool, ma il modello ha "pensato" → mostra il reasoning.
+			if (choice.finish_reason) {
+				// Fallback: nessun contenuto né tool, ma il modello ha "pensato" → mostra il reasoning,
+				// così i modelli reasoning (es. glm-4.7-flash) non lasciano una risposta vuota.
 				if (!anyContent && !sawTool && reasoning.trim()) {
 					if (!textStarted) {
 						yield { type: 'content_block_start', index: 0, content_block: { type: 'text' } };

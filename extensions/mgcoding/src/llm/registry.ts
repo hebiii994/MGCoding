@@ -18,6 +18,20 @@ const GLM_DEFAULT_OPENAI_ENDPOINT = 'https://api.z.ai/api/paas/v4';
 /** Endpoint Anthropic-compat (Messages API) di GLM di default (Z.ai). */
 const GLM_DEFAULT_ANTHROPIC_ENDPOINT = 'https://api.z.ai/api/anthropic';
 
+/**
+ * Modelli GLM noti uniti a quelli scoperti via `/models`. L'endpoint `/models` di Z.ai NON
+ * elenca alcuni modelli (in particolare i Flash gratuiti): li aggiungiamo qui così restano
+ * selezionabili dal menù. L'ordine mette davanti i mainline, poi i gratuiti.
+ */
+const KNOWN_GLM_MODELS: readonly string[] = [
+	'glm-4.6',
+	'glm-4.5',
+	'glm-4.5-air',
+	'glm-4.7-flash',
+	'glm-4.5-flash',
+	'glm-4-flash'
+];
+
 /** Preset di servizi OpenAI-compatibili pronti all'uso. */
 interface OpenAIPreset {
 	id: string;
@@ -534,12 +548,22 @@ export class ProviderRegistry implements vscode.Disposable, ILLMRouter {
 		return this.openai.listModels();
 	}
 
-	/** Elenca i modelli GLM (Zhipu/Z.ai) dall'endpoint OpenAI-compat; `[]` se non disponibile. */
+	/**
+	 * Elenca i modelli GLM (Zhipu/Z.ai): unione di quelli scoperti via `/models` e di quelli noti
+	 * (i Flash gratuiti non sono elencati dall'API). `[]` se manca la chiave.
+	 */
 	async listGlmModels(): Promise<string[]> {
 		if (!(await this.hasGlmKey())) {
 			return [];
 		}
-		return this.glm.listModels().catch(() => []);
+		const api = await this.glm.listModels().catch(() => []);
+		const merged = [...api];
+		for (const m of KNOWN_GLM_MODELS) {
+			if (!merged.includes(m)) {
+				merged.push(m);
+			}
+		}
+		return merged;
 	}
 
 	/** True se esiste una API key salvata per l'endpoint OpenAI-compatibile attuale. */
