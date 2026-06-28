@@ -135,12 +135,16 @@ export class OpenAIProvider implements LLMProvider {
 		const reader = res.body.getReader();
 		const decoder = new TextDecoder();
 		let buffer = '';
+		let raw = '';
+		let sawEvent = false;
 		while (true) {
 			const { done, value } = await reader.read();
 			if (done) {
 				break;
 			}
-			buffer += decoder.decode(value, { stream: true });
+			const chunk = decoder.decode(value, { stream: true });
+			raw += chunk;
+			buffer += chunk;
 			let nl: number;
 			while ((nl = buffer.indexOf('\n')) >= 0) {
 				const line = buffer.slice(0, nl).trim();
@@ -153,9 +157,30 @@ export class OpenAIProvider implements LLMProvider {
 					continue;
 				}
 				try {
-					yield JSON.parse(data);
+					const parsed = JSON.parse(data);
+					sawEvent = true;
+					yield parsed;
 				} catch {
 					// frammento non-JSON
+				}
+			}
+		}
+		// Fallback non-streaming: alcuni endpoint OpenAI-compat (es. certe configurazioni GLM)
+		// ignorano `stream:true` e restituiscono un singolo JSON invece di eventi SSE. In quel
+		// caso non è arrivato alcun `data:` e la risposta resterebbe VUOTA. Interpreta allora
+		// l'intero corpo come una chat completion non-stream e normalizza `message` → `delta`
+		// (incluse le tool_calls), così i consumatori la vedono come un'unica emissione.
+		if (!sawEvent) {
+			const trimmed = raw.trim();
+			if (trimmed) {
+				try {
+					const obj = JSON.parse(trimmed) as { choices?: { message?: { content?: string; reasoning_content?: string; tool_calls?: unknown }; finish_reason?: string }[] };
+					const choice = obj.choices?.[0];
+					if (choice?.message) {
+						yield { choices: [{ delta: { content: choice.message.content ?? '', reasoning_content: choice.message.reasoning_content, tool_calls: choice.message.tool_calls }, finish_reason: choice.finish_reason ?? 'stop' }] };
+					}
+				} catch {
+					// corpo non-JSON: nulla da emettere
 				}
 			}
 		}
@@ -236,6 +261,11 @@ export class OpenAIProvider implements LLMProvider {
 
 		let textStarted = false;
 		let sawTool = false;
+		// Modelli "reasoning" (es. GLM-4.6) possono restituire il pensiero in `reasoning_content`
+		// e lasciare `content` vuoto: si accumula il reasoning e lo si mostra SOLO se il turno
+		// non ha prodotto né testo né tool, per evitare una risposta vuota.
+		let anyContent = false;
+		let reasoning = '';
 		// indice openai tool_call -> indice "anthropic" (>=1) e se è stato aperto
 		const opened = new Map<number, number>();
 		// indice openai tool_call -> id assegnato al blocco (per indicizzare la firma)
@@ -253,7 +283,12 @@ export class OpenAIProvider implements LLMProvider {
 					yield { type: 'content_block_start', index: 0, content_block: { type: 'text' } };
 					textStarted = true;
 				}
+				anyContent = true;
 				yield { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: delta.content } };
+			}
+			const reasoningDelta = (delta as { reasoning_content?: unknown }).reasoning_content;
+			if (typeof reasoningDelta === 'string') {
+				reasoning += reasoningDelta;
 			}
 			if (Array.isArray(delta.tool_calls)) {
 				for (const tc of delta.tool_calls) {
@@ -279,6 +314,15 @@ export class OpenAIProvider implements LLMProvider {
 				}
 			}
 			if (choice?.finish_reason) {
+				// Fallback: nessun contenuto né tool, ma il modello ha "pensato" → mostra il reasoning.
+				if (!anyContent && !sawTool && reasoning.trim()) {
+					if (!textStarted) {
+						yield { type: 'content_block_start', index: 0, content_block: { type: 'text' } };
+						textStarted = true;
+					}
+					anyContent = true;
+					yield { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: reasoning } };
+				}
 				yield { type: 'message_delta', delta: { stop_reason: sawTool ? 'tool_use' : 'end_turn' } };
 			}
 		}

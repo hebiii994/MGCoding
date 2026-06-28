@@ -278,9 +278,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 							if (!(await this.registry.hasOpenAIKey())) {
 								await this.registry.setOpenAIKey();
 							}
-						} else if (msg.id === 'glm') {
+						} else if (msg.id.startsWith('glm:')) {
+							await cfg.update('glm.model', msg.id.slice('glm:'.length), vscode.ConfigurationTarget.Global);
 							await cfg.update('provider', 'glm', vscode.ConfigurationTarget.Global);
 							// Se manca la chiave GLM, chiedila subito (come per l'endpoint OpenAI).
+							if (!(await this.registry.hasGlmKey())) {
+								await this.registry.setGlmKey();
+							}
+						} else if (msg.id === 'glm') {
+							await cfg.update('provider', 'glm', vscode.ConfigurationTarget.Global);
 							if (!(await this.registry.hasGlmKey())) {
 								await this.registry.setGlmKey();
 							}
@@ -486,13 +492,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			options.push({ id: `openai:${m}`, label: `${oaiLabel} · ${m}`, family: oaiLabel, model: m });
 		}
 
-		// GLM (Zhipu/Z.ai): modello singolo da configurazione (come Claude). Mostrato sempre per
-		// scopribilità; se manca la chiave, la selezione la richiede (vedi handler setProvider).
+		// GLM (Zhipu/Z.ai): elenca i modelli dall'endpoint OpenAI-compat (come per OpenAI). Se
+		// l'elenco non è disponibile (nessuna chiave / endpoint giù) mostra almeno quello configurato.
 		const glmModel = c.get<string>('glm.model', 'glm-4.6');
-		options.push({ id: 'glm', label: `GLM (Z.ai) · ${glmModel}`, family: 'GLM (Z.ai)', model: glmModel });
+		const glm = await this.registry.listGlmModels();
+		const glmList = [...glm];
+		if (glmModel && !glmList.includes(glmModel)) {
+			glmList.unshift(glmModel);
+		}
+		for (const m of glmList) {
+			options.push({ id: `glm:${m}`, label: `GLM (Z.ai) · ${m}`, family: 'GLM (Z.ai)', model: m });
+		}
 
 		const current = provider === 'claude' ? 'claude'
-			: provider === 'glm' ? 'glm'
+			: provider === 'glm' ? `glm:${glmModel}`
 				: provider === 'openai' ? `openai:${openaiModel}`
 					: `ollama:${ollamaModel}`;
 		const chars = this.active().messages.reduce((n, m) => n + m.content.length, 0);

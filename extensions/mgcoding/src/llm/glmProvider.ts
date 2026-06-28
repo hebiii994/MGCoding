@@ -85,6 +85,15 @@ export class GLMProvider implements LLMProvider {
 		return this.getConfig().model;
 	}
 
+	/**
+	 * Elenca i modelli GLM esposti dall'endpoint OpenAI-compatibile (per popolare il menù
+	 * modelli). Il percorso Anthropic-compat non ha un `/models` standard: in quel caso si
+	 * ricade sul solo modello configurato. Best-effort: `[]` se non disponibile.
+	 */
+	async listModels(): Promise<string[]> {
+		return this.openaiPath.listModels();
+	}
+
 	stream(req: LLMRequest): AsyncIterable<string> {
 		return this.active().stream(req);
 	}

@@ -534,6 +534,14 @@ export class ProviderRegistry implements vscode.Disposable, ILLMRouter {
 		return this.openai.listModels();
 	}
 
+	/** Elenca i modelli GLM (Zhipu/Z.ai) dall'endpoint OpenAI-compat; `[]` se non disponibile. */
+	async listGlmModels(): Promise<string[]> {
+		if (!(await this.hasGlmKey())) {
+			return [];
+		}
+		return this.glm.listModels().catch(() => []);
+	}
+
 	/** True se esiste una API key salvata per l'endpoint OpenAI-compatibile attuale. */
 	async hasOpenAIKey(): Promise<boolean> {
 		const endpoint = vscode.workspace.getConfiguration('mgcoding').get<string>('openai.endpoint', 'http://localhost:1234/v1');
