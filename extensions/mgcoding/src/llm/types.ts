@@ -135,6 +135,34 @@ export class LLMError extends Error {
 }
 
 /**
+ * Estrae un dettaglio LEGGIBILE e azionabile dalla causa di un'eccezione di rete (tipicamente
+ * un `fetch` che lancia prima di ricevere risposta). Node/undici annida la causa reale in
+ * `err.cause` con un `code` (es. `ENOTFOUND`, `ECONNREFUSED`, `UND_ERR_CONNECT_TIMEOUT`,
+ * `CERT_HAS_EXPIRED`, `SELF_SIGNED_CERT_IN_CHAIN`). Restituisce stringa vuota se non c'è nulla
+ * di utile. Serve a non mascherare la causa vera dietro un generico "irraggiungibile" (Req. 9.1).
+ */
+export function networkErrorDetail(err: unknown): string {
+	const seen = new Set<unknown>();
+	let cur: unknown = err;
+	// Scende lungo la catena di `cause` cercando un `code` o un messaggio significativo.
+	while (cur && typeof cur === 'object' && !seen.has(cur)) {
+		seen.add(cur);
+		const code = (cur as { code?: unknown }).code;
+		if (typeof code === 'string' && code) {
+			return code;
+		}
+		const next = (cur as { cause?: unknown }).cause;
+		if (next && next !== cur) {
+			cur = next;
+			continue;
+		}
+		const msg = (cur as { message?: unknown }).message;
+		return typeof msg === 'string' ? msg : '';
+	}
+	return '';
+}
+
+/**
  * Classifica la risposta HTTP fallita di un provider cloud in un {@link LLMError} tipizzato
  * (Req. 9.2, 9.3, 9.4). Distingue la chiave mancante da quella non valida in base alla
  * presenza effettiva di una chiave:

@@ -3,7 +3,7 @@
  *  Endpoint /chat/completions con streaming SSE e tool-use nativo (function calling).
  *--------------------------------------------------------------------------------------------*/
 
-import { AgentStreamParams, AnthropicMessage, AnthropicStreamEvent, classifyHttpError, LLMError, LLMProvider, LLMRequest, ToolResultPart, toolResultText } from './types';
+import { AgentStreamParams, AnthropicMessage, AnthropicStreamEvent, classifyHttpError, LLMError, LLMProvider, LLMRequest, networkErrorDetail, ToolResultPart, toolResultText } from './types';
 
 export interface OpenAIConfig {
 	endpoint: string;
@@ -123,7 +123,8 @@ export class OpenAIProvider implements LLMProvider {
 				signal
 			});
 		} catch (err) {
-			throw new LLMError(`Impossibile contattare l'endpoint OpenAI-compatibile (${this.base()}).`, err, { kind: 'unreachable', providerId: this.id });
+			const detail = networkErrorDetail(err);
+			throw new LLMError(`Impossibile contattare l'endpoint OpenAI-compatibile (${this.base()})${detail ? ` — causa: ${detail}` : ''}.`, err, { kind: 'unreachable', providerId: this.id });
 		}
 		if (!res.ok || !res.body) {
 			const text = await res.text().catch(() => '');
