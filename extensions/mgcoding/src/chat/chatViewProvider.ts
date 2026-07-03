@@ -760,8 +760,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider, vscode.Disp
 			.map(m => `${m.role === 'user' ? 'Utente' : 'Assistente'}: ${m.content}`)
 			.join('\n')
 			.slice(0, 6000);
-		const sys = `Estrai SOLO le preferenze PERSONALI e TRASVERSALI dell'utente, valide in QUALSIASI progetto (lingua preferita, come si chiama, come vuole le risposte, linguaggi/framework/stile preferiti in generale, sistema operativo, convenzioni ricorrenti).
-NON salvare MAI dettagli legati al progetto/workspace corrente: niente nomi di progetto o repository, niente descrizioni di cosa sta costruendo ora, niente nomi di file/funzioni/feature specifiche. Quelli NON sono preferenze.
+		const sys = `Estrai SOLO le preferenze PERSONALI e TRASVERSALI dell'utente, valide in QUALSIASI progetto (es. lingua preferita, come si chiama, come vuole le risposte, linguaggi/framework/stile preferiti in generale, sistema operativo, convenzioni di formattazione ricorrenti).
+NON salvare MAI dettagli legati al progetto/workspace corrente: niente nomi di progetto, niente nomi di repository, niente descrizioni del software specifico che sta costruendo ora, niente nomi di file/funzioni/classi/feature specifiche del codice. Quelli NON sono preferenze e non devono essere memorizzati nel profilo.
 Unisci con le preferenze già note evitando duplicati e contraddizioni (tieni la più recente). Rispondi con un elenco puntato conciso in italiano, una preferenza per riga con "- ". Se non c'è nulla di nuovo, ripeti l'elenco esistente invariato.`;
 		const input = `Preferenze già note:\n${profile.facts || '(nessuna)'}\n\nConversazione recente:\n${recent}`;
 		try {
